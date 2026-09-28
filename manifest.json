@@ -1,0 +1,24 @@
+{
+  "id": "./index.html",
+  "short_name": "เวร IPD",
+  "name": "ตารางเวรนักรังสีการแพทย์ (IPD)",
+  "description": "ตารางเวรและบันทึกการลา นักรังสีการแพทย์หน่วยงานผู้ป่วยใน (IPD) — ข้อมูลกลางบน Google Sheets ใช้ร่วมกันได้ทุกเครื่อง",
+  "lang": "th",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "type": "image/png",
+      "sizes": "192x192"
+    },
+    {
+      "src": "icon-512.png",
+      "type": "image/png",
+      "sizes": "512x512"
+    }
+  ],
+  "start_url": "./index.html",
+  "scope": "./",
+  "background_color": "#2563eb",
+  "theme_color": "#2563eb",
+  "display": "standalone"
+}
