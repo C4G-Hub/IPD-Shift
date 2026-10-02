@@ -1,27 +1,28 @@
 /* =====================================================================
- * sw.js — service worker for "เวร IPD" v2 (SPEC §7)
+ * sw.js — service worker for "เวร IPD" v2 (SPEC §7, R2 §3.5)
  *
- *  - App shell: network-first (4 s timeout) so deployed updates reach users,
- *    falling back to the cached copy when offline.
- *  - CDN assets (Tailwind, html2canvas, Google Fonts): precached at install
- *    (the page loads them before this worker controls it), then network-first
- *    with the same timeout, so the app stays styled offline — even on the
- *    very first offline launch — and a CDN hiccup never sticks.
- *  - Everything else (the Apps Script API on script.google.com / *.googleusercontent.com)
- *    is NOT intercepted — plain network passthrough. Neither is any non-GET request.
+ *  - App shell (same origin): stale-while-revalidate — answered from the cache at once (fast start, works
+ *    offline) while the cached copy is refreshed in the background. A release reaches users through
+ *    VERSION: the new sw.js precaches the new shell and takes over, and the page offers a reload.
+ *  - CDN assets (html2canvas, Google Fonts): precached at install, then network-first (4 s timeout) with
+ *    the cache as fallback, so the app stays usable offline and a CDN hiccup never sticks.
+ *  - Not intercepted (plain network): the Apps Script API (script.google.com / *.googleusercontent.com),
+ *    every non-GET request, and every URL with a `diag` query parameter (the connection check must reach
+ *    the real network).
  *  - Bump VERSION on every release: the old shell cache is deleted on activate.
  *    Cache Storage is shared by every app on the origin (all GitHub Pages sites of
  *    an account), so only this app's own "ipd-" caches (plus the v1 app's cache,
  *    by exact name) are ever deleted.
  * ===================================================================== */
-const VERSION = 'ipd-shift-v2.1.0';
+const VERSION = 'ipd-shift-v2.2.0';
 const SHELL = VERSION + '-shell';
-const RUNTIME = 'ipd-runtime-v2';
+const RUNTIME = 'ipd-runtime-v3';      // v3: drops the Tailwind CDN script cached by v2.1
 const OWN_CACHE_PREFIX = 'ipd-';
 const APP_SHELL = [
   './',
   './index.html',
   './config.js',
+  './css/tailwind.css',
   './js/utils.js',
   './js/api.js',
   './js/app.js',
@@ -29,13 +30,12 @@ const APP_SHELL = [
   './icon-192.png',
   './icon-512.png'
 ];
-/** Every URL index.html loads from a CDN (tests/sw.test.js checks that the lists match). */
+/** Every URL the page loads from a CDN (tests/sw.test.js checks index.html and js/app.js against this list). */
 const CDN_ASSETS = [
-  'https://cdn.tailwindcss.com',
   'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js',
   'https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap'
 ];
-const CDN_HOSTS = ['cdn.tailwindcss.com', 'cdnjs.cloudflare.com', 'fonts.googleapis.com', 'fonts.gstatic.com'];
+const CDN_HOSTS = ['cdnjs.cloudflare.com', 'fonts.googleapis.com', 'fonts.gstatic.com'];
 const NETWORK_TIMEOUT_MS = 4000;
 const PRECACHE_TIMEOUT_MS = 8000;
 /** Cache of the original (v1) service worker — ours, known by exact name, safe to delete. */
@@ -81,8 +81,9 @@ self.addEventListener('fetch', event => {
   if (req.method !== 'GET') return;
   let url;
   try { url = new URL(req.url); } catch (e) { return; }
+  if (url.searchParams.has('diag')) return;
   if (url.origin === self.location.origin) {
-    event.respondWith(networkFirst(event, SHELL, isShellCacheable));
+    event.respondWith(staleWhileRevalidate(event));
   } else if (CDN_HOSTS.indexOf(url.hostname) >= 0) {
     event.respondWith(networkFirst(event, RUNTIME, isCdnCacheable));
   }
@@ -94,11 +95,10 @@ function isShellCacheable(res) { return !!res && res.status === 200 && res.type 
 function isCdnCacheable(res) { return !!res && (res.ok || res.type === 'opaque'); }
 
 /**
- * Network first (4 s), refresh the cached copy when `cacheable`, fall back to the cache.
- * waitUntil() is registered synchronously (during event dispatch) so the cache
- * update may finish even after the response has been handed to the page.
+ * Fetches the request and, when `cacheable`, stores the answer in `cacheName`. waitUntil() is registered
+ * synchronously (during event dispatch) so the cache update may finish after the page got its response.
  */
-function networkFirst(event, cacheName, cacheable) {
+function fetchAndCache(event, cacheName, cacheable) {
   const req = event.request;
   let updated;
   event.waitUntil(new Promise(resolve => { updated = resolve; }));
@@ -109,8 +109,31 @@ function networkFirst(event, cacheName, cacheable) {
     } else updated();
     return res;
   }, err => { updated(); throw err; });
-  network.catch(() => {});   // avoid an unhandled rejection when the timeout wins
-  return respondNetworkFirst(req, network, cacheName);
+  network.catch(() => {});   // the cached answer may win: avoid an unhandled rejection
+  return network;
+}
+
+/** The cached copy at once (refreshed in the background); without one the network, offline → index.html. */
+function staleWhileRevalidate(event) {
+  const req = event.request;
+  const network = fetchAndCache(event, SHELL, isShellCacheable);
+  return caches.open(SHELL)
+    .then(cache => cache.match(req))
+    .then(cached => cached || network.catch(() => navigationFallback(req)));
+}
+
+async function navigationFallback(req) {
+  if (req.mode === 'navigate') {
+    const cache = await caches.open(SHELL);
+    const page = (await cache.match('./index.html')) || (await cache.match('./'));
+    if (page) return page;
+  }
+  return Response.error();
+}
+
+/** Network first (4 s), refreshing the cached copy when `cacheable`, falling back to the cache. */
+function networkFirst(event, cacheName, cacheable) {
+  return respondNetworkFirst(event.request, fetchAndCache(event, cacheName, cacheable), cacheName);
 }
 
 async function respondNetworkFirst(req, network, cacheName) {
@@ -125,20 +148,11 @@ async function respondNetworkFirst(req, network, cacheName) {
     clearTimeout(timer);
   }
 
-  const cached = await matchCached(await caches.open(cacheName), req);
+  const cached = await (await caches.open(cacheName)).match(req);
   if (cached) return cached;
   try {
     return await network;   // slow network and nothing cached: keep waiting
   } catch (e) {
     return Response.error();
   }
-}
-
-async function matchCached(cache, req) {
-  const hit = await cache.match(req);
-  if (hit) return hit;
-  if (req.mode === 'navigate') {
-    return (await cache.match('./index.html')) || (await cache.match('./')) || (await cache.match(req, { ignoreSearch: true }));
-  }
-  return null;
 }

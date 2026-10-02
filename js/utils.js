@@ -9,17 +9,20 @@
   'use strict';
 
   /* ---------- shared domain constants (identical to the backend) ---------- */
+  /** `count` is the DEFAULT number of people a station needs; the supervisor can change it (stationCounts). */
   const STATIONS = Object.freeze([
     { id: 'portable',   name: 'Portable',             count: 3, bg: '#fffbeb', border: '#fde68a', text: '#b45309' },
     { id: 'ipd',        name: 'IPD',                  count: 3, bg: '#eff6ff', border: '#bfdbfe', text: '#1d4ed8' },
     { id: 'us',         name: 'US',                   count: 2, bg: '#f0fdf4', border: '#bbf7d0', text: '#15803d' },
-    { id: 'or',         name: 'OR (Standby IPD)',     count: 2, bg: '#faf5ff', border: '#e9d5ff', text: '#7e22ce' },
+    { id: 'or',         name: 'OR',                   count: 2, bg: '#faf5ff', border: '#e9d5ff', text: '#7e22ce' },
     { id: 'er',         name: 'ER',                   count: 3, bg: '#fff1f2', border: '#fecdd3', text: '#be123c' },
     { id: 'cancer',     name: 'CANCER CENTER',        count: 1, bg: '#ecfeff', border: '#a5f3fc', text: '#0e7490' },
     { id: 'supervisor', name: 'Prereview/Supervisor', count: 1, bg: '#eef2ff', border: '#c7d2fe', text: '#4338ca' }
   ].map(Object.freeze));
-  const LEAVE_TYPES = Object.freeze(['พักร้อน', 'Off เวร', 'Off In charge', 'ลาป่วย', 'ลาประชุม']);
+  const LEAVE_TYPES = Object.freeze(['พักร้อน', 'Off เวร', 'Off In charge', 'ลาป่วย', 'ลากิจ', 'ลาประชุม']);
   const QUEUE_TYPES = Object.freeze(['พักร้อน', 'Off เวร']);
+  const STATION_COUNT_MIN = 1;
+  const STATION_COUNT_MAX = 10;
 
   const THAI_DAYS = ['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์'];
   const THAI_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
@@ -220,6 +223,20 @@
 
   function stationById(id) { return STATIONS.find(s => s.id === id) || null; }
 
+  /**
+   * Required people per station: {[stationId]: n} for all stations. Values from `raw` (the server's
+   * stationCounts) are used when they are integers STATION_COUNT_MIN..MAX, anything else falls back to the
+   * station's default count (e.g. an older server that does not send counts at all).
+   */
+  function normalizeStationCounts(raw) {
+    const out = {};
+    STATIONS.forEach(st => {
+      const v = raw && typeof raw === 'object' ? raw[st.id] : undefined;
+      out[st.id] = Number.isInteger(v) && v >= STATION_COUNT_MIN && v <= STATION_COUNT_MAX ? v : st.count;
+    });
+    return out;
+  }
+
   /** Run fn once the DOM is parsed (immediately if it already is). */
   function onReady(fn) {
     if (typeof document === 'undefined' || document.readyState !== 'loading') fn();
@@ -227,9 +244,9 @@
   }
 
   global.Utils = {
-    STATIONS, LEAVE_TYPES, QUEUE_TYPES,
+    STATIONS, LEAVE_TYPES, QUEUE_TYPES, STATION_COUNT_MIN, STATION_COUNT_MAX,
     pad2, ymd, todayStr, parseYmd, addDays, compareYmd, eachDate, monthRange, daysBetweenInclusive,
     thaiDate, formatStamp, formatStampShort, escapeHtml, csvCell, buildCsv,
-    normalizeName, validateName, validatePassword, isValidYmd, queueOrder, stationById, onReady
+    normalizeName, validateName, validatePassword, isValidYmd, queueOrder, stationById, normalizeStationCounts, onReady
   };
 })(window);

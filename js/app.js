@@ -9,6 +9,9 @@
  *    No inline handlers; events are delegated via data-* attributes; CSS
  *    selectors are never built from names.
  *  - Calendar dates come from Utils (local time) — never toISOString().
+ *  - A failed request does not make the app "offline": Api retries transient failures itself, the
+ *    connection state (state.conn) turns 'reconnecting' and only 3 failed calls in a row (or the device
+ *    reporting no network) make it 'offline'. Writes are refused locally only without a network.
  * ===================================================================== */
 (function () {
   'use strict';
@@ -28,13 +31,27 @@
   const MAX_CHUNK_DAYS = 400;          // server limit per getData call (inclusive)
   const MAX_REPORT_DAYS = 731;         // summary / export range cap (≈ 2 years)
   const REFRESH_EVERY_MS = 90000;      // background refresh while visible
+  const RETRY_DELAYS_MS = [5000, 15000, 30000, 60000];   // after a failed refresh, before the 90 s cadence resumes
+  const OFFLINE_AFTER_FAILURES = 3;    // calls in a row that failed transiently before the app shows "offline"
   const STALE_AFTER_MS = 30000;        // refresh on focus when older than this
   const REMARK_MAX = 2000;
   const BLOB_URL_TTL_MS = 40000;       // a download prompt may wait for the user before it reads the blob URL
+  const HTML2CANVAS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+  const DIAG_TIMEOUT_MS = 20000;       // per connection check
+  const DIAG_SLOW_MS = 10000;          // a check that answers after this is reported as slow
+  const DIAG_CDN_URLS = ['https://fonts.googleapis.com/css2?family=Sarabun&display=swap', HTML2CANVAS_URL];
 
   const MSG = {
-    offline: 'ออฟไลน์อยู่ — ยังบันทึกไม่ได้',
+    noInternet: 'ไม่มีอินเทอร์เน็ต — ยังบันทึกไม่ได้',
+    writeFailed: 'บันทึกไม่สำเร็จเพราะเชื่อมต่อเซิร์ฟเวอร์ไม่ได้ — ระบบจะตรวจสอบข้อมูลล่าสุดให้อัตโนมัติ',
+    retrying: 'เซิร์ฟเวอร์ตอบช้า กำลังลองใหม่…',
+    oldServer: 'เซิร์ฟเวอร์ (Code.gs) ยังเป็นเวอร์ชันเก่า กรุณาอัปเดตตามคู่มือ',
+    updateCodeGs: 'ต้องอัปเดต Code.gs เป็นเวอร์ชันล่าสุดก่อน',
+    countsSaved: '✅ บันทึกจำนวนคนแล้ว',
+    imageToolFailed: '⚠️ โหลดเครื่องมือสร้างภาพไม่สำเร็จ — ตรวจสอบอินเทอร์เน็ตแล้วลองใหม่',
+    imageFailed: '⚠️ สร้างภาพไม่สำเร็จ กรุณาลองใหม่',
     sessionExpired: 'เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่',
+    pwChangedRelogin: 'เปลี่ยนรหัสผ่านสำเร็จแล้ว กรุณาเข้าสู่ระบบด้วยรหัสผ่านใหม่',
     discardDraft: 'มีการแก้ไข Station ที่ยังไม่ได้บันทึก ต้องการทิ้งการแก้ไขหรือไม่?',
     conflict: 'ข้อมูลวันนี้ถูกแก้ไขจากเครื่องอื่นแล้ว\nกด OK เพื่อบันทึกทับด้วยข้อมูลของคุณ หรือ Cancel เพื่อโหลดข้อมูลล่าสุด',
     leaveSaved: '✅ บันทึกสถานะสำเร็จ',
@@ -51,6 +68,20 @@
   const MISSING_HTML = '<div class="bg-white p-6 rounded-2xl shadow-sm text-center text-xs text-slate-500" data-missing="1">📭 ยังไม่มีข้อมูลของวันนี้ในเครื่อง — กด 🔄 เพื่อโหลดอีกครั้ง</div>';
   const CHIP_BASE = 'lv-chip px-2.5 py-1.5 rounded-lg text-[11px] font-medium ';
   const GRP_BASE = 'grp-btn shrink-0 px-3 py-1.5 rounded-full text-xs font-medium ';
+  const REMARK_VIEW_BASE = 'whitespace-pre-wrap break-words text-sm font-medium leading-relaxed rounded-xl border p-3 ';
+  const VERDICT_BASE = 'text-xs font-medium leading-relaxed p-2.5 rounded-xl border ';
+  const VERDICT_TONE = {
+    ok: 'bg-emerald-50 border-emerald-200 text-emerald-800',
+    warn: 'bg-amber-50 border-amber-200 text-amber-800',
+    fail: 'bg-rose-50 border-rose-200 text-rose-700'
+  };
+  const SYNC_LOOK = {
+    online: { color: '#4ade80', label: 'ออนไลน์' },
+    syncing: { color: '#facc15', label: 'กำลังซิงก์…' },
+    reconnecting: { color: '#facc15', label: 'กำลังเชื่อมต่อใหม่…' },
+    offline: { color: '#cbd5e1', label: 'ออฟไลน์' }
+  };
+  const DIAG_ICON = { ok: '✅', warn: '⚠️', fail: '❌', skip: '➖', run: '⏳' };
 
   /* ------------------------------------------------------------------ */
   /* state (shape per SPEC §6.4) + transient UI bookkeeping             */
@@ -65,10 +96,11 @@
     leaves: {},               // {[date]: {[name]: Leave}} — name maps have no prototype (see nameMap)
     loaded: [],               // merged [{from, to}] ranges fetched from the server this session
     selectedDate: U.todayStr(),
-    draft: null,              // {date, baseVersion, assignments:{[stationId]: string[count]}, remark}
+    stationCounts: U.normalizeStationCounts(null),   // {[stationId]: people required} (supervisor setting)
+    draft: null,              // {date, baseVersion, assignments:{[stationId]: string[]}, remark} ('' = empty slot)
     filter: 'all',
     clipboard: null,          // {fromDate, assignments, remark}
-    online: true,
+    conn: 'online',           // 'online' | 'reconnecting' | 'offline'
     lastSync: null,           // ms timestamp of the last successful getData
     audit: {}                 // {[date]: Audit[]}
   };
@@ -82,7 +114,15 @@
     refreshing: null,
     writeSeq: 0,              // increments on every local write merge
     touched: {},              // {[date]: writeSeq} — protects fresh writes from stale getData responses
-    staffSeq: 0,              // increments on every own staff/role/user write — same protection for staff & roles
+    staffSeq: 0,              // increments on every own staff/role/user/station-count write — same protection for those
+    windowVersions: {},       // {"from|to": dataVersion} of the refreshed window — lets the next poll ask "changed?"
+    failStreak: 0,            // calls in a row that finally failed transiently
+    connReason: '',           // why state.conn is not 'online': 'device' (no network) | 'server'
+    retryStep: 0,             // index into RETRY_DELAYS_MS
+    retryTimer: null,
+    oldServerWarned: false,
+    countsDraft: null,        // {[stationId]: n} while #stationCountsModal is open
+    diag: null,               // {running, at, rows:[{key, label, status, ms, note, code}], verdict:{tone, text}}
     dayBusy: null,            // date whose Day write (save / paste / clear) is in flight: its editor is locked
     cacheLoaded: [],          // ranges present in the offline cache (display only)
     cacheSavedAt: null,
@@ -92,6 +132,7 @@
     loginUsersError: '',
     loginUsersPromise: null,
     pwForced: false,
+    pwChangeRetried: false,   // the password change in flight is being sent again (see onSessionError)
     setupCancelable: false,
     pendingLeave: null,       // {staff, date, type}
     leaveSaving: false,
@@ -192,12 +233,20 @@
     ui.pending++;
     return Promise.resolve(p).then(v => { ui.pending--; return v; }, e => { ui.pending--; throw e; });
   }
-  /** Run an async handler (synchronously started), track it, and route errors to handleError. */
-  function spawn(fn) {
+  /** Run an async handler (synchronously started), track it, and route errors to handleError (with opts). */
+  function spawn(fn, opts) {
     let p;
     try { p = fn(); } catch (e) { p = Promise.reject(e); }
-    return track(p).catch(e => handleError(e));
+    return track(p).catch(e => handleError(e, opts));
   }
+  const WRITE = { write: true };   // spawn option of handlers that send a write
+
+  /** A call the user is waiting for: when Api retries it, the user is told why it takes longer. */
+  function userCall(action, params, opts) {
+    return Api.call(action, params, Object.assign({ onRetry: () => toast(MSG.retrying, 4000) }, opts));
+  }
+
+  const deviceOffline = () => navigator.onLine === false;
 
   function idle() {
     return new Promise(resolve => {
@@ -251,17 +300,29 @@
 
   function currentVersion(date) { const d = state.days[date]; return d ? (d.version | 0) : 0; }
 
+  /** People a station needs (the supervisor's setting). */
+  function required(stId) { return state.stationCounts[stId]; }
+  function savedCount(date, stId) { const d = state.days[date]; return d ? d.assignments[stId].length : 0; }
+  /** Slots of a station on a date: the required number, or more when more people are already saved there. */
+  function slotCount(date, stId) { return Math.max(required(stId), savedCount(date, stId)); }
+
+  /** Keeps every filled slot where it is; pads to n slots and drops only empty slots beyond n. */
+  function fitSlots(list, n) {
+    const out = list.slice();
+    while (out.length > n && !out[out.length - 1]) out.pop();
+    while (out.length < n) out.push('');
+    return out;
+  }
+
   /**
-   * Saved assignments for a date as fixed-size slots ('' = empty). People deleted since are kept: the day is
-   * history, and the server accepts them on that date as long as they are already saved there (A4).
+   * Saved assignments for a date as slots ('' = empty). Nothing saved is ever cut off: people deleted since
+   * stay (the day is history, and the server accepts them on that date as long as they are already saved there,
+   * A4), and so do people beyond a count that was lowered later.
    */
   function storedSlots(date) {
     const day = state.days[date];
     const out = {};
-    U.STATIONS.forEach(st => {
-      const names = ((day && day.assignments[st.id]) || []).slice(0, st.count);
-      out[st.id] = Array.from({ length: st.count }, (_, i) => names[i] || '');
-    });
+    U.STATIONS.forEach(st => { out[st.id] = fitSlots((day && day.assignments[st.id]) || [], slotCount(date, st.id)); });
     return out;
   }
 
@@ -275,8 +336,13 @@
   function storedRemark(date) { const d = state.days[date]; return d ? normRemark(d.remark) : ''; }
 
   function hasDraftFor(date) { return !!(state.draft && state.draft.date === date); }
-  /** What the station editor shows: the supervisor's draft if any, otherwise the saved day. */
-  function viewSlots(date) { return (isSup() && hasDraftFor(date)) ? state.draft.assignments : storedSlots(date); }
+  /** What the station editor shows: the supervisor's draft (fitted to the current counts) if any, else the saved day. */
+  function viewSlots(date) {
+    if (!(isSup() && hasDraftFor(date))) return storedSlots(date);
+    const out = {};
+    U.STATIONS.forEach(st => { out[st.id] = fitSlots(state.draft.assignments[st.id] || [], slotCount(date, st.id)); });
+    return out;
+  }
   function viewRemark(date) { return (isSup() && hasDraftFor(date)) ? normRemark(state.draft.remark) : storedRemark(date); }
 
   function compactSlots(slots) {
@@ -334,6 +400,17 @@
     return out;
   }
 
+  /** The date's leaves in staff display order: [{name, type, rank}] — rank = "คนที่ N" of a queue type, else 0. */
+  function leaveList(date) {
+    const leaves = activeLeaves(date);
+    const queues = {};
+    U.QUEUE_TYPES.forEach(t => { queues[t] = U.queueOrder(leaves, t); });
+    return state.staff.filter(s => leaves[s.name]).map(s => {
+      const type = leaves[s.name].type;
+      return { name: s.name, type, rank: queues[type] ? queues[type].indexOf(s.name) + 1 : 0 };
+    });
+  }
+
   /** Active staff, then people who appear in [from, to] but are no longer active (their history is kept). */
   function reportStaff(from, to) {
     const act = activeSet();
@@ -348,7 +425,15 @@
   }
   function personLabel(s) { return s.group === GONE ? s.name + GONE_LABEL : s.name; }
 
-  function markTouched(date) { ui.writeSeq++; ui.touched[date] = ui.writeSeq; }
+  /** An own write of `date` was merged: older getData answers must not undo it, and polls must re-read it. */
+  function markTouched(date) {
+    ui.writeSeq++;
+    ui.touched[date] = ui.writeSeq;
+    Object.keys(ui.windowVersions).forEach(key => {
+      const [from, to] = key.split('|');
+      if (from <= date && date <= to) delete ui.windowVersions[key];
+    });
+  }
 
   /* ------------------------------------------------------------------ */
   /* date ranges                                                         */
@@ -412,6 +497,8 @@
     return inRanges(ui.fetchingRanges, date) || (!!state.session && !state.user) ? 'loading' : 'missing';
   }
   function canEditDay(date) { return isSup() && dayView(date) === 'ready' && ui.dayBusy !== date; }
+  /** There is something to show for the date (fresh or from the offline copy). */
+  function dayKnown(date) { return !!state.user && ['ready', 'cached'].indexOf(dayView(date)) >= 0; }
 
   /** Guard for day writes: the date's fresh data must be loaded and no other write of that day in flight. */
   function requireDayReady(date) {
@@ -445,7 +532,7 @@
     if (!state.session || !state.user) return;
     lsSet(LS.cache, JSON.stringify({
       savedAt: new Date().toISOString(),
-      user: state.user, supervisor: state.supervisor, staff: state.staff,
+      user: state.user, supervisor: state.supervisor, staff: state.staff, stationCounts: state.stationCounts,
       days: state.days, leaves: state.leaves, loaded: state.loaded
     }));
   }
@@ -457,6 +544,7 @@
     state.user = Object.assign({}, c.user);
     state.supervisor = typeof c.supervisor === 'string' ? c.supervisor : '';
     state.staff = orderStaff(c.staff);
+    state.stationCounts = U.normalizeStationCounts(c.stationCounts);
     const days = {};
     Object.keys(c.days || {}).forEach(k => { const d = normalizeDay(c.days[k]); if (d && U.isValidYmd(k)) days[k] = Object.assign(d, { date: k }); });
     state.days = days;
@@ -475,6 +563,7 @@
     state.user = null;
     state.supervisor = '';
     state.staff = [];
+    state.stationCounts = U.normalizeStationCounts(null);
     state.days = {};
     state.leaves = {};
     state.loaded.length = 0;
@@ -486,6 +575,10 @@
     ui.cacheSavedAt = null;
     ui.touched = {};
     ui.rangeReqs = {};
+    ui.windowVersions = {};
+    ui.oldServerWarned = false;
+    ui.countsDraft = null;
+    resetRetries();
     ui.auditLoading = {};
     ui.auditFailed = {};
     ui.pendingLeave = null;
@@ -537,9 +630,19 @@
     if (d) { d.date = date; state.days[date] = d; } else delete state.days[date];
   }
 
+  /**
+   * user / supervisor / staff / station counts of a getData answer — unless an own staff, role or count write
+   * finished after that request started (staffSeq). A server without station counts means the defaults.
+   */
+  function applyDataInfo(data, staffSeq) {
+    if (staffSeq !== ui.staffSeq) return;
+    state.stationCounts = U.normalizeStationCounts(data.stationCounts);
+    applyServerInfo(data.user, data.supervisor, data.staff);
+  }
+
   /** seq / staffSeq: ui.writeSeq / ui.staffSeq when the fetch started (older answers must not undo our writes). */
   function mergeData(data, from, to, seq, staffSeq) {
-    if (staffSeq === ui.staffSeq) applyServerInfo(data.user, data.supervisor, data.staff);
+    applyDataInfo(data, staffSeq);
     const rf = (data.range && data.range.from) || from;
     const rt = (data.range && data.range.to) || to;
     const keep = d => (ui.touched[d] || 0) > seq;   // written locally after this fetch started
@@ -557,62 +660,87 @@
     if (state.draft && !isDraftDirty()) state.draft = null;   // clean draft → follow the server
   }
 
-  async function fetchChunk(from, to) {
+  /**
+   * One getData request. `poll`: this is the refresh of the selected date's window — when the window is
+   * loaded and its dataVersion known, the server is only asked whether anything changed (knownVersion); an
+   * "unchanged" answer carries no days/leaves, just user/staff/counts. Resolves false for "unchanged".
+   */
+  async function fetchChunk(from, to, poll) {
     const alive = sessionAlive(), seq = ui.writeSeq, staffSeq = ui.staffSeq;
-    const data = await Api.call('getData', { from, to });
-    if (!alive()) return;
-    mergeData(data || {}, from, to, seq, staffSeq);
-    setOnline(true);
+    const key = from + '|' + to;
+    const params = { from, to };
+    if (poll && ui.windowVersions[key] && !missingRanges(from, to).length) params.knownVersion = ui.windowVersions[key];
+    const data = (await Api.call('getData', params)) || {};
+    if (!alive()) return false;
+    const unchanged = data.unchanged === true;
+    if (unchanged) applyDataInfo(data, staffSeq);
+    else {
+      mergeData(data, from, to, seq, staffSeq);
+      if (poll && typeof data.dataVersion === 'string') ui.windowVersions[key] = data.dataVersion;
+    }
     state.lastSync = Date.now();
     persistCache();
+    warnIfOldServer();
+    return !unchanged;
   }
 
-  /** Make sure [from, to] is loaded (fetch only missing parts unless force). Throws ApiError. */
+  /**
+   * Make sure [from, to] is loaded (fetch only missing parts unless force; `poll` see fetchChunk). Throws
+   * ApiError. Resolves true when data was (re)loaded, false when nothing was fetched or nothing changed.
+   */
   async function ensureRange(from, to, opts) {
     // while the password must be changed every data action is refused (A1); loading resumes after the change
-    if (!state.session || ui.pwForced || !U.isValidYmd(from) || !U.isValidYmd(to) || from > to) return;
+    if (!state.session || ui.pwForced || !U.isValidYmd(from) || !U.isValidYmd(to) || from > to) return false;
     const force = !!(opts && opts.force);
+    const poll = !!(opts && opts.poll);
     const parts = force ? [{ from, to }] : missingRanges(from, to);
-    if (!parts.length) return;
+    if (!parts.length) return false;
     const chunks = [];
     parts.forEach(p => chunkRange(p.from, p.to, MAX_CHUNK_DAYS).forEach(c => chunks.push(c)));
     const span = { from, to };
     ui.fetchingRanges.push(span);
     render();
+    let changed = false;
     try {
       for (const c of chunks) {
         const key = c.from + '|' + c.to;
         let p = force ? null : ui.rangeReqs[key];
         if (!p) {
-          p = fetchChunk(c.from, c.to);
+          p = fetchChunk(c.from, c.to, poll);
           ui.rangeReqs[key] = p;
           const clear = () => { if (ui.rangeReqs[key] === p) delete ui.rangeReqs[key]; };
           p.then(clear, clear);
         }
-        await p;
+        if (await p) changed = true;
       }
     } finally {
       ui.fetchingRanges.splice(ui.fetchingRanges.indexOf(span), 1);
       render();
     }
+    return changed;
   }
 
   /**
    * Force-reload the window around the selected date. Resolves true/false (never rejects). A refresh already
    * in flight is shared, unless `restart`: after our own write it may have been read before that write.
+   * opts.silent: no message on failure (background); opts.quiet: no message for connection problems (the
+   * header shows those, and retries are scheduled).
    */
   function refresh(opts) {
     opts = opts || {};
     if (!state.session || ui.pwForced) return Promise.resolve(false);
     if (ui.refreshing && !opts.restart) return ui.refreshing;
     const w = windowFor(state.selectedDate);
-    const p = track(ensureRange(w.from, w.to, { force: true }).then(() => {
-      state.audit = {};
-      ui.auditFailed = {};
+    const p = track(ensureRange(w.from, w.to, { force: true, poll: true }).then(changed => {
+      resetRetries();
+      if (changed) {   // the audit trail can only have changed with the data
+        state.audit = {};
+        ui.auditFailed = {};
+      }
       return true;
     }, e => {
-      if (opts.silent) { if (e && e.code === 'NETWORK') setOnline(false); }
-      else handleError(e, { noRefresh: true });
+      if (Api.isTransient(e)) scheduleRetry();
+      if (!opts.silent) handleError(e, { noRefresh: true, quiet: opts.quiet });
       return false;
     }).then(ok => {
       if (ui.refreshing === p) ui.refreshing = null;
@@ -623,35 +751,85 @@
     return p;
   }
 
-  function setOnline(on) {
-    if (state.online === on) return;
-    state.online = on;
+  /** After a failed refresh (or write): refresh again in 5, 15, 30 and 60 s, then the normal 90 s cadence. */
+  function scheduleRetry() {
+    const ms = RETRY_DELAYS_MS[ui.retryStep];
+    if (ui.retryTimer || ms === undefined || deviceOffline()) return;   // no network: the 'online' event refreshes
+    ui.retryStep++;
+    ui.retryTimer = setTimeout(() => {
+      ui.retryTimer = null;
+      refresh({ silent: true });
+    }, ms);
+  }
+
+  function resetRetries() {
+    clearTimeout(ui.retryTimer);
+    ui.retryTimer = null;
+    ui.retryStep = 0;
+  }
+
+  /**
+   * Api.onStatus: any answer from the server means online. A transient failure means "reconnecting" (data
+   * stays, editing goes on) until OFFLINE_AFTER_FAILURES calls in a row failed; no network at all is offline.
+   */
+  function onApiStatus(ev) {
+    if (ev.type === 'success') {
+      ui.failStreak = 0;
+      setConn('online', '');
+      return;
+    }
+    if (ev.type === 'failed') ui.failStreak++;
+    if (deviceOffline()) setConn('offline', 'device');
+    else setConn(ui.failStreak >= OFFLINE_AFTER_FAILURES ? 'offline' : 'reconnecting', 'server');
+  }
+
+  function setConn(conn, reason) {
+    if (state.conn === conn && ui.connReason === reason) return;
+    state.conn = conn;
+    ui.connReason = reason;
     renderSyncStatus();
     renderOfflineBanner();
+  }
+
+  /** Tells a supervisor once per session that Code.gs is still the old version (no echo, no station counts). */
+  function warnIfOldServer() {
+    if (Api.serverVersionOk !== false || !isSup() || ui.oldServerWarned) return;
+    ui.oldServerWarned = true;
+    toast(MSG.oldServer, 5000);
   }
 
   /* ------------------------------------------------------------------ */
   /* errors                                                              */
   /* ------------------------------------------------------------------ */
+  /**
+   * opts.write: a write failed — after a connection problem its input (e.g. the station draft) is kept and the
+   * latest data is fetched again soon (the write may have landed); opts.quiet: no message for connection
+   * problems; opts.noRefresh: no refresh after FORBIDDEN / CONFLICT.
+   */
   function handleError(e, opts) {
+    opts = opts || {};
     if (!e) return;
     if (e.name !== 'ApiError') {
       console.error(e);
       toast('เกิดข้อผิดพลาด: ' + (e.message || String(e)));
       return;
     }
+    if (Api.isTransient(e)) {
+      if (opts.write) {
+        toast(e.code === 'BUSY' ? e.message : MSG.writeFailed, 4000);
+        if (!ui.retryTimer) ui.retryStep = 0;   // the write may have landed: check again soon, even after a long outage
+        scheduleRetry();
+      } else if (!opts.quiet) toast(e.message);
+      return;
+    }
     switch (e.code) {
       case 'AUTH_REQUIRED':
       case 'PASSWORD_CHANGE_REQUIRED':
         return;   // Api.onAuthError already handled the session (or the reply was for an old token)
-      case 'NETWORK':
-        setOnline(false);
-        toast(e.message);
-        return;
       case 'FORBIDDEN':
       case 'CONFLICT':
         toast(e.message);
-        if (!(opts && opts.noRefresh)) refresh();
+        if (!opts.noRefresh) refresh();
         return;
       default:
         toast(e.message || 'เกิดข้อผิดพลาด');
@@ -666,14 +844,18 @@
       if (!ui.pwForced) { openPasswordModal(true); render(); }
       return;
     }
+    // A retried password change whose first attempt went through finds its old token revoked: the change
+    // itself succeeded, only its answer (with the new token) was lost.
+    const msg = ui.pwChangeRetried ? MSG.pwChangedRelogin : MSG.sessionExpired;
     doLogout();
-    toast(MSG.sessionExpired);
+    toast(msg, 4000);
   }
   function isSessionError(e) { return !!e && (e.code === 'AUTH_REQUIRED' || e.code === 'PASSWORD_CHANGE_REQUIRED'); }
 
-  function requireOnline() {
-    if (state.online) return true;
-    toast(MSG.offline);
+  /** Writes are refused locally only when the device has no network at all; otherwise they are attempted. */
+  function requireInternet() {
+    if (!deviceOffline()) return true;
+    toast(MSG.noInternet);
     return false;
   }
 
@@ -689,6 +871,11 @@
     await startSession();
   }
 
+  /**
+   * A remembered session shows the offline copy at once and then makes ONE request, getData (it also returns
+   * the user, role, staff and counts). AUTH_REQUIRED logs out and PASSWORD_CHANGE_REQUIRED opens the forced
+   * modal (both via Api.onAuthError); a connection problem keeps the copy on screen and retries later.
+   */
   async function startSession() {
     const session = loadSession();
     if (!session) {
@@ -703,34 +890,13 @@
     restoreCache(session.name);
     hideModal('loginModal');
     render();
-
-    let me;
-    try {
-      me = await Api.call('me');
-    } catch (e) {
-      if (e.code === 'AUTH_REQUIRED') { if (ui.loginUsersPromise) await ui.loginUsersPromise; return; }
-      if (e.code === 'NETWORK') {
-        setOnline(false);
-        if (!state.user) state.user = { name: session.name, group: '', isSupervisor: false, mustChangePassword: false };
-        render();
-        return;
-      }
-      handleError(e, { noRefresh: true });
+    await refresh({ quiet: true });
+    if (state.session && !state.user) {
+      // nothing cached and nothing loaded: show this person's (empty) view instead of an endless "loading"
+      state.user = { name: session.name, group: '', isSupervisor: false, mustChangePassword: false };
       render();
-      return;
     }
-    setOnline(true);
-    applyServerInfo(me.user, me.supervisor);
-    render();
-    if (ui.pwForced) return;
-    await loadCurrentWindow();
-  }
-
-  async function loadCurrentWindow() {
-    const w = windowFor(state.selectedDate);
-    try { await ensureRange(w.from, w.to, { force: true }); }
-    catch (e) { handleError(e, { noRefresh: true }); }
-    render();
+    if (ui.loginUsersPromise) await ui.loginUsersPromise;   // logged out meanwhile: the login list is loading
   }
 
   /** Opens the login modal and reloads the user list (a shared device may sit on this screen for hours). */
@@ -766,11 +932,9 @@
     try {
       const d = await Api.call('listUsers');
       ui.loginUsers = Array.isArray(d && d.users) ? d.users.filter(u => u && typeof u.name === 'string') : [];
-      setOnline(true);
       if ($('loginError').dataset.kind === 'list') showLoginError('');
     } catch (e) {
       ui.loginUsersError = (e && e.message) || 'โหลดรายชื่อไม่สำเร็จ';
-      if (e && e.code === 'NETWORK') setOnline(false);
     } finally {
       ui.loginUsersLoading = false;
       renderLoginSelect();
@@ -805,21 +969,17 @@
     showLoginError('');
     let d = null;
     await withBusy($('loginBtn'), 'กำลังเข้าสู่ระบบ…', async () => {
-      try { d = await Api.call('login', { name, password }); }
-      catch (e) {
-        if (e.code === 'NETWORK') setOnline(false);
-        showLoginError(e.message || 'เข้าสู่ระบบไม่สำเร็จ');
-      }
+      try { d = await userCall('login', { name, password }); }
+      catch (e) { showLoginError(e.message || 'เข้าสู่ระบบไม่สำเร็จ'); }
     });
     if (!d || !d.token || !d.user) return;
-    setOnline(true);
     $('loginPassword').value = '';
     beginSession(d);
     if (state.user.mustChangePassword) openPasswordModal(true);   // before render: no data calls meanwhile (A1)
     render();
     if (ui.pwForced) return;
     toast(`👋 ยินดีต้อนรับคุณ ${state.user.name}`);
-    await loadCurrentWindow();
+    await refresh({ quiet: true });
   }
 
   function beginSession(d) {
@@ -849,6 +1009,7 @@
     hideModal('passwordModal');
     hideModal('confirmLeaveModal');
     hideModal('transferModal');
+    hideModal('stationCountsModal');
     showLogin();
     render();
   }
@@ -865,10 +1026,11 @@
   /* ---------- password modal ---------- */
   function openPasswordModal(forced) {
     ui.pwForced = !!forced;
+    const who = state.session ? state.session.name : myName();   // known even before the first getData answered
     $('pwTitle').textContent = forced ? '🔑 กรุณาตั้งรหัสผ่านใหม่ก่อนใช้งาน' : '🔑 เปลี่ยนรหัสผ่าน';
     $('pwDesc').textContent = forced
-      ? `คุณ ${myName()} ยังใช้รหัสผ่านเริ่มต้นหรือรหัสที่ถูกรีเซ็ต กรุณาตั้งรหัสผ่านใหม่ (4–64 ตัวอักษร และห้ามใช้ 1234)`
-      : `ผู้ใช้: ${myName()}`;
+      ? `คุณ ${who} ยังใช้รหัสผ่านเริ่มต้นหรือรหัสที่ถูกรีเซ็ต กรุณาตั้งรหัสผ่านใหม่ (4–64 ตัวอักษร และห้ามใช้ 1234)`
+      : `ผู้ใช้: ${who}`;
     ['pwOld', 'pwNew', 'pwConfirm'].forEach(id => { $(id).value = ''; });
     pwError('');
     setVisible($('pwCancelBtn'), !forced);
@@ -893,16 +1055,18 @@
     if (pe) { pwError(pe); return; }
     if (newP === '1234') { pwError('ห้ามใช้รหัสผ่านเริ่มต้น (1234) กรุณาตั้งรหัสผ่านใหม่'); return; }
     if (newP !== conf) { pwError('รหัสผ่านใหม่และการยืนยันรหัสผ่านไม่ตรงกัน'); return; }
-    if (!state.online) { pwError(MSG.offline); return; }
+    if (deviceOffline()) { pwError(MSG.noInternet); return; }
     pwError('');
     const alive = sessionAlive();   // "ออกจากระบบ" stays available while the change is in flight
     let res = null;
+    const retried = () => { ui.pwChangeRetried = true; toast(MSG.retrying, 4000); };
     await withBusy($('pwSaveBtn'), 'กำลังบันทึก…', async () => {
-      try { res = await Api.call('changePassword', { oldPassword: oldP, newPassword: newP }); }
+      try { res = await userCall('changePassword', { oldPassword: oldP, newPassword: newP }, { onRetry: retried }); }
       catch (e) {
         if (isSessionError(e) || !alive()) return;
-        if (e.code === 'NETWORK') setOnline(false);
         pwError(e.message);
+      } finally {
+        ui.pwChangeRetried = false;
       }
     });
     if (!res || !res.token || !alive()) return;
@@ -917,11 +1081,10 @@
     applyServerInfo(Object.assign({}, user, { mustChangePassword: false }));
     hideModal('passwordModal');
     ['pwOld', 'pwNew', 'pwConfirm'].forEach(id => { $(id).value = ''; });
-    setOnline(true);
     persistCache();
     render();
     toast('🔑 เปลี่ยนรหัสผ่านสำเร็จ');
-    if (wasForced) await loadCurrentWindow();
+    if (wasForced) await refresh({ quiet: true });
   }
 
   /* ---------- setup modal ---------- */
@@ -971,7 +1134,6 @@
     const changed = url !== state.apiUrl;
     lsSet(LS.apiUrl, url);
     if (!String(cfg().API_URL || '').trim()) { state.apiUrl = url; ui.apiUrlSource = 'local'; }
-    setOnline(true);
     hideModal('setupModal');
     toast('✅ เชื่อมต่อเซิร์ฟเวอร์สำเร็จ');
     if (changed && state.session) { doLogout(); return; }   // different backend → start over
@@ -1003,12 +1165,8 @@
   function renderSyncStatus() {
     const el = $('syncStatus');
     if (!el) return;
-    const st = Api.inflight > 0 ? 'syncing' : (state.online ? 'online' : 'offline');
-    const look = {
-      online: { color: '#4ade80', label: 'ออนไลน์' },
-      syncing: { color: '#facc15', label: 'กำลังซิงก์…' },
-      offline: { color: '#cbd5e1', label: 'ออฟไลน์' }
-    }[st];
+    const st = state.conn === 'online' && Api.inflight > 0 ? 'syncing' : state.conn;
+    const look = SYNC_LOOK[st];
     el.dataset.state = st;
     el.querySelector('[data-role="dot"]').style.color = look.color;
     el.querySelector('[data-role="label"]').textContent = look.label;
@@ -1017,9 +1175,12 @@
   function renderOfflineBanner() {
     const b = $('offlineBanner');
     if (!b) return;
-    setVisible(b, !state.online);
+    setVisible(b, state.conn === 'offline');
     const t = state.lastSync || (ui.cacheSavedAt ? Date.parse(ui.cacheSavedAt) : null);
-    $('offlineSince').textContent = t ? U.formatStamp(t) : '-';
+    const since = 'แสดงข้อมูลล่าสุดเมื่อ ' + (t ? U.formatStamp(t) : '-');
+    $('offlineText').textContent = ui.connReason === 'device'
+      ? 'ไม่มีอินเทอร์เน็ต — ' + since
+      : 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ — ' + since + ' • ระบบกำลังลองใหม่อัตโนมัติ';
     syncLayout();
   }
 
@@ -1048,6 +1209,7 @@
       notice.textContent = 'แสดงผลตารางเวรประจำวันที่เลือก (ดูข้อมูลหมายเหตุและเวรได้)';
     }
     setVisible($('stationSaveBtn'), sup);
+    setVisible($('stationCountsBtn'), sup);
     setVisible($('auditLogBox'), sup);
     setVisible($('staffControlBox'), sup);
     setVisible($('summaryTargetSelectContainer'), sup);
@@ -1089,6 +1251,7 @@
       const slots = viewSlots(date);
       setHtml(container, U.STATIONS.map(st => stationCardHtml(st, slots, card)).join(''));
     }
+    renderStationLeaves();
     renderRemark();
     renderDraftBadge();
     renderAudit();
@@ -1100,13 +1263,14 @@
     const { sup, locked, onLeave, act } = card;
     const list = slots[st.id] || [];
     const filled = list.filter(Boolean);
-    const short = st.count - filled.length;
+    const need = required(st.id);
+    const short = need - filled.length;
     const head =
       `<div class="flex justify-between items-center mb-2 gap-2">` +
         `<h3 class="font-bold text-sm" style="color:${st.text}">${esc(st.name)}` +
           (short > 0 ? ` <span class="station-short" style="font-size:11px; color:#ef4444; font-weight:700;">(ขาด ${short})</span>` : '') +
         `</h3>` +
-        `<span class="text-[11px] px-2 py-0.5 bg-white/80 rounded-full border shrink-0">ต้องการ ${st.count} คน</span>` +
+        `<span class="station-need text-[11px] px-2 py-0.5 bg-white/80 rounded-full border shrink-0">ต้องการ ${need} คน</span>` +
       `</div>`;
     let body;
     if (sup) {
@@ -1133,14 +1297,38 @@
     return `<div class="station-card p-3 rounded-2xl border shadow-sm" data-station-card="${st.id}" style="background:${st.bg}; border-color:${st.border}">${head}${body}</div>`;
   }
 
-  function renderRemark() {
-    const ta = $('dailyRemark');
+  /** Who is on leave on the selected date — shown to every role (not while the day is loading or unknown). */
+  function renderStationLeaves() {
     const date = state.selectedDate;
+    const known = dayKnown(date);
+    setVisible($('stationLeavesCard'), known);
+    if (!known) return;
+    const list = leaveList(date);
+    $('stationLeaveCount').textContent = list.length + ' คน';
+    setHtml($('stationLeaves'), list.length
+      ? list.map(l => `<div>• <span class="font-semibold text-slate-800">${esc(l.name)}</span>: ` +
+          `<span class="font-semibold text-rose-600">${esc(l.type)}${l.rank ? ` (คนที่ ${l.rank})` : ''}</span></div>`).join('')
+      : '<span class="italic text-slate-400">ไม่มีรายการลาวันนี้</span>');
+  }
+
+  /** Supervisors edit the remark in the textarea; everyone else reads it in #remarkView. */
+  function renderRemark() {
+    const sup = isSup();
+    const date = state.selectedDate;
+    const ta = $('dailyRemark');
     const edit = canEditDay(date);
-    const want = state.user ? viewRemark(date) : '';
+    const want = sup ? viewRemark(date) : '';
     if (normRemark(ta.value) !== want) ta.value = want;
     ta.readOnly = !edit;
     ta.style.backgroundColor = edit ? '#f8fafc' : '#f1f5f9';
+    setVisible(ta, sup);
+
+    const view = $('remarkView');
+    const known = dayKnown(date);
+    const remark = known ? viewRemark(date) : '';
+    view.textContent = remark || (known ? 'ไม่มีหมายเหตุสำหรับวันนี้' : '-');
+    view.className = REMARK_VIEW_BASE + (remark ? 'bg-amber-50 border-amber-200 text-amber-900' : 'bg-slate-50 text-slate-400 italic');
+    setVisible(view, !sup);
   }
 
   /** Save / copy / paste / clear work on the selected day's data, so they wait until it is loaded. */
@@ -1156,21 +1344,23 @@
     setVisible($('draftBadge'), isSup() && hasDraftFor(state.selectedDate) && isDraftDirty());
   }
 
+  /** The audit trail of the selected day is loaded once that day's data is (so startup makes one request). */
   function renderAudit() {
     if (!isSup()) return;
     const date = state.selectedDate;
     const box = $('auditLogContent');
     const entries = state.audit[date];
+    const loading = '<div class="italic text-amber-700/70">กำลังโหลด…</div>';
     if (entries) {
       setHtml(box, entries.length
         ? entries.map(a => `<div>• ${esc(a.detail)} — <strong>${esc(a.actor)}</strong> เมื่อ ${esc(U.formatStamp(a.timestamp))}</div>`).join('')
         : '<div class="italic text-amber-700/70">ยังไม่มีประวัติการแก้ไขในวันนี้</div>');
-    } else if (ui.auditLoading[date]) {
-      setHtml(box, '<div class="italic text-amber-700/70">กำลังโหลด…</div>');
-    } else if (ui.auditFailed[date] || !state.online) {
+    } else if (ui.auditLoading[date] || inRanges(ui.fetchingRanges, date)) {
+      setHtml(box, loading);
+    } else if (ui.auditFailed[date] || dayView(date) !== 'ready') {
       setHtml(box, '<div class="italic text-amber-700/70">โหลดประวัติไม่สำเร็จ (กด 🔄 เพื่อลองใหม่)</div>');
     } else {
-      setHtml(box, '<div class="italic text-amber-700/70">กำลังโหลด…</div>');
+      setHtml(box, loading);
       loadAudit(date);
     }
   }
@@ -1180,13 +1370,9 @@
     ui.auditLoading[date] = true;
     const epoch = ui.epoch;
     track(Api.call('getAudit', { date, limit: 20 })).then(d => {
-      if (epoch !== ui.epoch) return;
-      state.audit[date] = Array.isArray(d && d.entries) ? d.entries : [];
-      setOnline(true);
-    }, e => {
-      if (epoch !== ui.epoch) return;
-      ui.auditFailed[date] = true;
-      if (e && e.code === 'NETWORK') setOnline(false);
+      if (epoch === ui.epoch) state.audit[date] = Array.isArray(d && d.entries) ? d.entries : [];
+    }, () => {
+      if (epoch === ui.epoch) ui.auditFailed[date] = true;
     }).then(() => {
       delete ui.auditLoading[date];
       if (epoch === ui.epoch && date === state.selectedDate) renderAudit();
@@ -1370,7 +1556,8 @@
     const act = activeSet();
     setHtml($('resultStations'), U.STATIONS.map(st => {
       const arr = (slots[st.id] || []).filter(Boolean);
-      const warn = arr.length < st.count ? `<span style="font-size:11px; color:#ef4444; font-weight:700;">(ขาด ${st.count - arr.length})</span>` : '';
+      const need = required(st.id);
+      const warn = arr.length < need ? `<span style="font-size:11px; color:#ef4444; font-weight:700;">(ขาด ${need - arr.length})</span>` : '';
       return `<div style="background:${st.bg}; border:1px solid ${st.border}; border-radius:14px; padding:12px 14px; display:flex; align-items:center; justify-content:space-between; gap:10px;">` +
         `<div style="font-size:14px; font-weight:700; color:${st.text}; min-width:110px;">${esc(st.name)} ${warn}</div>` +
         `<div style="display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; flex:1;">` +
@@ -1379,10 +1566,9 @@
         `</div></div>`;
     }).join(''));
 
-    const leaves = activeLeaves(date);
-    const names = state.staff.map(s => s.name).filter(n => leaves[n]);
-    setHtml($('resultLeaves'), names.length
-      ? names.map(n => `<div>• <span class="font-semibold">${esc(n)}</span>: <span class="text-rose-600 font-semibold">${esc(leaves[n].type)}</span></div>`).join('')
+    const leaves = leaveList(date);
+    setHtml($('resultLeaves'), leaves.length
+      ? leaves.map(l => `<div>• <span class="font-semibold">${esc(l.name)}</span>: <span class="text-rose-600 font-semibold">${esc(l.type)}</span></div>`).join('')
       : '<span class="text-slate-400 italic">ไม่มีรายการลาวันนี้</span>');
 
     const rv = (state.user ? viewRemark(date) : '').trim();
@@ -1412,11 +1598,10 @@
     render();
     if (state.session) {
       const w = windowFor(date);
-      const wasOnline = state.online;
       track(ensureRange(w.from, w.to)).then(() => render(), e => {
         render();
-        if (e && e.code === 'NETWORK' && !wasOnline) { setOnline(false); return; }   // already offline: stay quiet
-        handleError(e);
+        if (Api.isTransient(e)) scheduleRetry();   // the day shows "not loaded"; the header shows the connection
+        handleError(e, { quiet: true });
       });
     }
     return true;
@@ -1439,10 +1624,11 @@
     if (!canEditDay(date)) { renderStationTab(); return; }
     const st = U.stationById(sel.dataset.station);
     const idx = parseInt(sel.dataset.index, 10);
-    if (!st || !(idx >= 0 && idx < st.count)) { renderStationTab(); return; }
+    if (!st || !(idx >= 0 && idx < viewSlots(date)[st.id].length)) { renderStationTab(); return; }
     const val = sel.value;
     if (val && !assignableSet(date).has(val)) { renderStationTab(); return; }
     const draft = ensureDraft(date);
+    draft.assignments = viewSlots(date);   // the slots as shown (fitted to the current counts)
     if (val) {   // a person can hold only one slot
       U.STATIONS.forEach(s => {
         draft.assignments[s.id] = draft.assignments[s.id].map((n, i) => (n === val && !(s.id === st.id && i === idx) ? '' : n));
@@ -1465,7 +1651,7 @@
   }
 
   async function onSaveStation() {
-    if (!requireOnline()) return;
+    if (!requireInternet()) return;
     if (!isSup()) { toast(MSG.supOnly); return; }
     await withBusy($('stationSaveBtn'), 'กำลังบันทึก…', saveSelectedDay);
   }
@@ -1497,13 +1683,13 @@
     const alive = sessionAlive();
     let res;
     try {
-      res = await Api.call('saveDay', { date, assignments, remark, baseVersion });
+      res = await userCall('saveDay', { date, assignments, remark, baseVersion });
     } catch (e) {
       if (!alive()) return null;
       if (!e || e.code !== 'CONFLICT') throw e;
       const serverDay = e.details && e.details.day ? e.details.day : null;
       if (window.confirm(MSG.conflict)) {
-        res = await Api.call('saveDay', { date, assignments, remark, baseVersion: serverDay ? (parseInt(serverDay.version, 10) || 0) : 0 });
+        res = await userCall('saveDay', { date, assignments, remark, baseVersion: serverDay ? (parseInt(serverDay.version, 10) || 0) : 0 });
         spawn(() => refresh());
       } else {
         adoptDay(date, serverDay);
@@ -1528,7 +1714,7 @@
     const head = res.unchanged && !warnings.length ? okMsg + ' (ไม่มีการเปลี่ยนแปลง)' : okMsg;
     toast(warnings.length ? head + '\n⚠️ ' + warnings.join('\n⚠️ ') : head, warnings.length ? 5000 : 2200);
     // warnings = the server knows leaves this device has not seen yet: fetch the date again
-    if (warnings.length) spawn(() => ensureRange(date, date, { force: true }));
+    if (warnings.length) spawn(() => ensureRange(date, date, { force: true }), { quiet: true });
     return res;
   }
 
@@ -1550,7 +1736,7 @@
     const date = state.selectedDate;
     const cur = (activeLeaves(date)[staff] || {}).type || '';
     if (val === cur) return;
-    if (!requireOnline()) return;
+    if (!requireInternet()) return;
     ui.pendingLeave = { staff, date, type: val };
     const label = val === '' ? 'ปกติ (ยกเลิกวันลา)' : val;
     $('confirmLeaveText').innerHTML =
@@ -1569,7 +1755,7 @@
   async function onConfirmLeave() {
     const p = ui.pendingLeave;
     if (!p || ui.leaveSaving) return;
-    if (!requireOnline()) { closeConfirmLeave(); return; }
+    if (!requireInternet()) { closeConfirmLeave(); return; }
     const btn = $('confirmLeaveBtn');
     const label = btn.textContent;
     const alive = sessionAlive();
@@ -1578,7 +1764,7 @@
     btn.disabled = true;
     btn.textContent = 'กำลังบันทึก…';
     let res = null, err = null;
-    try { res = await Api.call('setLeave', { date: p.date, staff: p.staff, type: p.type }); }
+    try { res = await userCall('setLeave', { date: p.date, staff: p.staff, type: p.type }); }
     catch (e) { err = e; }
     finally {
       ui.leaveSaving = false;
@@ -1625,7 +1811,7 @@
       // always refetch: the range may have been loaded long ago and changed on other devices since
       try { await ensureRange(from, to, { force: true }); }
       catch (e) {
-        if (e.code === 'NETWORK') { setOnline(false); note = 'ออฟไลน์ — แสดงเฉพาะข้อมูลที่มีในเครื่อง อาจไม่ครบถ้วน'; }
+        if (Api.isTransient(e)) note = 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ — แสดงเฉพาะข้อมูลที่มีในเครื่อง อาจไม่ครบถ้วน';
         else if (isSessionError(e)) return;
         else { setHtml(box, ''); throw e; }
       }
@@ -1686,7 +1872,7 @@
   }
 
   async function onAddStaff() {
-    if (!requireOnline()) return;
+    if (!requireInternet()) return;
     if (!isSup()) { toast(MSG.supOnly); return; }
     const raw = $('newStaffName').value;
     const err = U.validateName(raw);
@@ -1699,7 +1885,7 @@
     const group = checked && checked.value === 'backup' ? 'backup' : 'regular';
     const alive = sessionAlive();
     await withBusy($('addStaffBtn'), 'กำลังเพิ่ม…', async () => {
-      const res = await Api.call('addStaff', { name, group, password: pass });
+      const res = await userCall('addStaff', { name, group, password: pass });
       if (!alive()) return;
       applyStaffResult(res);
       $('newStaffName').value = '';
@@ -1717,33 +1903,33 @@
     if (!isSup()) { toast(MSG.supOnly); return; }
     if (!state.staff.some(s => s.name === name)) return;
     switch (btn.dataset.action) {
-      case 'reset-password': spawn(() => resetPasswordFlow(name)); break;
-      case 'move': spawn(() => moveStaffFlow(name)); break;
-      case 'delete': spawn(() => deleteStaffFlow(name)); break;
+      case 'reset-password': spawn(() => resetPasswordFlow(name), WRITE); break;
+      case 'move': spawn(() => moveStaffFlow(name), WRITE); break;
+      case 'delete': spawn(() => deleteStaffFlow(name), WRITE); break;
       default: break;
     }
   }
 
   async function resetPasswordFlow(name) {
     if (name === myName()) { openPasswordModal(false); return; }
-    if (!requireOnline()) return;
+    if (!requireInternet()) return;
     const ans = window.prompt(`ตั้งรหัสผ่านใหม่ให้คุณ "${name}" (เว้นว่าง = 1234)`);
     if (ans === null || ans === undefined) return;
     const np = String(ans).trim();
     if (np) { const pe = U.validatePassword(np); if (pe) { toast('⚠️ ' + pe); return; } }
     const alive = sessionAlive();
     await staffOp(async () => {
-      await Api.call('resetPassword', { name, newPassword: np });
+      await userCall('resetPassword', { name, newPassword: np });
       if (!alive()) return;
       toast(`🔑 ตั้งรหัสผ่านใหม่ให้ "${name}" แล้ว${np ? '' : ' (1234)'} — ต้องเปลี่ยนรหัสเมื่อเข้าสู่ระบบครั้งถัดไป`, 3500);
     });
   }
 
   async function moveStaffFlow(name) {
-    if (!requireOnline()) return;
+    if (!requireInternet()) return;
     const alive = sessionAlive();
     await staffOp(async () => {
-      const res = await Api.call('moveStaff', { name });
+      const res = await userCall('moveStaff', { name });
       if (!alive()) return;
       applyStaffResult(res);
       const s = state.staff.find(x => x.name === name);
@@ -1752,14 +1938,14 @@
   }
 
   async function deleteStaffFlow(name) {
-    if (!requireOnline()) return;
+    if (!requireInternet()) return;
     if (name === state.supervisor) { toast('⚠️ ไม่สามารถลบ Supervisor ได้ กรุณาโอนสิทธิ์ให้ผู้อื่นก่อน'); return; }
     if (!window.confirm(`ต้องการลบ "${name}" ออกจากระบบใช่หรือไม่?`)) return;
     const alive = sessionAlive();
     let base = null, deleted = false;
     await staffOp(async () => {
       base = draftBase();
-      const res = await Api.call('deleteStaff', { name });
+      const res = await userCall('deleteStaff', { name });
       if (!alive()) return;
       // the server removes the name from today's and future days only; a past day keeps it (history)
       if (state.draft && state.draft.date >= U.todayStr()) removeFromDraft(name);
@@ -1782,14 +1968,24 @@
   }
 
   async function onTransfer() {
-    if (!requireOnline()) return;
+    if (!requireInternet()) return;
     if (!isSup()) { toast(MSG.supOnly); return; }
     const target = $('transferTargetSelect').value;
     if (!target) { toast('⚠️ กรุณาเลือกผู้รับสิทธิ์ก่อน'); return; }
     const alive = sessionAlive();
     await withBusy($('transferConfirmBtn'), 'กำลังโอน…', async () => {
       if (!(await settleDraftBeforeTransfer()) || !alive()) return;
-      const res = await Api.call('transferSupervisor', { target });
+      let res;
+      try { res = await userCall('transferSupervisor', { target }); }
+      catch (e) {
+        if (e.code !== 'FORBIDDEN') throw e;
+        // Not the supervisor (any more). A retried transfer whose first attempt went through is refused like
+        // this too, so look at the server's state before calling it a failure.
+        await refresh({ restart: true });
+        if (!alive()) return;
+        if (state.supervisor !== target) { toast(e.message); return; }
+        res = { supervisor: target, staff: state.staff };
+      }
       if (!alive()) return;
       hideModal('transferModal');
       state.audit = {};
@@ -1829,14 +2025,14 @@
   }
 
   async function onImport() {
-    if (!requireOnline()) return;
+    if (!requireInternet()) return;
     if (!isSup()) { toast(MSG.supOnly); return; }
     if (!legacyInfo().has) { toast('ไม่พบข้อมูลเดิมในเครื่องนี้'); return; }
     const payload = buildImportPayload();
     const overwrite = !!$('importOverwrite').checked;
     const alive = sessionAlive();
     await withBusy($('importBtn'), 'กำลังนำเข้า…', async () => {
-      const res = await Api.call('importLocal', { payload, overwrite }, { timeoutMs: 180000 });
+      const res = await userCall('importLocal', { payload, overwrite }, { timeoutMs: 180000 });
       if (!alive()) return;
       ui.importResult = res || {};
       state.loaded.length = 0;   // many dates changed server-side: refetch on demand
@@ -1950,7 +2146,7 @@
   }
 
   async function onPasteDay() {
-    if (!requireOnline()) return;
+    if (!requireInternet()) return;
     if (!isSup()) { toast(MSG.supOnly); return; }
     const clip = state.clipboard;
     if (!clip) { toast('⚠️ ยังไม่มีข้อมูลที่ถูกคัดลอก กรุณากดคัดลอกก่อน'); return; }
@@ -1958,14 +2154,16 @@
     if (!requireDayReady(date)) return;
     if (!window.confirm(`ต้องการวางข้อมูลตารางเวรและหมายเหตุลงในวันที่ ${date} ใช่หรือไม่? (สถานะวันลาของวันนี้จะยังคงอยู่ตามเดิม)`)) return;
     // keep only people the target day may hold, not on leave that date, each person once, within capacity
+    // (the server's rule: the required count, or the number already saved there when that is larger)
     const allowed = assignableSet(date);
     const onLeave = activeLeaves(date);
     const used = new Set();
     const assignments = {};
     U.STATIONS.forEach(st => {
+      const cap = slotCount(date, st.id);
       assignments[st.id] = [];
       ((clip.assignments && clip.assignments[st.id]) || []).forEach(n => {
-        if (allowed.has(n) && !onLeave[n] && !used.has(n) && assignments[st.id].length < st.count) {
+        if (allowed.has(n) && !onLeave[n] && !used.has(n) && assignments[st.id].length < cap) {
           used.add(n);
           assignments[st.id].push(n);
         }
@@ -1977,14 +2175,14 @@
   }
 
   async function onClearDay() {
-    if (!requireOnline()) return;
+    if (!requireInternet()) return;
     if (!isSup()) { toast('⚠️ เฉพาะ Supervisor เท่านั้นที่ล้างข้อมูลได้'); return; }
     const date = state.selectedDate;
     if (!requireDayReady(date)) return;
     if (!window.confirm('ต้องการล้างข้อมูลการจัดเวร การลา และหมายเหตุของวันนี้ทั้งหมดใช่หรือไม่?')) return;
     const alive = sessionAlive();
     await withBusy($('clearDayBtn'), 'กำลังล้าง…', () => withDayLock(date, async () => {
-      const res = await Api.call('clearDay', { date });
+      const res = await userCall('clearDay', { date });
       if (!alive()) return;
       adoptDay(date, res && res.day);   // the emptied row keeps counting versions (A3); null = the date had no row
       delete state.leaves[date];
@@ -1997,20 +2195,40 @@
     }));
   }
 
-  function renderCanvas() {
-    if (typeof window.html2canvas !== 'function') return Promise.reject(new Error('html2canvas unavailable'));
-    return window.html2canvas($('captureArea'), { scale: 3, backgroundColor: '#ffffff', useCORS: true });
+  let html2canvasLoading = null;
+
+  /**
+   * html2canvas (≈200 KB) is loaded on the first image save/share instead of with the page. A failed load
+   * is forgotten, so the next tap tries again.
+   */
+  function loadHtml2canvas() {
+    if (typeof window.html2canvas === 'function') return Promise.resolve(window.html2canvas);
+    if (!html2canvasLoading) {
+      html2canvasLoading = new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = HTML2CANVAS_URL;
+        s.onload = () => (typeof window.html2canvas === 'function' ? resolve(window.html2canvas) : reject(new Error('html2canvas missing')));
+        s.onerror = () => { s.remove(); reject(new Error('html2canvas did not load')); };
+        document.head.appendChild(s);
+      }).catch(e => {
+        html2canvasLoading = null;
+        throw e;
+      });
+    }
+    return html2canvasLoading;
   }
-  const IMG_FAIL = '⚠️ สร้างภาพไม่สำเร็จ (ต้องเชื่อมต่ออินเทอร์เน็ตอย่างน้อยครั้งแรกเพื่อโหลดเครื่องมือสร้างภาพ)';
 
   /** The capture area as a JPEG file, or null (with a toast) when it cannot be drawn. */
   async function captureImage(date) {
+    let draw;
+    try { draw = await loadHtml2canvas(); }
+    catch (e) { toast(MSG.imageToolFailed, 4000); return null; }
     try {
-      const canvas = await renderCanvas();
+      const canvas = await draw($('captureArea'), { scale: 3, backgroundColor: '#ffffff', useCORS: true });
       const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.95));
       if (blob) return new File([blob], `เวร-IPD-${date}.jpg`, { type: 'image/jpeg' });
     } catch (e) { /* reported below */ }
-    toast(IMG_FAIL);
+    toast(MSG.imageFailed);
     return null;
   }
 
@@ -2027,12 +2245,265 @@
     if (await shareFile(file, { title: 'ตารางเวร IPD', text: U.thaiDate(date) }) === 'failed') downloadBlob(file, file.name);
   }
 
-  async function onRefreshClick() {
+  /** 🔄 in the header and "ลองใหม่" in the offline banner. */
+  async function onRefreshClick(btn, busyLabel) {
     if (!state.session) return;
-    await withBusy($('refreshBtn'), '…', async () => {
+    await withBusy(btn, busyLabel, async () => {
       const ok = await refresh();
       if (ok) toast('🔄 อัปเดตข้อมูลล่าสุดแล้ว');
     });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* station counts (#stationCountsModal, Supervisor)                    */
+  /* ------------------------------------------------------------------ */
+  function openStationCountsModal() {
+    if (!isSup()) { toast(MSG.supOnly); return; }
+    ui.countsDraft = Object.assign({}, state.stationCounts);
+    renderStationCounts();
+    showModal('stationCountsModal');
+  }
+
+  function closeStationCountsModal() {
+    ui.countsDraft = null;
+    hideModal('stationCountsModal');
+  }
+
+  function renderStationCounts() {
+    const d = ui.countsDraft;
+    setHtml($('stationCountsList'), d ? U.STATIONS.map(st => countRowHtml(st, d[st.id])).join('') : '');
+  }
+
+  function countRowHtml(st, n) {
+    const step = (delta, sign, label, off) =>
+      `<button type="button" class="count-step w-9 h-9 rounded-xl bg-white border text-lg font-bold text-slate-700 active:bg-slate-100 disabled:opacity-40" ` +
+      `data-station="${st.id}" data-step="${delta}" aria-label="${label} ${esc(st.name)}"${off ? ' disabled' : ''}>${sign}</button>`;
+    return `<div class="flex items-center justify-between gap-2 p-2.5 rounded-xl border" data-count-row="${st.id}" style="background:${st.bg}; border-color:${st.border}">` +
+      `<span class="text-sm font-bold min-w-0" style="color:${st.text}">${esc(st.name)}</span>` +
+      `<div class="flex items-center gap-2 shrink-0">` +
+        step(-1, '−', 'ลดจำนวนคน', n <= U.STATION_COUNT_MIN) +
+        `<span class="w-8 text-center text-base font-bold text-slate-800" data-count-value="${st.id}">${n}</span>` +
+        step(1, '+', 'เพิ่มจำนวนคน', n >= U.STATION_COUNT_MAX) +
+      `</div></div>`;
+  }
+
+  function onCountStep(e) {
+    const b = e.target && e.target.closest ? e.target.closest('.count-step') : null;
+    const d = ui.countsDraft;
+    if (!b || b.disabled || !d || !U.stationById(b.dataset.station)) return;
+    const n = d[b.dataset.station] + (Number(b.dataset.step) || 0);
+    d[b.dataset.station] = Math.min(U.STATION_COUNT_MAX, Math.max(U.STATION_COUNT_MIN, n));
+    renderStationCounts();
+  }
+
+  /** Sends only the changed counts. Days already holding more people keep them (server and slots alike). */
+  async function onSaveStationCounts() {
+    const d = ui.countsDraft;
+    if (!d || !requireInternet()) return;
+    if (!isSup()) { toast(MSG.supOnly); return; }
+    const counts = {};
+    U.STATIONS.forEach(st => { if (d[st.id] !== state.stationCounts[st.id]) counts[st.id] = d[st.id]; });
+    if (!Object.keys(counts).length) { closeStationCountsModal(); return; }
+    const alive = sessionAlive();
+    await withBusy($('stationCountsSaveBtn'), 'กำลังบันทึก…', async () => {
+      let res;
+      try { res = await userCall('setStationCounts', { counts }); }
+      catch (e) {
+        if (e.code !== 'UNKNOWN_ACTION') throw e;
+        toast(MSG.updateCodeGs, 4000);   // Code.gs is still the version without station counts
+        return;
+      }
+      if (!alive()) return;
+      ui.staffSeq++;   // a getData that started before this write must not bring the old counts back
+      state.stationCounts = U.normalizeStationCounts(res.stationCounts);
+      closeStationCountsModal();
+      persistCache();
+      render();
+      toast(MSG.countsSaved);
+    });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* connection check (#diagModal) — works before login, no token needed */
+  /* ------------------------------------------------------------------ */
+  const DIAG_STEPS = [
+    { key: 'device', label: () => 'อินเทอร์เน็ตของเครื่อง', run: diagDevice },
+    { key: 'app', label: () => `หน้าเว็บของแอป (${location.host || location.protocol})`, run: diagAppPage },
+    { key: 'script', label: () => 'เซิร์ฟเวอร์ Google Apps Script (script.google.com)', run: diagScript, slowMs: DIAG_SLOW_MS },
+    { key: 'echo', label: () => 'ช่องทางรับคำตอบ (script.googleusercontent.com)', run: diagEcho, slowMs: DIAG_SLOW_MS },
+    { key: 'cdn', label: () => '(ไม่จำเป็นต่อการใช้งาน) fonts.googleapis.com, cdnjs.cloudflare.com', run: diagCdn }
+  ];
+  const DIAG_NO_URL = { status: 'skip', note: 'ยังไม่ได้ตั้งค่า URL ของ Web App' };
+
+  function openDiag() {
+    renderDiag();
+    showModal('diagModal');
+  }
+
+  /** Runs the checks one after another; each row shows its result as soon as it is known. */
+  async function runDiag() {
+    if (ui.diag && ui.diag.running) return;
+    ui.diag = { running: true, at: Date.now(), rows: [], verdict: null };
+    const d = ui.diag;
+    renderDiag();
+    for (const step of DIAG_STEPS) {
+      const row = { key: step.key, label: step.label(), status: 'run', ms: null, note: '', code: '' };
+      d.rows.push(row);
+      renderDiag();
+      const started = Date.now();
+      const res = await step.run(d.rows);
+      Object.assign(row, res);
+      if (res.status !== 'skip') row.ms = Date.now() - started;
+      if (row.status === 'ok' && step.slowMs && row.ms > step.slowMs) {
+        row.status = 'warn';
+        row.slow = true;   // the verdict tells "slow" apart from other ⚠️ (e.g. an unexpected HTTP status)
+        row.note += ' แต่ตอบช้า';
+      }
+      renderDiag();
+    }
+    d.verdict = diagVerdict(d.rows);
+    d.running = false;
+    renderDiag();
+  }
+
+  function renderDiag() {
+    const d = ui.diag;
+    setHtml($('diagResults'), d
+      ? d.rows.map(diagRowHtml).join('')
+      : '<p class="text-xs text-slate-500 text-center">กด "เริ่มตรวจสอบ" เพื่อทดสอบการเชื่อมต่อทีละขั้น</p>');
+    const v = $('diagVerdict');
+    v.textContent = d && d.verdict ? d.verdict.text : '';
+    v.className = VERDICT_BASE + (d && d.verdict ? VERDICT_TONE[d.verdict.tone] : '');
+    setVisible(v, !!(d && d.verdict));
+    const run = $('diagRunBtn');
+    run.disabled = !!(d && d.running);
+    run.textContent = d && d.running ? 'กำลังตรวจสอบ…' : d ? '🔁 ตรวจสอบอีกครั้ง' : '▶️ เริ่มตรวจสอบ';
+    $('diagCopyBtn').disabled = !d || d.running;
+  }
+
+  function diagRowHtml(r) {
+    return `<div class="diag-row flex items-start gap-2 p-2 rounded-xl bg-slate-50 border" data-diag="${r.key}" data-status="${r.status}">` +
+      `<span class="shrink-0 text-sm leading-5">${DIAG_ICON[r.status]}</span>` +
+      `<div class="min-w-0 flex-1">` +
+        `<div class="flex justify-between gap-2 text-xs font-semibold text-slate-800"><span>${esc(r.label)}</span>` +
+          (r.ms === null ? '' : `<span class="shrink-0 text-[10px] font-medium text-slate-400">${r.ms} ms</span>`) + `</div>` +
+        (r.note ? `<p class="text-[11px] text-slate-500 leading-snug">${esc(r.note)}</p>` : '') +
+      `</div></div>`;
+  }
+
+  /** fetch with a time limit, so a check that hangs cannot hold up the next ones. */
+  async function diagFetch(url, init) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), DIAG_TIMEOUT_MS);
+    try { return await fetch(url, Object.assign({ signal: ctrl.signal }, init)); }
+    finally { clearTimeout(timer); }
+  }
+
+  function diagDevice() {
+    return deviceOffline()
+      ? { status: 'fail', note: 'เครื่องนี้ไม่ได้เชื่อมต่อ Wi-Fi หรืออินเทอร์เน็ตมือถือ' }
+      : { status: 'ok', note: 'เครื่องเชื่อมต่อเครือข่ายอยู่' };
+  }
+
+  /** `diag` in the query keeps the service worker out of the way: this must reach the real web server. */
+  async function diagAppPage() {
+    try {
+      const res = await diagFetch('manifest.json?diag=' + Date.now(), { cache: 'no-store' });
+      return res.ok ? { status: 'ok', note: 'โหลดไฟล์ของแอปได้' } : { status: 'warn', note: 'เว็บเซิร์ฟเวอร์ตอบกลับ HTTP ' + res.status };
+    } catch (e) {
+      return { status: 'fail', note: 'โหลดไฟล์ของแอปไม่ได้ — เครือข่ายนี้อาจใช้อินเทอร์เน็ตไม่ได้' };
+    }
+  }
+
+  /** Only the first hop: Google's redirect to the answer host counts as reachable (it is not followed). */
+  async function diagScript() {
+    if (!Api.url) return DIAG_NO_URL;
+    try {
+      const res = await diagFetch(Api.url, {
+        method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ action: 'ping' }),
+        redirect: 'manual', cache: 'no-store'
+      });
+      if (res.type === 'opaqueredirect' || (res.status >= 200 && res.status < 300)) return { status: 'ok', note: 'เข้าถึงได้' };
+      return { status: 'warn', note: 'ตอบกลับ HTTP ' + res.status };
+    } catch (e) {
+      return { status: 'fail', note: 'เข้าถึงไม่ได้ — เครือข่ายนี้อาจบล็อก script.google.com' };
+    }
+  }
+
+  /** A whole ping through Api (redirect followed, envelope checked), one attempt. */
+  async function diagEcho(rows) {
+    if (!Api.url) return DIAG_NO_URL;
+    try {
+      const d = await Api.call('ping', {}, { attempts: 1, timeoutMs: DIAG_TIMEOUT_MS });
+      return { status: 'ok', note: 'เซิร์ฟเวอร์ตอบกลับปกติ (เวอร์ชัน ' + (d.version || '-') + ')' };
+    } catch (e) {
+      const firstHopOk = rows.some(r => r.key === 'script' && (r.status === 'ok' || r.status === 'warn'));
+      const blocked = e.code === 'NETWORK' && firstHopOk;
+      return { status: 'fail', code: e.code, note: blocked ? 'โดเมน script.googleusercontent.com น่าจะถูกบล็อกโดยเครือข่ายนี้' : e.message };
+    }
+  }
+
+  /** HEAD requests are not handled by the service worker, so a cached copy cannot hide a blocked host. */
+  async function diagCdn() {
+    const failed = [];
+    for (const url of DIAG_CDN_URLS) {
+      try { await diagFetch(url, { method: 'HEAD', mode: 'no-cors', cache: 'no-store' }); }
+      catch (e) { failed.push(new URL(url).host); }
+    }
+    return failed.length
+      ? { status: 'warn', note: 'เข้าถึง ' + failed.join(', ') + ' ไม่ได้ — แอปยังใช้งานได้ (ใช้ฟอนต์ของเครื่อง และอาจบันทึกภาพไม่ได้)' }
+      : { status: 'ok', note: 'เข้าถึงได้' };
+  }
+
+  function diagVerdict(rows) {
+    const s = {};
+    rows.forEach(r => { s[r.key] = r; });
+    if (s.device.status === 'fail') return { tone: 'fail', text: 'เครื่องนี้ไม่ได้เชื่อมต่ออินเทอร์เน็ต — เปิด Wi-Fi หรืออินเทอร์เน็ตมือถือแล้วลองใหม่' };
+    if (s.app.status === 'fail' && s.script.status !== 'ok') return { tone: 'fail', text: 'เชื่อมต่อเครือข่ายไม่ได้ — ตรวจสอบ Wi-Fi หรืออินเทอร์เน็ตของเครื่องแล้วลองใหม่' };
+    if (s.script.status === 'skip') return { tone: 'warn', text: 'ยังไม่ได้ตั้งค่า URL ของ Web App จึงตรวจได้เฉพาะอินเทอร์เน็ตของเครื่อง' };
+    if (s.script.status === 'fail') return { tone: 'fail', text: 'เข้าถึง script.google.com ไม่ได้ — เครือข่ายนี้อาจบล็อก Google Apps Script ลองใช้อินเทอร์เน็ตมือถือ หรือแจ้งฝ่าย IT' };
+    if (s.echo.status === 'fail') {
+      return { tone: 'fail', text: s.echo.code === 'NETWORK'
+        ? 'ส่งคำขอถึง Google ได้แต่รับคำตอบไม่ได้ — ' + s.echo.note + ' ลองใช้อินเทอร์เน็ตมือถือ หรือแจ้งฝ่าย IT ให้อนุญาตโดเมนนี้'
+        : 'เซิร์ฟเวอร์ตอบกลับผิดปกติ: ' + s.echo.note + ' — ลองใหม่อีกครั้งในอีกสักครู่' };
+    }
+    if (s.script.slow || s.echo.slow) {
+      return { tone: 'warn', text: 'เชื่อมต่อได้ แต่เซิร์ฟเวอร์ Google ตอบช้า — เมื่อไม่สำเร็จ แอปจะลองใหม่ให้อัตโนมัติ' };
+    }
+    // a ⚠️ first hop that is not slow (e.g. Google's transient HTTP 404 page) while the full ping worked: usable
+    return { tone: 'ok', text: 'เชื่อมต่อเซิร์ฟเวอร์ได้ตามปกติ' + (s.cdn.status === 'ok' ? '' : ' (ฟอนต์/เครื่องมือสร้างภาพโหลดไม่ได้ แต่ไม่กระทบการใช้งาน)') };
+  }
+
+  /** Plain-text report for support: versions, times, host names and results only — no token, URL or names. */
+  function diagReport() {
+    const d = ui.diag;
+    const lines = [
+      'เวร IPD — ผลตรวจสอบการเชื่อมต่อ',
+      'เวอร์ชันแอป: ' + Api.clientVersion,
+      'เวลา: ' + U.formatStamp(d.at),
+      'เบราว์เซอร์: ' + navigator.userAgent,
+      'สถานะในแอป: ' + SYNC_LOOK[state.conn].label + ' (ล้มเหลวติดกัน ' + ui.failStreak + ' ครั้ง)'
+    ];
+    d.rows.forEach(r => lines.push(DIAG_ICON[r.status] + ' ' + r.label + (r.ms === null ? '' : ' — ' + r.ms + ' ms') + (r.note ? ' — ' + r.note : '')));
+    lines.push('สรุป: ' + d.verdict.text);
+    return lines.join('\n');
+  }
+
+  async function onDiagCopy() {
+    if (!ui.diag || ui.diag.running) return;
+    try {
+      await navigator.clipboard.writeText(diagReport());
+      toast('📋 คัดลอกผลการตรวจแล้ว');
+    } catch (e) {
+      toast('คัดลอกไม่สำเร็จ — กรุณาบันทึกภาพหน้าจอแทน');
+    }
+  }
+
+  /** A new service worker took over a page that already had one (an update, not the first install). */
+  function watchForUpdate() {
+    const sw = navigator.serviceWorker;
+    if (!sw || !sw.controller) return;
+    sw.addEventListener('controllerchange', () => setVisible($('updateBanner'), true), { once: true });
   }
 
   /* ------------------------------------------------------------------ */
@@ -2050,24 +2521,39 @@
     onEnter('loginPassword', () => spawn(handleLogin));
     on('loginReloadBtn', 'click', () => { showLoginError(''); reloadLoginUsers(); });
     on('loginSettingsLink', 'click', () => openSetupModal(true));
+    on('loginDiagLink', 'click', openDiag);
+    on('setupDiagLink', 'click', openDiag);
     on('pwSaveBtn', 'click', () => spawn(onPwSave));
     ['pwOld', 'pwNew', 'pwConfirm'].forEach(id => onEnter(id, () => spawn(onPwSave)));
     on('pwCancelBtn', 'click', closePasswordModal);
     on('pwLogoutBtn', 'click', () => { doLogout(); toast('🚪 ออกจากระบบเรียบร้อย'); });
 
     // header
-    on('refreshBtn', 'click', () => spawn(onRefreshClick));
+    on('refreshBtn', 'click', () => spawn(() => onRefreshClick($('refreshBtn'), '…')));
+    on('syncStatus', 'click', openDiag);
+    on('offlineRetryBtn', 'click', () => spawn(() => onRefreshClick($('offlineRetryBtn'), 'กำลังลองใหม่…')));
+    on('offlineDiagBtn', 'click', openDiag);
     on('datePickerBtn', 'click', toggleDatePicker);
     on('prevDayBtn', 'click', () => setSelectedDate(U.addDays(state.selectedDate, -1)));
     on('nextDayBtn', 'click', () => setSelectedDate(U.addDays(state.selectedDate, 1)));
     on('currentDate', 'change', e => setSelectedDate(e.target.value));
     on('logoutBtn', 'click', onLogoutClick);
+    on('updateBanner', 'click', () => location.reload());
+
+    // connection check
+    on('diagRunBtn', 'click', () => spawn(runDiag));
+    on('diagCopyBtn', 'click', () => spawn(onDiagCopy));
+    on('diagCloseBtn', 'click', () => hideModal('diagModal'));
 
     // station tab
     on('stationsContainer', 'change', onStationChange);
     on('dailyRemark', 'input', onRemarkInput);
     on('dailyRemark', 'change', onRemarkInput);
-    on('stationSaveBtn', 'click', () => spawn(onSaveStation));
+    on('stationSaveBtn', 'click', () => spawn(onSaveStation, WRITE));
+    on('stationCountsBtn', 'click', openStationCountsModal);
+    on('stationCountsList', 'click', onCountStep);
+    on('stationCountsCancelBtn', 'click', closeStationCountsModal);
+    on('stationCountsSaveBtn', 'click', () => spawn(onSaveStationCounts, WRITE));
 
     // leave tab
     on('summaryBtn', 'click', () => spawn(onSummary));
@@ -2075,25 +2561,25 @@
     on('groupFilterBar', 'click', e => { const b = e.target.closest && e.target.closest('.grp-btn'); if (b) setFilter(b.dataset.f); });
     on('leaveContainer', 'click', onLeaveContainerClick);
     on('confirmLeaveCancelBtn', 'click', closeConfirmLeave);
-    on('confirmLeaveBtn', 'click', () => spawn(onConfirmLeave));
+    on('confirmLeaveBtn', 'click', () => spawn(onConfirmLeave, WRITE));
 
     // staff tab
     on('openTransferBtn', 'click', openTransferModal);
     on('transferCancelBtn', 'click', () => hideModal('transferModal'));
-    on('transferConfirmBtn', 'click', () => spawn(onTransfer));
-    on('addStaffBtn', 'click', () => spawn(onAddStaff));
-    onEnter('newStaffName', () => spawn(onAddStaff));
+    on('transferConfirmBtn', 'click', () => spawn(onTransfer, WRITE));
+    on('addStaffBtn', 'click', () => spawn(onAddStaff, WRITE));
+    onEnter('newStaffName', () => spawn(onAddStaff, WRITE));
     on('staffListContainer', 'click', onStaffListClick);
-    on('importBtn', 'click', () => spawn(onImport));
+    on('importBtn', 'click', () => spawn(onImport, WRITE));
     on('clearLegacyBtn', 'click', onClearLegacy);
 
     // summary tab
     on('exportBtn', 'click', () => spawn(onExport));
     on('copyDayBtn', 'click', onCopyDay);
-    on('pasteDayBtn', 'click', () => spawn(onPasteDay));
+    on('pasteDayBtn', 'click', () => spawn(onPasteDay, WRITE));
     on('shareImgBtn', 'click', () => spawn(onShareImage));
     on('saveImgBtn', 'click', () => spawn(onSaveImage));
-    on('clearDayBtn', 'click', () => spawn(onClearDay));
+    on('clearDayBtn', 'click', () => spawn(onClearDay, WRITE));
 
     // bottom nav
     on('bottomNav', 'click', e => { const b = e.target.closest && e.target.closest('.nav-btn'); if (b) switchTab(b.dataset.tab); });
@@ -2101,7 +2587,9 @@
     // global
     document.addEventListener('keydown', e => {
       if (e.key !== 'Escape') return;
-      if (isShown('confirmLeaveModal')) closeConfirmLeave();
+      if (isShown('diagModal')) hideModal('diagModal');
+      else if (isShown('confirmLeaveModal')) closeConfirmLeave();
+      else if (isShown('stationCountsModal')) closeStationCountsModal();
       else if (isShown('transferModal')) hideModal('transferModal');
       else if (isShown('passwordModal')) closePasswordModal();
       else if (isShown('setupModal') && ui.setupCancelable) hideModal('setupModal');
@@ -2114,8 +2602,11 @@
     setInterval(() => {
       if (document.visibilityState === 'visible' && state.session && !ui.pwForced) refresh({ silent: true });
     }, REFRESH_EVERY_MS);
-    window.addEventListener('online', () => { if (state.session) refresh({ silent: true }); });
-    window.addEventListener('offline', () => setOnline(false));
+    window.addEventListener('online', () => {
+      if (state.session) refresh({ silent: true });
+      else if (isShown('loginModal')) reloadLoginUsers();
+    });
+    window.addEventListener('offline', () => setConn('offline', 'device'));
     window.addEventListener('beforeunload', e => {
       if (isDraftDirty()) { e.preventDefault(); e.returnValue = ''; }
     });
@@ -2147,10 +2638,13 @@
     bindEvents();
     initDateInputs();
     Api.onActivity(() => renderSyncStatus());
+    Api.onStatus(onApiStatus);
     Api.onAuthError = onSessionError;
+    if (deviceOffline()) setConn('offline', 'device');
     render();
     syncLayout();
     registerServiceWorker();
+    watchForUpdate();
     spawn(startup).then(() => { render(); resolveReady(); });
   }
 
