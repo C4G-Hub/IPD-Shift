@@ -26,6 +26,9 @@
 
   const THAI_DAYS = ['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์'];
   const THAI_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+  const THAI_MONTHS_FULL = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม',
+    'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
+  const THAI_WEEKDAYS_SHORT = Object.freeze(['อา', 'จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส']);   // Sunday first
   const YMD_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
   const DAY_MS = 86400000;
 
@@ -99,6 +102,41 @@
     }
     const yy = String(y).padStart(4, '0'), mo = pad2(m);
     return { from: yy + '-' + mo + '-01', to: yy + '-' + mo + '-' + pad2(daysInMonth_(y, m)) };
+  }
+
+  /** 'YYYY-MM' of a 'YYYY-MM-DD' / 'YYYY-MM' string or a Date ('' when invalid). */
+  function monthKey(str) {
+    const r = monthRange(str);
+    return r ? r.from.slice(0, 7) : '';
+  }
+
+  /** The month `n` months after the one containing `str` → 'YYYY-MM' ('' when invalid). */
+  function addMonths(str, n) {
+    const k = monthKey(str);
+    if (!k) return '';
+    const total = Number(k.slice(0, 4)) * 12 + Number(k.slice(5, 7)) - 1 + (Number(n) || 0);
+    return String(Math.floor(total / 12)).padStart(4, '0') + '-' + pad2((total % 12) + 1);
+  }
+
+  /** "พฤศจิกายน 2569" (Buddhist year) for a month or date; '-' when invalid. */
+  function thaiMonthYear(str) {
+    const k = monthKey(str);
+    if (!k) return '-';
+    return THAI_MONTHS_FULL[Number(k.slice(5, 7)) - 1] + ' ' + (Number(k.slice(0, 4)) + 543);
+  }
+
+  /**
+   * Calendar weeks of the month containing `str`, Sunday first: 7-item arrays holding 'YYYY-MM-DD' for the
+   * days of that month and '' for the blanks before the 1st and after the last day. [] when invalid.
+   */
+  function monthGrid(str) {
+    const r = monthRange(str);
+    if (!r) return [];
+    const cells = new Array(parseYmd(r.from).getDay()).fill('').concat(eachDate(r.from, r.to));
+    while (cells.length % 7) cells.push('');
+    const weeks = [];
+    for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7));
+    return weeks;
   }
 
   function utcOf_(str) {
@@ -244,8 +282,9 @@
   }
 
   global.Utils = {
-    STATIONS, LEAVE_TYPES, QUEUE_TYPES, STATION_COUNT_MIN, STATION_COUNT_MAX,
+    STATIONS, LEAVE_TYPES, QUEUE_TYPES, STATION_COUNT_MIN, STATION_COUNT_MAX, THAI_WEEKDAYS_SHORT,
     pad2, ymd, todayStr, parseYmd, addDays, compareYmd, eachDate, monthRange, daysBetweenInclusive,
+    monthKey, addMonths, thaiMonthYear, monthGrid,
     thaiDate, formatStamp, formatStampShort, escapeHtml, csvCell, buildCsv,
     normalizeName, validateName, validatePassword, isValidYmd, queueOrder, stationById, normalizeStationCounts, onReady
   };

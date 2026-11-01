@@ -124,6 +124,7 @@
     countsDraft: null,        // {[stationId]: n} while #stationCountsModal is open
     diag: null,               // {running, at, rows:[{key, label, status, ms, note, code}], verdict:{tone, text}}
     dayBusy: null,            // date whose Day write (save / paste / clear) is in flight: its editor is locked
+    calMonth: '',             // 'YYYY-MM' shown by the leave calendar ('' = the selected date's month)
     cacheLoaded: [],          // ranges present in the offline cache (display only)
     cacheSavedAt: null,
     apiUrlSource: '',         // 'config' | 'local' | ''
@@ -597,6 +598,10 @@
     setHtml($('auditLogContent'), '');
     setHtml($('staffListContainer'), '');
     setHtml($('importResult'), '');
+    setHtml($('leaveCalendar'), '');
+    setHtml($('calDayDetail'), '');
+    $('calMonthTotal').textContent = '';
+    ui.calMonth = '';
     $('transferTargetSelect').innerHTML = '<option value="">-- เลือกผู้รับสิทธิ์ --</option>';
     ['newStaffName', 'newStaffPass', 'pwOld', 'pwNew', 'pwConfirm'].forEach(id => { $(id).value = ''; });
   }
@@ -1306,9 +1311,14 @@
     const list = leaveList(date);
     $('stationLeaveCount').textContent = list.length + ' คน';
     setHtml($('stationLeaves'), list.length
-      ? list.map(l => `<div>• <span class="font-semibold text-slate-800">${esc(l.name)}</span>: ` +
-          `<span class="font-semibold text-rose-600">${esc(l.type)}${l.rank ? ` (คนที่ ${l.rank})` : ''}</span></div>`).join('')
+      ? list.map(leaveItemHtml).join('')
       : '<span class="italic text-slate-400">ไม่มีรายการลาวันนี้</span>');
+  }
+
+  /** "• ชื่อ: ประเภท (คนที่ N)" — one entry of leaveList() (Station card and the leave calendar's day list). */
+  function leaveItemHtml(l) {
+    return `<div>• <span class="font-semibold text-slate-800">${esc(l.name)}</span>: ` +
+      `<span class="font-semibold text-rose-600">${esc(l.type)}${l.rank ? ` (คนที่ ${l.rank})` : ''}</span></div>`;
   }
 
   /** Supervisors edit the remark in the textarea; everyone else reads it in #remarkView. */
@@ -1387,6 +1397,7 @@
 
   function renderLeaveTab() {
     const date = state.selectedDate;
+    renderLeaveCalendar();
     document.querySelectorAll('.grp-btn').forEach(b => {
       const on = b.dataset.f === state.filter;
       b.className = GRP_BASE + (on ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600');
@@ -1448,6 +1459,121 @@
     if (['all', 'regular', 'backup'].indexOf(f) < 0) f = 'all';
     state.filter = f;
     renderLeaveTab();
+  }
+
+  /* ---------- leave calendar: how many people are on leave on each day of a month ---------- */
+  /** Cell colours by number of people on leave (index = count, the last one for "4 or more"). */
+  const CAL_HEAT = ['bg-white border-slate-200', 'bg-rose-50 border-rose-200', 'bg-rose-100 border-rose-300',
+    'bg-rose-200 border-rose-300', 'bg-rose-300 border-rose-400'];
+  const CAL_SCOPE = { regular: ' (เฉพาะคนประจำ)', backup: ' (เฉพาะทีมแทนเวร)' };
+
+  function calMonth() { return ui.calMonth || U.monthKey(state.selectedDate); }
+
+  /** leaveList(date) limited to the group filter of the leave tab (queue ranks stay those of everyone). */
+  function filteredLeaveList(date) {
+    const list = leaveList(date);
+    if (state.filter === 'all') return list;
+    const groups = new Map(state.staff.map(s => [s.name, s.group]));
+    return list.filter(l => groups.get(l.name) === state.filter);
+  }
+
+  function renderLeaveCalendar() {
+    const box = $('leaveCalendar');
+    if (!state.user) { setHtml(box, ''); return; }
+    const month = calMonth();
+    const today = U.todayStr();
+    $('calMonthLabel').textContent = U.thaiMonthYear(month);
+
+    let loading = false, missing = false, total = 0;
+    const byType = nameMap();
+    const cells = U.monthGrid(month).flat().map((date, i) => {
+      if (!date) return '<div class="h-11" aria-hidden="true"></div>';
+      const view = dayView(date);
+      const known = view === 'ready' || view === 'cached';
+      if (view === 'loading') loading = true;
+      else if (!known) missing = true;
+      const list = known ? filteredLeaveList(date) : [];
+      list.forEach(l => { byType[l.type] = (byType[l.type] || 0) + 1; });
+      total += list.length;
+      return calDayHtml(date, known ? list.length : null, i % 7 === 0, date === today, date === state.selectedDate);
+    });
+    const head = U.THAI_WEEKDAYS_SHORT.map((d, i) =>
+      `<div class="text-[10px] font-semibold py-0.5 ${i === 0 ? 'text-rose-500' : 'text-slate-500'}">${d}</div>`).join('');
+    setHtml(box, `<div class="grid grid-cols-7 gap-1 text-center">${head}${cells.join('')}</div>`);
+
+    const status = $('calStatus');
+    setHtml(status, loading ? '⏳ กำลังโหลดข้อมูลของเดือนนี้…'
+      : missing ? '📭 ยังไม่มีข้อมูลบางวันของเดือนนี้ในเครื่อง <button type="button" data-cal="retry" class="font-semibold text-blue-600 underline">โหลดอีกครั้ง</button>'
+      : '');
+    setVisible(status, loading || missing);
+
+    const scope = CAL_SCOPE[state.filter] || '';
+    const types = U.LEAVE_TYPES.concat(Object.keys(byType).filter(t => U.LEAVE_TYPES.indexOf(t) < 0))
+      .filter(t => byType[t]).map(t => `${t} ${byType[t]}`);
+    $('calMonthTotal').textContent = total
+      ? `รวมทั้งเดือน${scope}: ลา ${total} ครั้ง · ${types.join(' · ')}`
+      : `รวมทั้งเดือน${scope}: ไม่มีการลา`;
+    renderCalDayDetail(month);
+  }
+
+  /** count: people on leave (null = that day's data is not on this device). */
+  function calDayHtml(date, count, sunday, isToday, selected) {
+    const heat = count === null ? 'bg-slate-50 border-dashed border-slate-200' : CAL_HEAT[Math.min(count, CAL_HEAT.length - 1)];
+    const num = isToday ? 'bg-blue-600 text-white' : sunday ? 'text-rose-500' : 'text-slate-600';
+    const label = U.thaiDate(date) + (count === null ? ' — ยังไม่มีข้อมูล' : count ? ` — ลา ${count} คน` : ' — ไม่มีผู้ลา');
+    return `<button type="button" class="cal-day relative h-11 rounded-lg border ${heat}${selected ? ' ring-2 ring-blue-500' : ''}" ` +
+        `data-date="${date}" data-count="${count === null ? '' : count}" aria-pressed="${selected ? 'true' : 'false'}" ` +
+        `aria-label="${esc(label)}" title="${esc(label)}">` +
+      `<span class="absolute top-0.5 left-0.5 px-1 rounded-full text-[10px] leading-4 font-semibold ${num}">${Number(date.slice(8))}</span>` +
+      (count ? `<span class="cal-count absolute bottom-0.5 inset-x-0 text-[10px] leading-4 font-bold text-rose-700">${count} คน</span>` : '') +
+    `</button>`;
+  }
+
+  /** Who is on leave on the selected date, when that date is in the month on screen. */
+  function renderCalDayDetail(month) {
+    const el = $('calDayDetail');
+    const date = state.selectedDate;
+    if (U.monthKey(date) !== month) {
+      setHtml(el, '<span class="italic text-slate-400">แตะวันที่ในปฏิทินเพื่อดูรายชื่อผู้ลา</span>');
+      return;
+    }
+    const title = `<div class="font-semibold text-slate-800">${esc(U.thaiDate(date))}`;
+    if (!dayKnown(date)) {
+      setHtml(el, title + '</div><span class="italic text-slate-400">ยังไม่มีข้อมูลของวันนี้</span>');
+      return;
+    }
+    const list = filteredLeaveList(date);
+    setHtml(el, title + ` — ลา ${list.length} คน</div>` +
+      (list.length ? list.map(leaveItemHtml).join('') : '<span class="italic text-slate-400">ไม่มีผู้ลา</span>'));
+  }
+
+  /** Shows `month` at once (whatever is loaded) and fetches its missing days. */
+  function showCalMonth(month) {
+    if (!month) return;
+    ui.calMonth = month;
+    renderLeaveCalendar();
+    if (!state.session) return;
+    const r = U.monthRange(month);
+    track(ensureRange(r.from, r.to)).then(() => renderLeaveTab(), e => {
+      renderLeaveTab();
+      if (Api.isTransient(e)) scheduleRetry();
+      handleError(e, { quiet: true });
+    });
+  }
+
+  function onCalendarClick(e) {
+    const t = e.target && e.target.closest ? e.target.closest('.cal-day, [data-cal]') : null;
+    if (!t) return;
+    if (t.classList.contains('cal-day')) { setSelectedDate(t.dataset.date); return; }
+    const action = t.dataset.cal;
+    if (action === 'prev' || action === 'next') showCalMonth(U.addMonths(calMonth(), action === 'next' ? 1 : -1));
+    else if (action === 'retry') showCalMonth(calMonth());
+    else if (action === 'today') {
+      const today = U.todayStr();
+      ui.calMonth = U.monthKey(today);
+      setSelectedDate(today);
+      renderLeaveTab();
+    }
   }
 
   /* ---------- staff tab ---------- */
@@ -1595,6 +1721,7 @@
       state.draft = null;
     }
     state.selectedDate = date;
+    ui.calMonth = U.monthKey(date);   // the leave calendar follows a date picked anywhere
     render();
     if (state.session) {
       const w = windowFor(date);
@@ -2559,6 +2686,7 @@
     on('summaryBtn', 'click', () => spawn(onSummary));
     on('leaveTargetDate', 'change', e => setSelectedDate(e.target.value));
     on('groupFilterBar', 'click', e => { const b = e.target.closest && e.target.closest('.grp-btn'); if (b) setFilter(b.dataset.f); });
+    on('leaveCalendarCard', 'click', onCalendarClick);
     on('leaveContainer', 'click', onLeaveContainerClick);
     on('confirmLeaveCancelBtn', 'click', closeConfirmLeave);
     on('confirmLeaveBtn', 'click', () => spawn(onConfirmLeave, WRITE));

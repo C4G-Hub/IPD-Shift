@@ -14,7 +14,7 @@
  *    an account), so only this app's own "ipd-" caches (plus the v1 app's cache,
  *    by exact name) are ever deleted.
  * ===================================================================== */
-const VERSION = 'ipd-shift-v2.2.0';
+const VERSION = 'ipd-shift-v2.3.0';
 const SHELL = VERSION + '-shell';
 const RUNTIME = 'ipd-runtime-v3';      // v3: drops the Tailwind CDN script cached by v2.1
 const OWN_CACHE_PREFIX = 'ipd-';
