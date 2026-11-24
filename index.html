@@ -2,514 +2,913 @@
 <html lang="th">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
 <title>เวร IPD | ตารางเวรนักรังสีการแพทย์</title>
 <meta name="description" content="ตารางเวรและบันทึกการลา นักรังสีการแพทย์หน่วยงานผู้ป่วยใน (IPD) — ข้อมูลกลางบน Google Sheets">
+<script>
+/* Boot guard (R1a fix A-F1) — no dependencies, runs before anything else loads. The page shows "กำลังอัปเดตแอป…"
+   with a "โหลดใหม่" button instead of a blank or broken screen when, during an update from v2.2:
+   - a script of THIS release (js/*.js?v=BOOT_BUILD) or the stylesheet fails to load, or
+   - the app did not start (window.App.core / window.UiKit missing after `load`), or
+   - the stylesheet is the one of v2.2: css/tailwind.css?v=BOOT_BUILD is versioned like the scripts, but a stylesheet
+     left in the v2.2 worker's cache (or the HTTP cache) is still recognised by a rule only this release's has (CSS_MARK,
+     the safety net).
+   It then checks those files again (cache:'reload', through the service worker, which keeps the answers) every few
+   seconds and when the device reports `online`, and reloads once they all answer with this release.
+   Automatic reloads share a sessionStorage counter (ipd_boot_retry) with js/app.js and stop after 2 (only the
+   button remains); js/app.js clears the counter after a good start (__ipdBoot.healthy()).
+   BOOT_BUILD = sw.js VERSION = the ?v= of the stylesheet and the scripts = js/api.js CLIENT_VERSION (tests/sw.test.js). */
+(function () {
+  'use strict';
+  var BOOT_BUILD = '2.9.0';
+  /* a class of this release's stylesheet that v2.2's did not have (any background colour counts: a theme tweak is fine;
+     removing the class from every page/script would make every start look stale — tests/e2e-upgrade.test.js U9) */
+  var CSS_MARK = 'bg-brand-600';
+  var KEY = 'ipd_boot_retry', MAX_AUTO = 2, PROBE_MS = 8000;
+  var failed = [], shown = false, timer = 0, busy = false;
+  function link(u) { var a = document.createElement('a'); a.href = String(u || ''); return a; }
+  function isCss(u) { var a = link(u); return a.host === location.host && /\/tailwind\.css$/.test(a.pathname); }
+  function isAsset(u) { var a = link(u); return a.host === location.host && (a.search.indexOf('v=' + BOOT_BUILD) >= 0 || isCss(u)); }
+  function cssStale() {
+    try {
+      var el = document.createElement('i');
+      el.className = CSS_MARK;
+      el.style.display = 'none';
+      document.body.appendChild(el);
+      var c = getComputedStyle(el).backgroundColor;
+      document.body.removeChild(el);
+      return !c || c === 'transparent' || c === 'rgba(0, 0, 0, 0)';
+    } catch (e) { return false; }
+  }
+  function healthy() { return !failed.length && !cssStale(); }
+  function tries() { try { return parseInt(sessionStorage.getItem(KEY), 10) || 0; } catch (e) { return MAX_AUTO; } }
+  function reloadPage() { if (typeof window.__ipdTestReload === 'function') window.__ipdTestReload(); else location.reload(); }
+  function autoReload() {
+    var n = tries();
+    if (n >= MAX_AUTO) { note(); return; }
+    try { sessionStorage.setItem(KEY, String(n + 1)); } catch (e) { note(); return; }
+    clearTimeout(timer);
+    reloadPage();
+  }
+  function note() {
+    var el = document.getElementById('bootUpdateNote');
+    if (el) el.textContent = tries() >= MAX_AUTO ? 'ถ้ายังไม่หาย แตะ "โหลดใหม่"' : 'แอปจะโหลดใหม่เองเมื่อเชื่อมต่อได้';
+  }
+  function urls() {
+    var out = failed.slice(), els = document.querySelectorAll('script[src],link[rel="stylesheet"][href]');
+    for (var i = 0; i < els.length; i++) {
+      var u = els[i].src || els[i].href;
+      if (isAsset(u) && out.indexOf(u) < 0) out.push(u);
+    }
+    return out;
+  }
+  /* every file of this release answers now (the stylesheet with CSS_MARK) → reload */
+  function probe() {
+    clearTimeout(timer);
+    if (busy || tries() >= MAX_AUTO || typeof window.fetch !== 'function') { note(); return; }
+    busy = true;
+    var list = urls(), left = list.length, ok = true;
+    function done() {
+      busy = false;
+      if (ok && list.length) autoReload();
+      else timer = setTimeout(probe, PROBE_MS);
+    }
+    if (!left) { done(); return; }
+    list.forEach(function (u) {
+      window.fetch(u, { cache: 'reload' })
+        .then(function (r) {
+          if (!r || !r.ok) { ok = false; return; }
+          if (isCss(u)) return r.text().then(function (t) { if (t.indexOf('.' + CSS_MARK) < 0) ok = false; });
+        })
+        .then(null, function () { ok = false; })
+        .then(function () { if (--left === 0) done(); });
+    });
+  }
+  function show() {
+    if (shown) return;
+    if (!document.body) { document.addEventListener('DOMContentLoaded', show); return; }
+    shown = true;
+    var box = document.getElementById('bootUpdate');
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'bootUpdate';
+      box.setAttribute('role', 'alert');
+      box.style.cssText = 'position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;padding:16px;background:#FFFBF2;color:#1A2C63;font:16px/1.6 Sarabun,"Noto Sans Thai","Leelawadee UI",Thonburi,sans-serif;text-align:center;';
+      box.innerHTML = '<div style="max-width:22rem;background:#fff;border:2px solid #FFE3EF;border-radius:20px;padding:24px 20px;">' +
+        '<p id="bootUpdateText" style="margin:0 0 8px;font-size:17px;font-weight:600;"></p>' +
+        '<p id="bootUpdateNote" style="margin:0 0 16px;font-size:14px;color:#475569;"></p>' +
+        '<button type="button" id="bootUpdateBtn" style="min-height:48px;padding:0 24px;border:0;border-radius:16px;background:#DB2777;color:#fff;font:inherit;font-weight:600;cursor:pointer;"></button></div>';
+      document.body.appendChild(box);
+      document.getElementById('bootUpdateText').textContent = 'กำลังอัปเดตแอปเป็นรุ่นใหม่ กรุณาเชื่อมต่ออินเทอร์เน็ตแล้วเปิดใหม่';
+      var btn = document.getElementById('bootUpdateBtn');
+      btn.textContent = 'โหลดใหม่';
+      btn.addEventListener('click', function () { try { sessionStorage.removeItem(KEY); } catch (e) { /* ignore */ } reloadPage(); });
+    }
+    note();
+    window.addEventListener('online', probe);
+    timer = setTimeout(probe, navigator.onLine === false ? PROBE_MS : 1500);
+  }
+  window.addEventListener('error', function (e) {
+    var t = e && e.target;
+    if (!t || t === window || t.nodeType !== 1) return;
+    var u = t.src || t.href;
+    if (isAsset(u)) { failed.push(u); if (document.readyState === 'complete') show(); }
+  }, true);
+  window.addEventListener('load', function () {
+    setTimeout(function () { if (!healthy() || !(window.App && window.App.core && window.UiKit)) show(); }, 0);
+  });
+  /* js/app.js calls fail() when it finds itself on a page it was not built for, and healthy() before it clears
+     the reload counter; failed = the URLs that did not load */
+  window.__ipdBoot = { build: BOOT_BUILD, fail: show, healthy: healthy, failed: failed };
+})();
+</script>
 
 <!-- PWA Meta Tags -->
 <link rel="manifest" href="manifest.json">
-<meta name="theme-color" content="#2563eb">
+<meta name="theme-color" content="#8FD8F5">
+<meta name="color-scheme" content="light">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="เวร IPD">
-<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon-180.png">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16.png">
 
 <!-- Nothing here blocks the first paint on a CDN: the styles are a local file (css/tailwind.css is generated from the
-     classes used in index.html + js/*.js — re-run tools/build-css.ps1 whenever classes change), the font loads in the
-     background (system Thai fonts until then) and html2canvas is loaded by js/app.js when an image is first saved. -->
+     classes used in index.html + js/*.js — re-run tools/build-css.ps1 whenever classes change), the fonts (Sarabun for text, Mitr
+     for titles/buttons — theme v2) load in the background (system Thai fonts until then, and for good when Google Fonts
+     is blocked) and html2canvas is loaded by js/app.js when an image is first saved. -->
 <link rel="preconnect" href="https://script.google.com" crossorigin>
 <link rel="preconnect" href="https://script.googleusercontent.com" crossorigin>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
-<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap"></noscript>
-<link rel="stylesheet" href="css/tailwind.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Mitr:wght@500;600&family=Sarabun:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Mitr:wght@500;600&family=Sarabun:wght@400;500;600;700&display=swap"></noscript>
+<link rel="stylesheet" href="css/tailwind.css?v=2.9.0">
 <style>
 *{-webkit-tap-highlight-color:transparent;}
-body{font-family:'Sarabun','Noto Sans Thai','Leelawadee UI','Thonburi',sans-serif;overscroll-behavior-y:contain;-webkit-user-select:none;user-select:none;}
+/* no double-tap zoom delay, but pinch zoom stays available (accessibility) */
+html{touch-action:manipulation;}
+body{font-family:'Sarabun','Noto Sans Thai','Leelawadee UI','Thonburi',sans-serif;overscroll-behavior-y:contain;}
+/* only the chrome is not selectable (a long press on a button must not start a selection); names, remarks and
+   other texts on the screens can be selected and copied */
+header,nav,button,[data-chrome]{-webkit-user-select:none;user-select:none;}
 input,textarea,select{-webkit-user-select:text;user-select:text;font-size:16px!important;}
 .safe-top{padding-top:env(safe-area-inset-top);}
-.safe-bottom{padding-bottom:calc(env(safe-area-inset-bottom) + 4px);}
 .tab-panel{display:none;}
 .tab-panel.active{display:block;animation:fade .2s ease;}
 @keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.tab-panel.active{animation:none;}}
 .no-scrollbar::-webkit-scrollbar{display:none;}
 /* keep "hidden" effective even before / without the stylesheet */
 .hidden{display:none!important;}
-#toast{white-space:pre-line;text-align:center;max-width:92vw;}
-button:disabled{cursor:not-allowed;}
-.day-control:disabled:not([aria-busy]){opacity:.5;}
-/* phones (below Tailwind's sm): header buttons show only their icon and the sync pill only its dot, so the
-   full Thai date fits; the labels stay available to screen readers (aria-label / visually hidden text) */
-@media (max-width:639px){
-  .btn-label{display:none;}
-  #syncStatus [data-role="label"]{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;}
+/* the toast: centred, as wide as its text up to min(28rem, 100vw - 2rem) (classes); long texts read left-aligned */
+#toast{white-space:pre-line;text-align:center;max-width:min(28rem,calc(100vw - 2rem));}
+#toast[data-long]{text-align:left;}
+button:disabled,[aria-disabled="true"]{cursor:not-allowed;}
+/* day tools rows (list rows, not buttons): a row that cannot act now is faded; "วางข้อมูล" without a copy keeps its reason readable */
+[data-day-tool]:disabled:not([aria-busy]){opacity:.5;}
+[data-day-tool][aria-disabled="true"]>span:first-child{opacity:.45;}
+[data-day-tool][aria-disabled="true"] [data-role="tool-label"]{color:#64748b;}
+/* without the web fonts (Mitr did not load: js/app.js sets html.no-webfont) the system Thai fonts have no 500 weight, so
+   display text would fall back to 400 and the hierarchy would flatten: give it 600 instead (R1a FIX-2 Minor 9) */
+html.no-webfont .font-display{font-weight:600;}
+/* bottom bar / rail: the active entry's icon sits on a tinted pill (brand-100) */
+.nav-btn[aria-current="page"] .nav-ic{background-color:#FFE3EF;}
+/* phone landscape / very short windows (R1a FIX-2 C-M4): the header scrolls away with the page, the bottom bar is slimmer */
+@media (max-height:500px){
+  #appHeader{position:absolute;}
+  #weekStrip .week-day,#prevDayBtn,#nextDayBtn{height:2.75rem;}
+  #weekStrip .week-day{gap:0;}
 }
+@media (max-height:500px) and (max-width:767px){
+  #bottomNav .nav-btn{height:2.75rem;flex-direction:row;gap:.375rem;padding-top:0;padding-bottom:0;}
+  #bottomNav .nav-ic{width:2.5rem;height:1.75rem;}
+}
+/* theme v2 "Pastel Kawaii" (colours = the families of tools/build-css.html; keep in step):
+   backdrop = cream-50 with very soft pastel polka dots (brand-200 / lilac-200 / accent-200, as on the picture's backdrop) */
+.kawaii-bg{background-color:#FFFBF2;background-image:radial-gradient(circle,rgba(255,200,223,.5) 0 3.5px,transparent 4.5px),radial-gradient(circle,rgba(221,210,252,.55) 0 3px,transparent 4px),radial-gradient(circle,rgba(188,232,251,.6) 0 3px,transparent 4px);background-size:124px 124px,152px 152px,176px 176px;background-position:18px 26px,86px 100px,46px 138px;}
+/* the "X-RAY IPD" wordmark of the login screen: navy letters with a white outline and a pink sticker edge (text-shadow,
+   works in every browser; the outline is drawn first so the pink edge sits behind it) */
+.wordmark>span{text-shadow:none;}
+.wordmark{color:#1A2C63;letter-spacing:.03em;text-shadow:2px 0 #fff,-2px 0 #fff,0 2px #fff,0 -2px #fff,1.5px 1.5px #fff,-1.5px 1.5px #fff,1.5px -1.5px #fff,-1.5px -1.5px #fff,0 4px #FF9FC6,2px 4px #FF9FC6,-2px 4px #FF9FC6,0 5px #FF9FC6;}
+/* the native date picker of the header date: an invisible input on top of the date (a tap opens the picker) */
+#currentDate{-webkit-appearance:none;appearance:none;}
+#currentDate::-webkit-calendar-picker-indicator{position:absolute;inset:0;width:100%;height:100%;margin:0;padding:0;cursor:pointer;opacity:0;}
+/* keyboard focus on the header date (the transparent picker) is drawn around the date lines (ink, offset) */
+#headerMain:has(#currentDate:focus-visible),#headerMain.kbd-focus{outline:2px solid #1A2C63;outline-offset:2px;border-radius:.75rem;}
+/* the header date never shrinks (C-M1): js/app.js fitHeader() steps the sync pill down instead — data-fit full (dot +
+   label) → short (dot + short label) → icon (state icon + dot; the label only for screen readers) → tight (also no chevron) */
+#syncStatus [data-role="icon"],#syncStatus [data-role="short"]{display:none;}
+#syncStatus[data-fit="short"] [data-role="short"]{display:inline;}
+#syncStatus[data-fit="short"] [data-role="label"]{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;}
+#syncStatus[data-fit="icon"],#syncStatus[data-fit="tight"]{padding-left:.5rem;padding-right:.5rem;}
+#syncStatus[data-fit="nopill"]{display:none;}
+#syncStatus[data-fit="icon"] [data-role="icon"],#syncStatus[data-fit="tight"] [data-role="icon"]{display:inline-flex;}
+#syncStatus[data-fit="icon"] [data-role="label"],#syncStatus[data-fit="tight"] [data-role="label"]{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;}
+#syncStatus[data-fit="icon"] [data-role="dot"],#syncStatus[data-fit="tight"] [data-role="dot"]{margin-left:-.5rem;align-self:flex-start;font-size:.625rem;line-height:.75rem;}
+#headerMain[data-fit="tight"] #headerDateLine>svg,#headerMain[data-fit="nopill"] #headerDateLine>svg{display:none;}
+#headerMain[data-fit="nopill"] #headerDate{font-size:.9375rem;}
+
+/* วันนี้ in DOM (= reading) order: #stationLead ("ของฉันวันนี้" + extra panels) → #stationMain (the stations) → #stationSide
+   (leaves, remark, audit). One column on phones and tablets / narrow PC windows; from lg: stations on the left, the lead
+   and the side cards stacked on the right (R1a FIX-2 Minor 3, Minor 11) */
+#tab-station.active{display:flex;flex-direction:column;gap:.75rem;}
+#stationLead,#stationSide{display:flex;flex-direction:column;gap:.75rem;}
+#stationLead:not(:has(>:not([hidden]):not(.hidden))){display:none;}
+@media (min-width:1024px){
+  #tab-station.active{display:grid;grid-template-columns:minmax(0,1fr) minmax(18rem,23rem);grid-template-rows:auto 1fr;gap:1rem 1.25rem;align-items:start;}
+  #stationMain{grid-column:1;grid-row:1 / span 2;}
+  #stationLead{grid-column:2;grid-row:1;}
+  #stationSide{grid-column:2;grid-row:2;}
+}
+/* การลา: calendar → my status → everyone → history on phones; from lg: calendar + history | my status + everyone */
+#tab-leave.active{display:flex;flex-direction:column;gap:.75rem;}
+#leaveColA,#leaveColB{display:contents;}
+#leaveCalendarCard{order:1;}
+#myLeaveCard{order:2;}
+#leaveListCard{order:3;}
+#leaveHistory{order:4;}
+@media (min-width:1024px){
+  #tab-leave.active{display:grid;grid-template-columns:minmax(0,26rem) minmax(0,1fr);gap:1rem 1.25rem;align-items:start;}
+  #leaveColA,#leaveColB{display:flex;flex-direction:column;gap:.75rem;}
+  #leaveColA>*,#leaveColB>*{order:0;}
+}
+/* collapsed sections (<details>): no browser marker, the chevron of UiKit.cls.disclosureChevron turns instead */
+summary{list-style:none;}
+summary::-webkit-details-marker{display:none;}
 </style>
 </head>
-<body class="bg-slate-100 text-slate-800">
+<body class="bg-cream-50 text-slate-800">
+<!--
+  Markup notes (R1a-B2):
+  - data-kit="key key2"  → js/app.js (applyKit) prepends the UiKit.cls recipes of those keys to the element's class at
+    start-up, so sheet structure, buttons and inputs come from ONE source (js/ui-kit.js). Used only inside elements
+    that are hidden at first paint (sheets, the เมนู content); the always-visible chrome has literal classes.
+  - <i data-ic="name" class="w-5 h-5"></i> → replaced at start-up by UiKit.icon(name, class) (one inline sprite).
+  - Every modal is a sheet of the UiKit stack: wrapper (open = no `hidden` class + `flex`) holding one panel
+    [data-sheet-panel]; the title [data-sheet-title] receives the focus on open (no on-screen keyboard); a
+    [data-sheet-close] button dismisses the top sheet like Escape / Android back.
+-->
 
 <!-- ===== SETUP MODAL (API URL) ===== -->
-<div id="setupModal" class="fixed inset-0 z-[60] bg-slate-900/80 backdrop-blur-sm hidden items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="setupTitle">
-  <div class="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl space-y-4 max-h-[92vh] overflow-y-auto">
-    <div class="text-center">
-      <div class="w-14 h-14 bg-emerald-100 text-emerald-600 rounded-2xl mx-auto flex items-center justify-center text-2xl font-bold mb-3">⚙️</div>
-      <h2 id="setupTitle" class="text-lg font-bold text-slate-900">ตั้งค่าการเชื่อมต่อฐานข้อมูล</h2>
-      <p class="text-xs text-slate-500 mt-0.5">เชื่อมต่อแอปกับ Google Sheets ผ่าน Google Apps Script Web App</p>
+<div id="setupModal" class="fixed inset-0 z-[60] hidden items-end md:items-center justify-center bg-ink-900/40 md:p-4" role="dialog" aria-modal="true" aria-labelledby="setupTitle">
+  <div class="uk-safe-b" data-kit="sheetFrame" data-sheet-panel>
+    <div data-kit="sheetGrabber" aria-hidden="true"></div>
+    <div data-kit="sheetHead">
+      <h2 id="setupTitle" class="flex-1 outline-none" data-kit="sheetTitle" data-sheet-title tabindex="-1">ตั้งค่าการเชื่อมต่อฐานข้อมูล</h2>
+      <button type="button" id="setupCloseBtn" class="hidden" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="x" class="w-5 h-5"></i></button>
     </div>
-    <ol class="text-[11px] text-slate-600 leading-relaxed bg-slate-50 border rounded-xl p-3 space-y-1 list-decimal pl-7">
-      <li>เปิด Google Sheet ที่ใช้เก็บข้อมูล → เมนู <b>ส่วนขยาย (Extensions) → Apps Script</b> แล้ววางโค้ดจากไฟล์ <b>apps-script/Code.gs</b></li>
-      <li>เลือกฟังก์ชัน <b>setup</b> แล้วกด <b>Run</b> หนึ่งครั้งเพื่ออนุญาตสิทธิ์</li>
-      <li>กด <b>Deploy → New deployment → Web app</b> ตั้งค่า Execute as: <b>Me</b> และ Who has access: <b>Anyone</b></li>
-      <li>คัดลอก <b>Web app URL</b> (ลงท้ายด้วย <b>/exec</b>) มาวางด้านล่าง</li>
-    </ol>
-    <div>
-      <label for="setupApiUrl" class="block text-xs font-medium text-slate-600 mb-1">Web App URL:</label>
-      <input type="url" id="setupApiUrl" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://script.google.com/macros/s/.../exec" class="w-full p-3 border rounded-xl text-sm bg-slate-50 outline-none focus:ring-2 focus:ring-emerald-500">
-      <p class="text-[10px] text-slate-400 mt-1">ผู้ดูแลระบบสามารถใส่ URL ไว้ในไฟล์ config.js เพื่อให้ทุกเครื่องใช้งานได้ทันทีโดยไม่ต้องตั้งค่า</p>
+    <div data-kit="sheetScroll">
+      <p data-kit="textMeta">เชื่อมต่อแอปกับ Google Sheets ผ่าน Google Apps Script Web App</p>
+      <ol class="text-[0.8125rem] text-slate-600 leading-6 bg-cream-50 border-2 border-cream-100 rounded-2xl p-3 space-y-1 list-decimal pl-7">
+        <li>เปิด Google Sheet ที่ใช้เก็บข้อมูล → เมนู <b>ส่วนขยาย (Extensions) → Apps Script</b> แล้ววางโค้ดจากไฟล์ <b>apps-script/Code.gs</b></li>
+        <li>เลือกฟังก์ชัน <b>setup</b> แล้วกด <b>Run</b> หนึ่งครั้งเพื่ออนุญาตสิทธิ์</li>
+        <li>กด <b>Deploy → New deployment → Web app</b> ตั้งค่า Execute as: <b>Me</b> และ Who has access: <b>Anyone</b></li>
+        <li>คัดลอก <b>Web app URL</b> (ลงท้ายด้วย <b>/exec</b>) มาวางด้านล่าง</li>
+      </ol>
+      <div class="space-y-1">
+        <label for="setupApiUrl" data-kit="label">Web App URL</label>
+        <input type="url" id="setupApiUrl" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://script.google.com/macros/s/.../exec" data-kit="input">
+        <p data-kit="textCaption">ผู้ดูแลระบบสามารถใส่ URL ไว้ในไฟล์ config.js เพื่อให้ทุกเครื่องใช้งานได้ทันทีโดยไม่ต้องตั้งค่า</p>
+      </div>
+      <p id="setupError" class="hidden text-xs font-medium text-center p-2 rounded-xl" role="alert"></p>
+      <button type="button" id="setupDiagLink" class="w-full" data-kit="btn btnGhost"><i data-ic="activity" class="w-5 h-5"></i>ตรวจสอบการเชื่อมต่อ</button>
     </div>
-    <p id="setupError" class="hidden text-xs font-medium text-center p-2 rounded-xl" role="alert"></p>
-    <div class="flex gap-2 pt-1">
-      <button type="button" id="setupCancelBtn" class="hidden flex-1 bg-slate-200 active:bg-slate-300 text-slate-700 font-semibold py-3 rounded-xl transition text-sm">ยกเลิก</button>
-      <button type="button" id="setupSaveBtn" class="flex-1 bg-emerald-600 active:bg-emerald-700 text-white font-semibold py-3 rounded-xl shadow-lg transition text-sm">ทดสอบและบันทึก</button>
-    </div>
-    <div class="text-center">
-      <button type="button" id="setupDiagLink" class="text-[11px] text-slate-500 underline">🩺 ตรวจสอบการเชื่อมต่อ</button>
+    <div data-kit="sheetActions">
+      <button type="button" id="setupCancelBtn" class="hidden flex-1" data-kit="btn btnSecondary">ยกเลิก</button>
+      <button type="button" id="setupSaveBtn" class="flex-1" data-kit="btn btnPrimary">ทดสอบและบันทึก</button>
     </div>
   </div>
 </div>
 
-<!-- ===== LOGIN MODAL ===== -->
-<div id="loginModal" class="fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-sm hidden items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
-  <div class="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl space-y-4">
+<!-- ===== LOGIN (full screen; a sheet of the stack that cannot be dismissed) ===== -->
+<div id="loginModal" class="fixed inset-0 z-50 hidden flex-col items-center overflow-y-auto bg-cream-50 kawaii-bg px-4 py-8" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
+  <div class="w-full max-w-sm my-auto space-y-5 uk-safe-b" data-sheet-panel>
     <div class="text-center">
-      <div class="w-14 h-14 bg-blue-100 text-blue-600 rounded-2xl mx-auto flex items-center justify-center text-2xl font-bold mb-3">🔐</div>
-      <h2 id="loginTitle" class="text-lg font-bold text-slate-900">เข้าสู่ระบบตารางเวร</h2>
-      <p class="text-xs text-slate-500 mt-0.5">กรุณาเลือกชื่อและใส่รหัสผ่านเพื่อเข้าใช้งาน</p>
+      <!-- the app picture (logo) with a few decoration glyphs around it -->
+      <div class="relative mx-auto w-44 h-32" aria-hidden="true">
+        <span class="absolute left-1/2 top-0 -translate-x-1/2 block w-32 h-32 bg-contain bg-center bg-no-repeat drop-shadow-md" style="background-image:url(icons/icon-192.png);"></span>
+        <i data-deco="star" class="absolute left-0 top-4 w-6 h-6 text-sun-300"></i>
+        <i data-deco="heart" class="absolute right-0 top-14 w-5 h-5 text-brand-300"></i>
+        <i data-deco="sparkle" class="absolute left-3 bottom-1 w-4 h-4 text-accent-300"></i>
+        <i data-deco="sparkle" class="absolute right-3 top-0 w-3 h-3 text-lilac-300"></i>
+      </div>
+      <h2 id="loginTitle" class="wordmark mt-3 font-display text-[2rem] font-semibold leading-10 outline-none" data-sheet-title tabindex="-1">X-RAY IPD <span class="block font-display text-sm font-medium leading-5 tracking-[0.35em] text-ink-700">KCMH</span></h2>
+      <p class="mt-2 text-base leading-6 text-slate-600">ตารางเวรและการลา</p>
     </div>
-    <div class="space-y-3">
-      <div>
-        <div class="flex items-center justify-between mb-1">
-          <label for="loginUserSelect" class="block text-xs font-medium text-slate-600">รายชื่อผู้ใช้งาน:</label>
-          <button type="button" id="loginReloadBtn" class="text-[11px] text-blue-600 font-semibold">🔄 โหลดรายชื่อใหม่</button>
+    <div class="space-y-4" data-kit="card">
+      <div class="space-y-1">
+        <div class="flex items-center justify-between gap-2">
+          <label for="loginUserSelect" data-kit="label">ชื่อผู้ใช้งาน</label>
+          <button type="button" id="loginReloadBtn" class="-mr-2 inline-flex items-center gap-1.5 h-11 px-2.5 rounded-xl text-[0.8125rem] font-semibold leading-5 text-brand-700 active:bg-brand-50 disabled:opacity-50"><i data-ic="refresh" class="w-4 h-4"></i>โหลดรายชื่อใหม่</button>
         </div>
-        <select id="loginUserSelect" class="w-full p-3 border rounded-xl text-sm bg-slate-50 outline-none focus:ring-2 focus:ring-blue-500">
+        <select id="loginUserSelect" data-kit="select">
           <option value="">-- เลือกชื่อของคุณ --</option>
         </select>
       </div>
-      <div>
-        <label for="loginPassword" class="block text-xs font-medium text-slate-600 mb-1">รหัสผ่าน (Password):</label>
-        <input type="password" id="loginPassword" autocomplete="current-password" placeholder="รหัสผ่าน" class="w-full p-3 border rounded-xl text-sm bg-slate-50 outline-none focus:ring-2 focus:ring-blue-500">
+      <div class="space-y-1">
+        <label for="loginPassword" data-kit="label">รหัสผ่าน</label>
+        <div class="relative">
+          <input type="password" id="loginPassword" autocomplete="current-password" placeholder="รหัสผ่าน" class="pr-12" data-kit="input">
+          <button type="button" id="loginPwToggle" class="absolute right-0 top-0" data-kit="iconBtn" aria-label="แสดงรหัสผ่าน" aria-pressed="false"><i data-ic="eye" class="w-5 h-5"></i></button>
+        </div>
       </div>
+      <p id="loginError" class="hidden text-sm leading-6 text-coral-700 font-medium bg-coral-50 border-2 border-coral-100 px-3 py-2 rounded-2xl" role="alert"></p>
+      <button type="button" id="loginBtn" data-kit="btn btnPrimary btnLg">เข้าสู่ระบบ</button>
+      <p class="flex items-start gap-2" data-kit="textMeta"><i data-ic="info" class="w-4 h-4 mt-0.5"></i><span>ลืมรหัสผ่าน? แจ้ง Supervisor ให้รีเซ็ตรหัสผ่านให้ แล้วเข้าสู่ระบบด้วยรหัสใหม่</span></p>
     </div>
-    <p id="loginError" class="hidden text-xs text-rose-600 font-medium text-center bg-rose-50 border border-rose-200 p-2 rounded-xl" role="alert"></p>
-    <button type="button" id="loginBtn" class="w-full bg-blue-600 active:bg-blue-700 text-white font-semibold py-3 rounded-xl shadow-lg transition">เข้าสู่ระบบ</button>
-    <div class="flex justify-center gap-4">
-      <button type="button" id="loginDiagLink" class="text-[11px] text-slate-500 underline">🩺 ตรวจสอบการเชื่อมต่อ</button>
-      <button type="button" id="loginSettingsLink" class="hidden text-[11px] text-slate-500 underline">⚙️ ตั้งค่าการเชื่อมต่อ</button>
+    <div class="flex flex-wrap justify-center gap-x-2">
+      <button type="button" id="loginDiagLink" data-kit="btn btnGhost"><i data-ic="activity" class="w-5 h-5"></i>ตรวจสอบการเชื่อมต่อ</button>
+      <button type="button" id="loginSettingsLink" class="hidden" data-kit="btn btnGhost"><i data-ic="sliders" class="w-5 h-5"></i>ตั้งค่าการเชื่อมต่อ</button>
     </div>
   </div>
 </div>
 
 <!-- ===== CHANGE PASSWORD MODAL (normal + forced mode) ===== -->
-<div id="passwordModal" class="fixed inset-0 z-[60] bg-slate-900/80 backdrop-blur-sm hidden items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="pwTitle">
-  <div class="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl space-y-4">
-    <div class="text-center">
-      <div class="w-14 h-14 bg-blue-100 text-blue-600 rounded-2xl mx-auto flex items-center justify-center text-2xl font-bold mb-3">🔑</div>
-      <h2 id="pwTitle" class="text-lg font-bold text-slate-900">เปลี่ยนรหัสผ่าน</h2>
-      <p id="pwDesc" class="text-xs text-slate-500 mt-0.5"></p>
+<div id="passwordModal" class="fixed inset-0 z-[60] hidden items-end md:items-center justify-center bg-ink-900/40 md:p-4" role="dialog" aria-modal="true" aria-labelledby="pwTitle">
+  <div class="uk-safe-b" data-kit="sheetFrame" data-sheet-panel>
+    <div data-kit="sheetGrabber" aria-hidden="true"></div>
+    <div data-kit="sheetHead">
+      <h2 id="pwTitle" class="flex-1 outline-none" data-kit="sheetTitle" data-sheet-title tabindex="-1">เปลี่ยนรหัสผ่าน</h2>
+      <button type="button" id="pwCloseBtn" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="x" class="w-5 h-5"></i></button>
     </div>
-    <div class="space-y-3">
-      <div>
-        <label for="pwOld" class="block text-xs font-medium text-slate-600 mb-1">รหัสผ่านเดิม:</label>
-        <input type="password" id="pwOld" autocomplete="current-password" class="w-full p-3 border rounded-xl text-sm bg-slate-50 outline-none focus:ring-2 focus:ring-blue-500">
+    <div data-kit="sheetScroll">
+      <p id="pwDesc" data-kit="textMeta"></p>
+      <div class="space-y-1">
+        <label for="pwOld" data-kit="label">รหัสผ่านเดิม</label>
+        <input type="password" id="pwOld" autocomplete="current-password" data-kit="input">
       </div>
-      <div>
-        <label for="pwNew" class="block text-xs font-medium text-slate-600 mb-1">รหัสผ่านใหม่ (4–64 ตัวอักษร ห้ามใช้ 1234):</label>
-        <input type="password" id="pwNew" autocomplete="new-password" class="w-full p-3 border rounded-xl text-sm bg-slate-50 outline-none focus:ring-2 focus:ring-blue-500">
+      <div class="space-y-1">
+        <label for="pwNew" data-kit="label">รหัสผ่านใหม่</label>
+        <input type="password" id="pwNew" autocomplete="new-password" aria-describedby="pwHint" data-kit="input">
+        <p id="pwHint" data-kit="textCaption">4–64 ตัวอักษร ห้ามใช้ 1234</p>
       </div>
-      <div>
-        <label for="pwConfirm" class="block text-xs font-medium text-slate-600 mb-1">ยืนยันรหัสผ่านใหม่:</label>
-        <input type="password" id="pwConfirm" autocomplete="new-password" class="w-full p-3 border rounded-xl text-sm bg-slate-50 outline-none focus:ring-2 focus:ring-blue-500">
+      <div class="space-y-1">
+        <label for="pwConfirm" data-kit="label">ยืนยันรหัสผ่านใหม่</label>
+        <input type="password" id="pwConfirm" autocomplete="new-password" data-kit="input">
       </div>
+      <p id="pwError" class="hidden text-sm leading-6 text-coral-700 font-medium bg-coral-50 border-2 border-coral-100 px-3 py-2 rounded-2xl" role="alert"></p>
     </div>
-    <p id="pwError" class="hidden text-xs text-rose-600 font-medium text-center bg-rose-50 border border-rose-200 p-2 rounded-xl" role="alert"></p>
-    <div class="flex gap-2 pt-1">
-      <button type="button" id="pwCancelBtn" class="flex-1 bg-slate-200 active:bg-slate-300 text-slate-700 font-semibold py-3 rounded-xl transition text-sm">ยกเลิก</button>
-      <button type="button" id="pwLogoutBtn" class="hidden flex-1 bg-rose-100 active:bg-rose-200 text-rose-700 font-semibold py-3 rounded-xl transition text-sm">ออกจากระบบ</button>
-      <button type="button" id="pwSaveBtn" class="flex-1 bg-blue-600 active:bg-blue-700 text-white font-semibold py-3 rounded-xl shadow-lg transition text-sm">บันทึกรหัสผ่าน</button>
+    <div data-kit="sheetActions">
+      <button type="button" id="pwCancelBtn" class="flex-1" data-kit="btn btnSecondary">ยกเลิก</button>
+      <button type="button" id="pwLogoutBtn" class="hidden flex-1 bg-coral-50 border-2 border-b-4 border-coral-100 text-coral-700 text-sm active:bg-coral-100" data-kit="btn">ออกจากระบบ</button>
+      <button type="button" id="pwSaveBtn" class="flex-1" data-kit="btn btnPrimary">บันทึกรหัสผ่าน</button>
     </div>
   </div>
 </div>
 
 <!-- ===== TRANSFER SUPERVISOR MODAL ===== -->
-<div id="transferModal" class="fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-sm hidden items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="transferTitle">
-  <div class="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl space-y-4">
-    <div class="text-center">
-      <div class="w-14 h-14 bg-amber-100 text-amber-600 rounded-2xl mx-auto flex items-center justify-center text-2xl font-bold mb-3">👑</div>
-      <h2 id="transferTitle" class="text-lg font-bold text-slate-900">โอนสิทธิ์ Supervisor</h2>
-      <p class="text-xs text-slate-500 mt-0.5">เลือกผู้ใช้งานที่ต้องการมอบสิทธิ์ต่อให้คุณ</p>
+<div id="transferModal" class="fixed inset-0 z-50 hidden items-end md:items-center justify-center bg-ink-900/40 md:p-4" role="dialog" aria-modal="true" aria-labelledby="transferTitle">
+  <div class="uk-safe-b" data-kit="sheetFrame" data-sheet-panel>
+    <div data-kit="sheetGrabber" aria-hidden="true"></div>
+    <div data-kit="sheetHead">
+      <h2 id="transferTitle" class="flex-1 outline-none" data-kit="sheetTitle" data-sheet-title tabindex="-1">โอนสิทธิ์ Supervisor</h2>
+      <button type="button" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="x" class="w-5 h-5"></i></button>
     </div>
-    <div>
-      <label for="transferTargetSelect" class="block text-xs font-medium text-slate-600 mb-1">เลือกผู้รับสิทธิ์:</label>
-      <select id="transferTargetSelect" class="w-full p-3 border rounded-xl text-sm bg-slate-50 outline-none focus:ring-2 focus:ring-amber-500">
-        <option value="">-- เลือกรายชื่อ --</option>
-      </select>
+    <div data-kit="sheetScroll">
+      <div data-kit="banner bannerWarn"><i data-ic="alert-triangle" class="w-5 h-5 shrink-0 mt-0.5"></i><p class="min-w-0">เลือกคนที่จะเป็น Supervisor แทนคุณ — หลังโอนแล้ว คุณจะจัดเวรและจัดการรายชื่อไม่ได้อีก</p></div>
+      <div class="space-y-1">
+        <label for="transferTargetSelect" data-kit="label">ผู้รับสิทธิ์</label>
+        <select id="transferTargetSelect" data-kit="select">
+          <option value="">-- เลือกรายชื่อ --</option>
+        </select>
+      </div>
     </div>
-    <div class="flex gap-2 pt-2">
-      <button type="button" id="transferCancelBtn" class="flex-1 bg-slate-200 active:bg-slate-300 text-slate-700 font-semibold py-3 rounded-xl transition text-sm">ยกเลิก</button>
-      <button type="button" id="transferConfirmBtn" class="flex-1 bg-amber-600 active:bg-amber-700 text-white font-semibold py-3 rounded-xl shadow-lg transition text-sm">ยืนยันสิทธิ์</button>
+    <div data-kit="sheetActions">
+      <button type="button" id="transferCancelBtn" class="flex-1" data-kit="btn btnSecondary">ยกเลิก</button>
+      <button type="button" id="transferConfirmBtn" class="flex-1 min-w-0" data-kit="btn btnDanger"><span class="truncate">โอนสิทธิ์</span></button>
     </div>
   </div>
 </div>
 
-<!-- ===== CONFIRM PICK LEAVE MODAL ===== -->
-<div id="confirmLeaveModal" class="fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-sm hidden items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="confirmLeaveTitle">
-  <div class="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl space-y-4">
-    <div class="text-center">
-      <div class="w-14 h-14 bg-blue-100 text-blue-600 rounded-2xl mx-auto flex items-center justify-center text-2xl font-bold mb-3">📝</div>
-      <h2 id="confirmLeaveTitle" class="text-lg font-bold text-slate-900">ยืนยันการเปลี่ยนสถานะการลา</h2>
-      <p id="confirmLeaveText" class="text-xs text-slate-600 mt-2 leading-relaxed font-medium bg-slate-50 p-3 rounded-xl border">-</p>
+<!-- ===== LEAVE SHEET (R1a-B3): a tap on a row of การลา opens it — the person, the date and one option tile per status
+     (.lv-chip[data-staff][data-val]: ปกติ + the leave types); บันทึก saves the picked one. A locked row (someone else's,
+     for a staff member) opens it read-only with the reason. Content: js/app.js renderLeaveSheet. ===== -->
+<div id="confirmLeaveModal" class="fixed inset-0 z-50 hidden items-end md:items-center justify-center bg-ink-900/40 md:p-4" role="dialog" aria-modal="true" aria-labelledby="confirmLeaveTitle">
+  <div class="uk-safe-b" data-kit="sheetFrame" data-sheet-panel>
+    <div data-kit="sheetGrabber" aria-hidden="true"></div>
+    <div data-kit="sheetHead">
+      <h2 id="confirmLeaveTitle" class="flex-1 outline-none" data-kit="sheetTitle" data-sheet-title tabindex="-1">บันทึกการลา</h2>
+      <button type="button" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="x" class="w-5 h-5"></i></button>
     </div>
-    <div class="flex gap-2 pt-2">
-      <button type="button" id="confirmLeaveCancelBtn" class="flex-1 bg-slate-200 active:bg-slate-300 text-slate-700 font-semibold py-3 rounded-xl transition text-sm">ยกเลิก</button>
-      <button type="button" id="confirmLeaveBtn" class="flex-1 bg-blue-600 active:bg-blue-700 text-white font-semibold py-3 rounded-xl shadow-lg transition text-sm">ยืนยันบันทึก</button>
+    <div data-kit="sheetScroll">
+      <div id="confirmLeaveText" class="space-y-3">-</div>
+      <div id="leaveSheetNote" class="hidden"></div>
+      <div id="leaveOptions" class="grid grid-cols-2 gap-2" role="group" aria-label="เลือกสถานะ"></div>
+    </div>
+    <div data-kit="sheetActions">
+      <button type="button" id="confirmLeaveCancelBtn" class="flex-1" data-kit="btn btnSecondary">ยกเลิก</button>
+      <button type="button" id="confirmLeaveBtn" class="flex-1" data-kit="btn btnPrimary">บันทึก</button>
     </div>
   </div>
 </div>
 
 <!-- ===== STATION COUNTS MODAL (Supervisor) ===== -->
-<div id="stationCountsModal" class="fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-sm hidden items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="stationCountsTitle">
-  <div class="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl space-y-4 max-h-[92vh] overflow-y-auto">
-    <div class="text-center">
-      <div class="w-14 h-14 bg-blue-100 text-blue-600 rounded-2xl mx-auto flex items-center justify-center text-2xl font-bold mb-3">⚙️</div>
-      <h2 id="stationCountsTitle" class="text-lg font-bold text-slate-900">ตั้งค่าจำนวนคนแต่ละ Station</h2>
-      <p class="text-xs text-slate-500 mt-0.5">มีผลกับทุกวัน • วันที่จัดคนไว้เกินจำนวนใหม่จะไม่ถูกลบรายชื่อ</p>
+<div id="stationCountsModal" class="fixed inset-0 z-50 hidden items-end md:items-center justify-center bg-ink-900/40 md:p-4" role="dialog" aria-modal="true" aria-labelledby="stationCountsTitle">
+  <div class="uk-safe-b" data-kit="sheetFrame" data-sheet-panel>
+    <div data-kit="sheetGrabber" aria-hidden="true"></div>
+    <div data-kit="sheetHead">
+      <h2 id="stationCountsTitle" class="flex-1 outline-none" data-kit="sheetTitle" data-sheet-title tabindex="-1">จำนวนคนแต่ละ Station</h2>
+      <button type="button" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="x" class="w-5 h-5"></i></button>
     </div>
-    <div id="stationCountsList" class="space-y-2"></div>
-    <div class="flex gap-2 pt-1">
-      <button type="button" id="stationCountsCancelBtn" class="flex-1 bg-slate-200 active:bg-slate-300 text-slate-700 font-semibold py-3 rounded-xl transition text-sm">ยกเลิก</button>
-      <button type="button" id="stationCountsSaveBtn" class="flex-1 bg-blue-600 active:bg-blue-700 text-white font-semibold py-3 rounded-xl shadow-lg transition text-sm">บันทึก</button>
+    <div data-kit="sheetScroll">
+      <p data-kit="textMeta">มีผลกับทุกวัน • วันที่จัดคนไว้เกินจำนวนใหม่จะไม่ถูกลบรายชื่อ</p>
+      <div id="stationCountsList" class="space-y-2"></div>
+    </div>
+    <div data-kit="sheetActions">
+      <button type="button" id="stationCountsCancelBtn" class="flex-1" data-kit="btn btnSecondary">ยกเลิก</button>
+      <button type="button" id="stationCountsSaveBtn" class="flex-1" data-kit="btn btnPrimary">บันทึก</button>
     </div>
   </div>
 </div>
 
 <!-- ===== CONNECTION CHECK MODAL (works before login) ===== -->
-<div id="diagModal" class="fixed inset-0 z-[65] bg-slate-900/80 backdrop-blur-sm hidden items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="diagTitle">
-  <div class="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl space-y-4 max-h-[92vh] overflow-y-auto">
-    <div class="text-center">
-      <div class="w-14 h-14 bg-emerald-100 text-emerald-600 rounded-2xl mx-auto flex items-center justify-center text-2xl font-bold mb-3">🩺</div>
-      <h2 id="diagTitle" class="text-lg font-bold text-slate-900">ตรวจสอบการเชื่อมต่อ</h2>
-      <p class="text-xs text-slate-500 mt-0.5">ตรวจทีละขั้นว่าเครื่องนี้ติดต่อเซิร์ฟเวอร์ได้หรือไม่</p>
+<div id="diagModal" class="fixed inset-0 z-[65] hidden items-end md:items-center justify-center bg-ink-900/40 md:p-4" role="dialog" aria-modal="true" aria-labelledby="diagTitle">
+  <div class="uk-safe-b" data-kit="sheetFrame" data-sheet-panel>
+    <div data-kit="sheetGrabber" aria-hidden="true"></div>
+    <div data-kit="sheetHead">
+      <h2 id="diagTitle" class="flex-1 outline-none" data-kit="sheetTitle" data-sheet-title tabindex="-1">ตรวจสอบการเชื่อมต่อ</h2>
+      <button type="button" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="x" class="w-5 h-5"></i></button>
     </div>
-    <div id="diagResults" class="space-y-1.5"></div>
-    <p id="diagVerdict" class="hidden text-xs font-medium leading-relaxed p-2.5 rounded-xl border" role="status"></p>
-    <div class="grid grid-cols-2 gap-2">
-      <button type="button" id="diagRunBtn" class="col-span-2 bg-emerald-600 active:bg-emerald-700 text-white font-semibold py-3 rounded-xl shadow-lg transition text-sm">▶️ เริ่มตรวจสอบ</button>
-      <button type="button" id="diagCopyBtn" class="bg-slate-100 active:bg-slate-200 text-slate-700 font-semibold py-3 rounded-xl border transition text-sm disabled:opacity-50">📋 คัดลอกผล</button>
-      <button type="button" id="diagCloseBtn" class="bg-slate-200 active:bg-slate-300 text-slate-700 font-semibold py-3 rounded-xl transition text-sm">ปิด</button>
+    <div data-kit="sheetScroll">
+      <p data-kit="textMeta">ตรวจทีละขั้นว่าเครื่องนี้ติดต่อเซิร์ฟเวอร์ได้หรือไม่</p>
+      <div id="diagResults" class="space-y-2"></div>
+      <p id="diagVerdict" class="hidden text-xs font-medium leading-relaxed p-2.5 rounded-xl border" role="status"></p>
+    </div>
+    <div class="flex-wrap" data-kit="sheetActions">
+      <button type="button" id="diagRunBtn" class="w-full" data-kit="btn btnPrimary"><i data-ic="activity" class="w-5 h-5"></i>เริ่มตรวจสอบ</button>
+      <button type="button" id="diagCopyBtn" class="flex-1" data-kit="btn btnSecondary"><i data-ic="copy" class="w-5 h-5"></i>คัดลอกผล</button>
+      <button type="button" id="diagCloseBtn" class="flex-1" data-kit="btn btnSecondary">ปิด</button>
     </div>
   </div>
 </div>
 
-<!-- ===== HEADER ===== -->
-<header id="appHeader" class="fixed top-0 inset-x-0 z-40 bg-blue-600 text-white shadow-lg safe-top">
-  <div class="px-4 py-3 flex items-center justify-between gap-2">
-    <div class="min-w-0">
-      <h1 class="text-base font-bold leading-tight truncate">ตารางเวร นักรังสีการแพทย์ (IPD)</h1>
-      <div class="flex items-center gap-2">
-        <p id="headerDate" class="text-[11px] text-blue-100 whitespace-nowrap">-</p>
-        <button type="button" id="syncStatus" data-state="online" class="shrink-0 inline-flex items-center gap-1 text-[10px] text-blue-50 bg-white/10 active:bg-white/20 px-1.5 py-0.5 rounded-full" title="สถานะการเชื่อมต่อ — แตะเพื่อตรวจสอบ"><span data-role="dot" style="color:#4ade80;">●</span><span data-role="label" aria-live="polite">ออนไลน์</span></button>
+<!-- ===== DAY TOOLS (Supervisor, "⋯" in the save bar): copy / paste / share image / clear ===== -->
+<div id="dayToolsModal" class="fixed inset-0 z-[60] hidden items-end md:items-center justify-center bg-ink-900/40 md:p-4" role="dialog" aria-modal="true" aria-labelledby="dayToolsTitle">
+  <div class="uk-safe-b" data-kit="sheetFrame" data-sheet-panel>
+    <div data-kit="sheetGrabber" aria-hidden="true"></div>
+    <div data-kit="sheetHead">
+      <div class="flex-1 min-w-0">
+        <h2 id="dayToolsTitle" class="outline-none" data-kit="sheetTitle" data-sheet-title tabindex="-1">เครื่องมือของวันนี้</h2>
+        <p id="dayToolsDate" data-kit="textMeta">-</p>
       </div>
+      <button type="button" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="x" class="w-5 h-5"></i></button>
     </div>
-    <div class="flex items-center gap-1.5 shrink-0">
-      <button type="button" id="refreshBtn" class="bg-white/20 active:bg-white/30 px-2.5 py-1.5 rounded-xl text-xs font-medium" title="โหลดข้อมูลล่าสุด" aria-label="โหลดข้อมูลล่าสุด">🔄</button>
-      <button type="button" id="datePickerBtn" class="bg-white/20 active:bg-white/30 px-2.5 py-1.5 rounded-xl text-xs font-medium" aria-controls="datePickerBar" title="เลือกวันที่" aria-label="เลือกวันที่">📅<span class="btn-label"> วันที่</span></button>
-      <button type="button" id="logoutBtn" class="bg-rose-500/80 active:bg-rose-600 px-2.5 py-1.5 rounded-xl text-xs font-medium" title="ออกจากระบบ" aria-label="ออกจากระบบ">🚪<span class="btn-label"> ออก</span></button>
+    <div data-kit="sheetScroll">
+      <!-- the labels name the selected day: "วันนี้" only when it is today (js/app.js renderDayTools) -->
+      <div data-kit="list">
+        <button type="button" id="copyDayBtn" class="day-control" data-day-tool data-kit="listRow"><span data-kit="listIcon listIconBrand"><i data-ic="copy" class="w-5 h-5"></i></span><span id="copyDayLabel" class="flex-1 min-w-0" data-role="tool-label">คัดลอกข้อมูลวันนี้</span></button>
+        <button type="button" id="pasteDayBtn" class="day-control" data-day-tool data-kit="listRow" aria-describedby="pasteDayHint"><span data-kit="listIcon listIconLilac"><i data-ic="clipboard" class="w-5 h-5"></i></span><span class="flex-1 min-w-0 py-1.5"><span id="pasteDayLabel" class="block" data-role="tool-label">วางข้อมูลลงวันนี้</span><span id="pasteDayHint" class="block" data-kit="textCaption">ยังไม่ได้คัดลอก — กด "คัดลอกข้อมูล" ก่อน</span></span></button>
+        <button type="button" id="shareImgBtn" data-day-tool data-kit="listRow"><span data-kit="listIcon listIconInfo"><i data-ic="share" class="w-5 h-5"></i></span><span class="flex-1 min-w-0" data-role="tool-label">แชร์ภาพตารางเวร (JPG)</span></button>
+        <button type="button" id="clearDayBtn" class="day-control text-coral-700" data-day-tool data-kit="listRow"><span data-kit="listIcon listIconDanger"><i data-ic="trash" class="w-5 h-5"></i></span><span id="clearDayLabel" class="flex-1 min-w-0" data-role="tool-label">ล้างข้อมูลทั้งหมดวันนี้</span></button>
+      </div>
+      <p id="copiedStatusText" class="px-1" data-kit="textMeta">สถานะคลิปบอร์ด: ยังไม่มีข้อมูลที่คัดลอก</p>
+    </div>
+    <div data-kit="sheetActions">
+      <button type="button" id="dayToolsCloseBtn" class="flex-1" data-kit="btn btnSecondary">ปิด</button>
     </div>
   </div>
-  <div id="datePickerBar" class="hidden px-4 pb-3 flex gap-2">
-    <button type="button" id="prevDayBtn" class="bg-white/20 active:bg-white/30 px-3 rounded-xl text-lg" aria-label="วันก่อนหน้า">‹</button>
-    <input type="date" id="currentDate" class="flex-1 px-3 py-2 rounded-xl text-slate-800 text-sm outline-none" aria-label="เลือกวันที่">
-    <button type="button" id="nextDayBtn" class="bg-white/20 active:bg-white/30 px-3 rounded-xl text-lg" aria-label="วันถัดไป">›</button>
+</div>
+
+<!-- ===== WHAT'S NEW (from เมนู, and once per version after an update) — content: WHATS_NEW in js/app.js ===== -->
+<div id="whatsNewModal" class="fixed inset-0 z-[60] hidden items-end md:items-center justify-center bg-ink-900/40 md:p-4" role="dialog" aria-modal="true" aria-labelledby="whatsNewTitle">
+  <div class="uk-safe-b" data-kit="sheetFrame" data-sheet-panel>
+    <div data-kit="sheetGrabber" aria-hidden="true"></div>
+    <div class="gap-3" data-kit="sheetHead">
+      <span class="relative shrink-0 block w-12 h-12 bg-contain bg-center bg-no-repeat" style="background-image:url(icons/icon-192.png);" aria-hidden="true"><i data-deco="sparkle" class="absolute -top-1 -right-2 w-4 h-4 text-sun-300"></i></span>
+      <div class="flex-1 min-w-0">
+        <h2 id="whatsNewTitle" class="outline-none" data-kit="sheetTitle" data-sheet-title tabindex="-1">มีอะไรใหม่</h2>
+        <p id="whatsNewVersion" data-kit="textMeta">-</p>
+      </div>
+      <button type="button" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="x" class="w-5 h-5"></i></button>
+    </div>
+    <div data-kit="sheetScroll">
+      <ul id="whatsNewList" class="space-y-4 py-1"></ul>
+    </div>
+    <div data-kit="sheetActions">
+      <button type="button" id="whatsNewOkBtn" class="flex-1" data-kit="btn btnPrimary">เข้าใจแล้ว</button>
+    </div>
   </div>
-  <div id="offlineBanner" class="hidden bg-slate-700 text-white text-[11px] font-medium px-4 py-1.5 text-center space-y-1">
-    <p role="status">📴 <span id="offlineText">-</span></p>
+</div>
+
+<!-- ===== HEADER (+ week strip on วันนี้, offline banner) — theme v2: the picture's sky → lilac → pink field, ink text;
+     the week strip and the offline banner are inset cards inside the gradient ===== -->
+<header id="appHeader" class="fixed top-0 inset-x-0 md:left-[88px] z-40 bg-gradient-to-r from-accent-300 via-lilac-300 to-brand-300 text-ink-900 rounded-b-3xl md:rounded-bl-none shadow-md shadow-lilac-300/30 safe-top">
+  <div class="mx-auto max-w-6xl h-14 pl-1.5 pr-1.5 md:px-4 flex items-center gap-1">
+    <button type="button" id="headerAvatarBtn" class="inline-flex items-center justify-center w-[44px] h-[44px] shrink-0 rounded-full active:bg-white/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-800" aria-label="เมนู" title="เมนู"><span id="headerAvatar" class="inline-flex"></span></button>
+    <button type="button" id="headerBackBtn" class="hidden inline-flex items-center justify-center w-[44px] h-[44px] shrink-0 rounded-full text-ink-900 active:bg-white/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-800" aria-label="ย้อนกลับ" title="ย้อนกลับ"><i data-ic="arrow-left" class="w-6 h-6"></i></button>
+    <div id="headerMain" class="relative min-w-0 flex-1 pl-1">
+      <p id="headerCaption" class="font-display text-xs font-semibold leading-4 text-ink-800 truncate tracking-[0.12em]">X-RAY IPD</p>
+      <div id="headerDateLine" class="flex items-center gap-1 w-max">
+        <p id="headerDate" class="font-display text-[1.0625rem] font-medium leading-6 whitespace-nowrap">-</p>
+        <i data-ic="chevron-down" class="w-4 h-4 shrink-0 text-ink-700"></i>
+      </div>
+      <h1 id="headerTitle" class="hidden font-display text-[1.0625rem] font-medium leading-6 truncate">เวร IPD</h1>
+      <!-- the date picker: transparent, on top of the date lines (a tap opens the native picker) -->
+      <input type="date" id="currentDate" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer" aria-label="เลือกวันที่">
+    </div>
+    <!-- nav entries of registered features with nav.place "header" (js/app.js registry; empty = not shown) -->
+    <div id="headerNav" class="hidden flex items-center gap-1" data-nav-slot="header"></div>
+    <button type="button" id="syncStatus" data-state="online" data-fit="full" class="relative inline-flex shrink-0 items-center gap-1.5 h-[44px] px-2.5 rounded-full text-xs font-medium leading-4 text-ink-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-800 before:absolute before:inset-x-0 before:top-1.5 before:bottom-1.5 before:rounded-full before:bg-white/70 active:before:bg-white" title="สถานะการเชื่อมต่อ — แตะเพื่อตรวจสอบ" aria-label="สถานะการเชื่อมต่อ: ออนไลน์"><span data-role="icon" class="relative"><i data-ic="cloud" class="w-5 h-5"></i></span><span data-role="dot" class="relative shrink-0 text-[0.8125rem] leading-4" style="color:#10b981;" aria-hidden="true">●</span><span data-role="label" class="relative whitespace-nowrap" aria-live="polite">ออนไลน์</span><span data-role="short" class="relative whitespace-nowrap" aria-hidden="true">ออนไลน์</span></button>
+    <button type="button" id="refreshBtn" class="inline-flex items-center justify-center w-[44px] h-[44px] shrink-0 rounded-full text-ink-900 text-sm font-semibold active:bg-white/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-800 disabled:opacity-60" title="โหลดข้อมูลล่าสุด" aria-label="โหลดข้อมูลล่าสุด"><i data-ic="refresh" class="w-5 h-5"></i></button>
+  </div>
+  <!-- week strip (วันนี้ only): ‹ (one day back) · the 7 days of the selected date's week · › (one day ahead) -->
+  <div id="weekStrip" class="hidden px-2 pb-2">
+    <div class="mx-auto max-w-6xl md:max-w-xl flex items-center gap-0.5 px-1 py-1 rounded-2xl bg-white text-ink-800 shadow-sm shadow-lilac-400/20">
+      <button type="button" id="prevDayBtn" class="inline-flex items-center justify-center w-9 h-14 shrink-0 rounded-xl text-ink-400 active:bg-brand-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400" aria-label="วันก่อนหน้า"><i data-ic="chevron-left" class="w-5 h-5"></i></button>
+      <div id="weekDays" class="flex-1 min-w-0 grid grid-cols-7 gap-0.5" role="group" aria-label="เลือกวันในสัปดาห์"></div>
+      <button type="button" id="nextDayBtn" class="inline-flex items-center justify-center w-9 h-14 shrink-0 rounded-xl text-ink-400 active:bg-brand-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400" aria-label="วันถัดไป"><i data-ic="chevron-right" class="w-5 h-5"></i></button>
+    </div>
+  </div>
+  <p id="connLine" class="hidden mx-2 mb-2 flex items-center justify-center gap-2 rounded-2xl bg-white/75 px-4 py-1.5 text-xs font-medium leading-5 text-ink-900" role="status"><i data-ic="refresh" class="w-4 h-4 shrink-0"></i><span>กำลังเชื่อมต่อเซิร์ฟเวอร์ใหม่… ข้อมูลอาจยังไม่ล่าสุด</span></p>
+  <div id="offlineBanner" class="hidden mx-2 mb-2 rounded-2xl bg-ink-800 text-white text-xs leading-5 font-medium px-4 py-2.5 text-center space-y-2">
+    <p role="status" class="flex items-start justify-center gap-2"><i data-ic="cloud-off" class="w-4 h-4 shrink-0 mt-0.5"></i><span id="offlineText">-</span></p>
     <div class="flex justify-center gap-2">
-      <button type="button" id="offlineRetryBtn" class="bg-white/20 active:bg-white/30 px-3 py-1 rounded-lg font-semibold">ลองใหม่</button>
-      <button type="button" id="offlineDiagBtn" class="bg-white/20 active:bg-white/30 px-3 py-1 rounded-lg font-semibold">🩺 ตรวจสอบการเชื่อมต่อ</button>
+      <button type="button" id="offlineRetryBtn" class="inline-flex items-center gap-1.5 h-11 bg-white/15 active:bg-white/25 px-4 rounded-xl font-display font-medium"><i data-ic="refresh" class="w-4 h-4"></i>ลองใหม่</button>
+      <button type="button" id="offlineDiagBtn" class="h-11 bg-white/15 active:bg-white/25 px-4 rounded-xl font-display font-medium">🩺 ตรวจสอบการเชื่อมต่อ</button>
     </div>
   </div>
 </header>
 
-<!-- ===== CONTENT ===== -->
-<main id="appMain" class="pt-[72px] pb-[160px] px-3 space-y-3">
+<!-- ===== CONTENT (centred column; leaves room for the rail from md: up) ===== -->
+<div id="appShell" class="md:pl-[88px]">
+<main id="appMain" class="mx-auto w-full max-w-6xl px-4 md:px-6 pt-[72px] pb-40 space-y-3">
 
-  <!-- TAB 1 : STATION -->
-  <section id="tab-station" class="tab-panel active space-y-3">
-    <div class="bg-white p-3 rounded-2xl shadow-sm">
-      <div class="flex justify-between items-center mb-1">
-        <h2 class="text-sm font-bold">ตารางเวรประจำวัน (Station)</h2>
-        <span id="roleBadge" class="text-[10px] px-2 py-0.5 rounded-full font-semibold"></span>
-      </div>
-      <div class="flex items-center justify-between gap-2">
-        <p id="stationNotice" class="text-[11px] text-slate-500">แสดงผลตารางเวรประจำวันที่เลือก</p>
-        <button type="button" id="stationCountsBtn" class="hidden shrink-0 bg-slate-100 active:bg-slate-200 text-slate-700 text-[11px] font-semibold px-2.5 py-1.5 rounded-lg border">⚙️ ตั้งค่าจำนวนคน</button>
-      </div>
+  <!-- banners set through App.core.banners (hidden while there are none) -->
+  <div id="bannerSlot" class="space-y-2" aria-live="polite" hidden></div>
+
+  <!-- TAB 1 : STATION (วันนี้) — #stationMain (the stations) and #stationSide (ของฉันวันนี้, leaves, remark, audit); the
+       layout (one column on phones, two from md:) is in the inline <style>. Cards are rendered by js/app.js. -->
+  <section id="tab-station" class="tab-panel active">
+    <div id="stationLead">
+      <!-- "ของฉันวันนี้": my station(s) or my leave on the selected date, derived from loaded state (js/app.js renderMyDay) -->
+      <div id="myDayCard" class="hidden relative bg-white border-2 border-brand-100 rounded-3xl p-4"></div>
+
+      <!-- extra cards added through App.core.station.addPanel (hidden while there are none) -->
+      <div id="stationPanels" class="space-y-3" hidden></div>
     </div>
 
-    <!-- บล็อกแสดงประวัติการแก้ไขย้อนหลัง (เฉพาะ Supervisor) -->
-    <div id="auditLogBox" class="bg-amber-50 border border-amber-200 p-3 rounded-2xl shadow-sm space-y-1 hidden">
-      <h3 class="text-xs font-bold text-amber-900 flex items-center gap-1">📋 ประวัติการแก้ไขย้อนหลัง (Audit Trail)</h3>
-      <div id="auditLogContent" class="text-[11px] text-amber-800 space-y-0.5 pl-2"></div>
+    <div id="stationMain" class="space-y-3">
+      <!-- slim tool row: the section title, the Supervisor's role tag and "ตั้งค่าจำนวนคน" (one tap from วันนี้) -->
+      <div id="stationTools" class="flex flex-wrap items-center gap-x-2 gap-y-1 min-h-[44px] px-1">
+        <h2 class="mr-auto font-display text-base font-medium leading-6 text-ink-900 whitespace-nowrap">Station</h2>
+        <span id="roleBadge" class="hidden"></span>
+        <button type="button" id="stationCountsBtn" aria-label="ตั้งค่าจำนวนคนแต่ละ Station" title="ตั้งค่าจำนวนคนแต่ละ Station" class="hidden inline-flex items-center justify-center gap-1.5 h-11 px-3.5 rounded-2xl bg-white border-2 border-b-4 border-ink-200 font-display text-[0.8125rem] font-medium leading-5 text-ink-800 active:bg-ink-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2"><i data-ic="sliders" class="w-4 h-4"></i>จำนวนคน</button>
+      </div>
+      <!-- one calm line while the day has no saved plan and "ของฉันวันนี้" does not already say so (js/app.js renderStationNote) -->
+      <p id="stationNote" class="hidden" data-kit="note"></p>
+      <div id="stationsContainer" class="grid gap-3 md:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2"></div>
     </div>
 
-    <div id="stationsContainer" class="space-y-3"></div>
+    <div id="stationSide">
 
-    <!-- ผู้ลาของวันที่เลือก (ทุกคนเห็น) -->
-    <div id="stationLeavesCard" class="hidden bg-white p-3 rounded-2xl shadow-sm space-y-2">
-      <div class="flex items-center justify-between gap-2">
-        <h2 class="text-sm font-bold">📋 สรุปรายชื่อผู้ลา / สถานะพิเศษ</h2>
-        <span id="stationLeaveCount" class="shrink-0 text-[11px] bg-rose-100 text-rose-700 px-2.5 py-1 rounded-full font-semibold">0 คน</span>
+      <!-- who is on leave on the selected date (everyone sees it) -->
+      <div id="stationLeavesCard" class="hidden bg-white border-2 border-brand-100 rounded-3xl p-4 space-y-3">
+        <div class="flex items-center gap-3 min-w-0">
+          <span class="inline-flex items-center justify-center w-9 h-9 shrink-0 rounded-full bg-coral-100 text-coral-700"><i data-ic="calendar-off" class="w-5 h-5"></i></span>
+          <h2 class="flex-1 min-w-0 font-display text-base font-medium leading-7 text-ink-900">ผู้ลา / สถานะพิเศษ</h2>
+          <span id="stationLeaveCount" class="inline-flex items-center gap-1 h-6 px-2.5 rounded-full text-xs font-medium leading-4 border whitespace-nowrap bg-coral-50 border-coral-200 text-coral-700">0 คน</span>
+        </div>
+        <div id="stationLeaves" class="space-y-2"></div>
       </div>
-      <div id="stationLeaves" class="text-xs font-medium text-slate-600 bg-slate-50 border rounded-xl p-2.5 leading-relaxed"></div>
-    </div>
 
-    <div id="remarkSection" class="bg-white p-3 rounded-2xl shadow-sm space-y-2">
-      <div class="flex items-center justify-between gap-2">
-        <h2 class="text-sm font-bold">📝 หมายเหตุ / ข้อความเพิ่มเติม</h2>
-        <span id="draftBadge" class="hidden text-[10px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-semibold">ยังไม่ได้บันทึก</span>
+      <div id="remarkSection" class="bg-white border-2 border-brand-100 rounded-3xl p-4 space-y-3">
+        <div class="flex items-center gap-3 min-w-0">
+          <span class="inline-flex items-center justify-center w-9 h-9 shrink-0 rounded-full bg-sun-100 text-amber-800"><i data-ic="pencil" class="w-5 h-5"></i></span>
+          <h2 class="flex-1 min-w-0 font-display text-base font-medium leading-7 text-ink-900"><label for="dailyRemark">หมายเหตุของวัน</label></h2>
+        </div>
+        <textarea id="dailyRemark" rows="3" maxlength="2000" placeholder="ไม่มีหมายเหตุสำหรับวันนี้..." class="w-full min-h-[88px] px-3.5 py-2 rounded-2xl border-2 border-ink-200 bg-white text-sm leading-6 text-ink-900 placeholder-slate-400 focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-200"></textarea>
+        <p id="remarkView" class="hidden whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-sm leading-6 rounded-2xl border-2 px-3.5 py-2.5"></p>
       </div>
-      <textarea id="dailyRemark" rows="3" maxlength="2000" placeholder="ไม่มีหมายเหตุสำหรับวันนี้..." class="w-full p-3 bg-slate-50 border rounded-xl text-sm outline-none focus:ring-2 focus:ring-blue-500"></textarea>
-      <p id="remarkView" class="hidden whitespace-pre-wrap break-words text-sm font-medium leading-relaxed rounded-xl border p-3"></p>
-      <button type="button" id="stationSaveBtn" class="day-control w-full bg-blue-600 active:bg-blue-700 text-white font-bold py-2.5 rounded-xl shadow hidden">💾 บันทึก Station &amp; หมายเหตุ</button>
+
+      <!-- the audit trail of the selected date (Supervisor only), collapsed by default with a count -->
+      <details id="auditLogBox" class="group hidden bg-white border-2 border-brand-100 rounded-3xl overflow-hidden">
+        <summary class="flex items-center gap-3 w-full min-h-[56px] px-4 py-2 cursor-pointer select-none text-left focus-visible:outline-none focus-visible:bg-brand-50">
+          <span class="inline-flex items-center justify-center w-9 h-9 shrink-0 rounded-full bg-lilac-100 text-lilac-700"><i data-ic="clock" class="w-5 h-5"></i></span>
+          <span class="flex-1 min-w-0 font-display text-base font-medium leading-7 text-ink-900">ประวัติการแก้ไข</span>
+          <span id="auditCount" class="inline-flex items-center gap-1 h-6 px-2.5 rounded-full text-xs font-medium leading-4 border whitespace-nowrap bg-ink-50 border-ink-100 text-ink-700">…</span>
+          <i data-ic="chevron-down" class="w-5 h-5 shrink-0 text-ink-400 transition-transform group-open:rotate-180"></i>
+        </summary>
+        <div id="auditLogContent" class="px-4 pt-3 pb-4 space-y-2.5 border-t-2 border-brand-100 text-[0.8125rem] leading-5 text-slate-600"></div>
+      </details>
     </div>
   </section>
 
-  <!-- TAB 2 : LEAVE -->
-  <section id="tab-leave" class="tab-panel space-y-3">
-    <!-- ปฏิทินภาพรวม: แต่ละวันของเดือนมีผู้ลากี่คน (แตะวันที่เพื่อเลือกวันนั้น) -->
-    <div id="leaveCalendarCard" class="bg-white p-3 rounded-2xl shadow-sm space-y-2">
-      <div class="flex items-center justify-between gap-2">
-        <h2 class="text-sm font-bold flex items-center gap-1.5">🗓️ ปฏิทินการลา</h2>
-        <button type="button" id="calTodayBtn" data-cal="today" class="px-2.5 py-1 rounded-lg bg-blue-50 active:bg-blue-100 text-blue-700 text-[11px] font-semibold">วันนี้</button>
-      </div>
-      <div class="flex items-center gap-2">
-        <button type="button" id="calPrevBtn" data-cal="prev" aria-label="เดือนก่อนหน้า" class="w-9 h-8 shrink-0 rounded-lg bg-slate-100 active:bg-slate-200 text-slate-700 text-lg font-bold leading-none">‹</button>
-        <span id="calMonthLabel" class="flex-1 text-center text-sm font-bold text-slate-800">-</span>
-        <button type="button" id="calNextBtn" data-cal="next" aria-label="เดือนถัดไป" class="w-9 h-8 shrink-0 rounded-lg bg-slate-100 active:bg-slate-200 text-slate-700 text-lg font-bold leading-none">›</button>
-      </div>
-      <div id="leaveCalendar" aria-label="ปฏิทินจำนวนผู้ลาในแต่ละวัน"></div>
-      <p id="calStatus" class="hidden text-[11px] text-slate-500"></p>
-      <div class="flex flex-wrap items-center gap-1 text-[10px] text-slate-500">
-        <span>จำนวนผู้ลา:</span>
-        <span class="px-1.5 py-0.5 rounded border bg-rose-50 border-rose-200">1</span>
-        <span class="px-1.5 py-0.5 rounded border bg-rose-100 border-rose-300">2</span>
-        <span class="px-1.5 py-0.5 rounded border bg-rose-200 border-rose-300">3</span>
-        <span class="px-1.5 py-0.5 rounded border bg-rose-300 border-rose-400">4+</span>
-        <span class="ml-1">• แตะวันที่เพื่อดูรายชื่อ</span>
-      </div>
-      <p id="calMonthTotal" class="text-[11px] text-slate-600 font-medium"></p>
-      <div id="calDayDetail" class="text-xs text-slate-600 bg-slate-50 border rounded-xl p-2.5 space-y-0.5"></div>
-    </div>
-
-    <!-- บล็อกสรุปวันลาประจำเดือนตามช่วงเวลา -->
-    <div class="bg-white p-3 rounded-2xl shadow-sm space-y-2.5">
-      <h2 class="text-sm font-bold flex items-center gap-1.5">📈 สรุปประวัติการลา (ช่วงเวลา)</h2>
-
-      <div id="summaryTargetSelectContainer" class="space-y-1">
-        <label for="summaryTargetStaff" class="block text-[11px] font-medium text-slate-600">เลือกดูรายชื่อ:</label>
-        <select id="summaryTargetStaff" class="w-full p-2 bg-slate-50 border rounded-xl text-xs outline-none font-medium text-slate-800">
-          <option value="__ALL__">-- แสดงทั้งหมดทุกรายชื่อ --</option>
-        </select>
-      </div>
-
-      <div class="grid grid-cols-2 gap-2">
-        <div>
-          <label for="summaryStartDate" class="block text-[11px] font-medium text-slate-600 mb-1">ตั้งแต่:</label>
-          <input type="date" id="summaryStartDate" class="w-full p-2 bg-slate-50 border rounded-xl text-xs outline-none font-medium text-blue-600">
+  <!-- TAB 2 : LEAVE (การลา) — calendar → my status → everyone (group filter + compact rows) → history (collapsed);
+       the order and the desktop columns are in the inline <style>. A tap on a row opens the leave sheet. -->
+  <section id="tab-leave" class="tab-panel">
+    <div id="leaveColA">
+      <!-- the month: how many people are on leave on each day (a tap on a day selects it) -->
+      <div id="leaveCalendarCard" class="space-y-3" data-kit="card">
+        <div class="flex items-center gap-3 min-w-0">
+          <span data-kit="listIcon listIconBrand"><i data-ic="calendar" class="w-5 h-5"></i></span>
+          <h2 class="flex-1 min-w-0" data-kit="titleCard">ปฏิทินการลา</h2>
+          <button type="button" id="calTodayBtn" data-cal="today" data-kit="btn btnTonal btnCompact">วันนี้</button>
         </div>
-        <div>
-          <label for="summaryEndDate" class="block text-[11px] font-medium text-slate-600 mb-1">ถึง:</label>
-          <input type="date" id="summaryEndDate" class="w-full p-2 bg-slate-50 border rounded-xl text-xs outline-none font-medium text-blue-600">
+        <div class="flex items-center gap-1">
+          <button type="button" id="calPrevBtn" data-cal="prev" aria-label="เดือนก่อนหน้า" data-kit="iconBtn"><i data-ic="chevron-left" class="w-5 h-5"></i></button>
+          <span id="calMonthLabel" class="flex-1 min-w-0 text-center font-display text-base font-medium leading-6 text-ink-900">-</span>
+          <button type="button" id="calNextBtn" data-cal="next" aria-label="เดือนถัดไป" data-kit="iconBtn"><i data-ic="chevron-right" class="w-5 h-5"></i></button>
         </div>
-      </div>
-      <button type="button" id="summaryBtn" class="w-full bg-blue-600 active:bg-blue-700 text-white text-xs font-semibold py-2.5 rounded-xl shadow transition">🔍 ดูสรุปวันลา</button>
-    </div>
-
-    <!-- พื้นที่แสดงผลสรุปวันลา -->
-    <div id="leaveSummaryResultContainer" class="bg-white p-3 rounded-2xl shadow-sm space-y-2">
-      <h3 class="text-xs font-bold text-slate-700 border-b pb-1">📋 ผลสรุปวันลา</h3>
-      <div id="leaveSummaryContent" class="text-xs text-slate-600 space-y-2">
-        <p class="italic text-slate-400">กรุณากดปุ่ม "ดูสรุปวันลา" เพื่อแสดงข้อมูล</p>
-      </div>
-    </div>
-
-    <div class="bg-white p-3 rounded-2xl shadow-sm space-y-2">
-      <div class="flex items-center justify-between">
-        <div>
-          <h2 class="text-sm font-bold mb-0.5">บันทึกการลา / สถานะ</h2>
-          <p class="text-[11px] text-slate-500">กดเลือกสถานะเพื่อบันทึกทันที</p>
+        <div id="leaveCalendar" aria-label="ปฏิทินจำนวนผู้ลาในแต่ละวัน"></div>
+        <p id="calStatus" class="hidden flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.8125rem] leading-5 text-slate-600"></p>
+        <div class="flex flex-wrap items-center gap-1.5 text-xs leading-4 text-slate-500">
+          <span>จำนวนผู้ลา</span>
+          <span class="inline-flex items-center justify-center min-w-[24px] h-6 px-1.5 rounded-lg border bg-rose-50 border-rose-200 text-rose-900">1</span>
+          <span class="inline-flex items-center justify-center min-w-[24px] h-6 px-1.5 rounded-lg border bg-rose-100 border-rose-300 text-rose-900">2</span>
+          <span class="inline-flex items-center justify-center min-w-[24px] h-6 px-1.5 rounded-lg border bg-rose-200 border-rose-300 text-rose-900">3</span>
+          <span class="inline-flex items-center justify-center min-w-[24px] h-6 px-1.5 rounded-lg border bg-rose-300 border-rose-400 text-rose-900">4+</span>
+          <span class="ml-1">· แตะวันที่เพื่อดูรายชื่อ</span>
         </div>
-        <span id="leaveCountBadge" class="text-[11px] bg-rose-100 text-rose-700 px-2.5 py-1 rounded-full font-semibold">0 คน</span>
+        <p id="calMonthTotal" class="text-[0.8125rem] leading-5 font-medium text-slate-600"></p>
+        <div id="calDayDetail" class="rounded-2xl bg-cream-50 border-2 border-cream-100 px-3.5 py-3 space-y-2 text-sm leading-6 text-slate-700"></div>
       </div>
-      <div class="pt-1 border-t flex items-center gap-2">
-        <label for="leaveTargetDate" class="text-xs font-semibold text-slate-700 shrink-0">📅 เลือกวันที่ลา:</label>
-        <input type="date" id="leaveTargetDate" class="flex-1 p-2 bg-slate-50 border rounded-xl text-sm outline-none font-medium text-blue-600">
-      </div>
+
+      <!-- history of leaves over a period (collapsed) -->
+      <details id="leaveHistory" class="group" data-kit="list">
+        <summary data-kit="disclosure">
+          <span data-kit="listIcon listIconInfo"><i data-ic="bar-chart" class="w-5 h-5"></i></span>
+          <span class="flex-1 min-w-0">
+            <span class="block font-display text-base font-medium leading-7 text-ink-900">สรุปประวัติการลา</span>
+            <span class="block" data-kit="textMeta">ดูวันลาในช่วงวันที่ที่เลือก</span>
+          </span>
+          <i data-ic="chevron-down" data-kit="disclosureChevron"></i>
+        </summary>
+        <div class="px-4 pt-3 pb-4 space-y-3">
+          <div id="summaryTargetSelectContainer" class="space-y-1">
+            <label for="summaryTargetStaff" data-kit="label">รายชื่อ</label>
+            <select id="summaryTargetStaff" data-kit="select">
+              <option value="__ALL__">-- แสดงทั้งหมดทุกรายชื่อ --</option>
+            </select>
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div class="space-y-1">
+              <label for="summaryStartDate" data-kit="label">ตั้งแต่</label>
+              <input type="date" id="summaryStartDate" data-kit="input" aria-describedby="summaryStartDateBe">
+              <p id="summaryStartDateBe" data-be-for="summaryStartDate" data-kit="dateCaption"></p>
+            </div>
+            <div class="space-y-1">
+              <label for="summaryEndDate" data-kit="label">ถึง</label>
+              <input type="date" id="summaryEndDate" data-kit="input" aria-describedby="summaryEndDateBe">
+              <p id="summaryEndDateBe" data-be-for="summaryEndDate" data-kit="dateCaption"></p>
+            </div>
+          </div>
+          <button type="button" id="summaryBtn" class="w-full" data-kit="btn btnSecondary"><i data-ic="search" class="w-5 h-5"></i>ดูสรุปวันลา</button>
+          <div id="leaveSummaryResultContainer" class="space-y-2">
+            <div id="leaveSummaryContent" class="text-sm leading-6 text-slate-700 space-y-2">
+              <p class="text-[0.8125rem] leading-5 text-slate-500 text-center py-1">กรุณากดปุ่ม "ดูสรุปวันลา" เพื่อแสดงข้อมูล</p>
+            </div>
+          </div>
+        </div>
+      </details>
     </div>
 
-    <div class="bg-white p-2 rounded-2xl shadow-sm">
-      <div id="groupFilterBar" class="flex gap-1.5 overflow-x-auto no-scrollbar pb-1 px-1" role="group" aria-label="กรองกลุ่ม">
-        <button type="button" data-f="all" aria-pressed="true" class="grp-btn shrink-0 px-3 py-1.5 rounded-full text-xs font-medium bg-blue-600 text-white">ทั้งหมด</button>
-        <button type="button" data-f="regular" aria-pressed="false" class="grp-btn shrink-0 px-3 py-1.5 rounded-full text-xs font-medium bg-slate-100 text-slate-600">คนประจำ</button>
-        <button type="button" data-f="backup" aria-pressed="false" class="grp-btn shrink-0 px-3 py-1.5 rounded-full text-xs font-medium bg-slate-100 text-slate-600">ทีมแทนเวร</button>
+    <div id="leaveColB">
+      <!-- my own row for the selected date (the first .leave-row of the page), prominent -->
+      <div id="myLeaveCard" class="space-y-3" data-kit="card">
+        <div class="flex flex-wrap items-start gap-x-3 gap-y-2">
+          <h2 class="flex-1 min-w-0 pt-2" data-kit="titleCard">สถานะของฉัน</h2>
+          <div class="shrink-0 text-right">
+            <label for="leaveTargetDate" class="sr-only">วันที่</label>
+            <input type="date" id="leaveTargetDate" class="w-auto max-w-[11.5rem]" data-kit="input" aria-describedby="leaveTargetDateBe">
+            <p id="leaveTargetDateBe" data-be-for="leaveTargetDate" data-kit="dateCaption"></p>
+          </div>
+        </div>
+        <div id="myLeaveRow"></div>
+      </div>
+
+      <!-- everyone: group filter + one compact row per person (all rows are rendered; the filter hides rows) -->
+      <div id="leaveListCard" class="space-y-2">
+        <div data-kit="sectionHead">
+          <h2 class="flex-1 min-w-0" data-kit="sectionTitle">ทุกคน</h2>
+          <span id="leaveCountBadge" data-kit="pill pillDanger">0 คน</span>
+        </div>
+        <div id="groupFilterBar" class="flex gap-2 overflow-x-auto no-scrollbar -mx-1 px-1 pb-1" role="group" aria-label="กรองกลุ่ม">
+          <button type="button" data-f="all" aria-pressed="true" class="grp-btn shrink-0" data-kit="chip chipOn">ทั้งหมด</button>
+          <button type="button" data-f="regular" aria-pressed="false" class="grp-btn shrink-0" data-kit="chip chipOff">คนประจำ</button>
+          <button type="button" data-f="backup" aria-pressed="false" class="grp-btn shrink-0" data-kit="chip chipOff">ทีมแทนเวร</button>
+        </div>
+        <p id="leaveListHint" class="hidden px-1" data-kit="textMeta"></p>
+        <div id="leaveContainer"></div>
       </div>
     </div>
-
-    <div id="leaveContainer" class="space-y-2"></div>
   </section>
 
-  <!-- TAB 3 : STAFF MANAGEMENT -->
-  <section id="tab-staff" class="tab-panel space-y-3">
-    <div class="bg-amber-50 border border-amber-200 p-3 rounded-2xl shadow-sm space-y-2 flex items-center justify-between">
-      <div>
-        <h3 class="text-xs font-bold text-amber-900">ตำแหน่ง Supervisor</h3>
-        <p id="currentSupDisplay" class="text-[11px] text-amber-700 mt-0.5">ผู้ถือสิทธิ์ปัจจุบัน: กำลังตรวจสอบ...</p>
+  <!-- TAB 3 : STAFF MANAGEMENT (รายชื่อบุคลากร, Supervisor) -->
+  <section id="tab-staff" class="tab-panel space-y-4 md:max-w-2xl md:mx-auto">
+    <div class="flex items-center gap-3" data-kit="card">
+      <span data-kit="listIcon listIconSun"><i data-ic="crown" class="w-5 h-5"></i></span>
+      <div class="min-w-0 flex-1">
+        <h2 data-kit="titleCard">Supervisor</h2>
+        <p id="currentSupDisplay" class="break-words" data-kit="textMeta">ผู้ถือสิทธิ์ปัจจุบัน: กำลังตรวจสอบ...</p>
       </div>
-      <button type="button" id="openTransferBtn" class="bg-amber-600 active:bg-amber-700 text-white text-xs font-semibold px-3 py-2 rounded-xl shadow shrink-0">👑 โอนสิทธิ์</button>
+      <button type="button" id="openTransferBtn" data-kit="btn btnSun btnCompact"><i data-ic="swap" class="w-4 h-4"></i>โอนสิทธิ์</button>
     </div>
 
-    <div id="staffControlBox" class="bg-white p-3 rounded-2xl shadow-sm">
-      <h2 class="text-sm font-bold mb-2">➕ เพิ่มรายชื่อผู้ปฏิบัติงาน</h2>
-      <input type="text" id="newStaffName" maxlength="60" autocomplete="off" placeholder="พิมพ์ชื่อผู้ปฏิบัติงาน..." class="w-full p-2.5 bg-slate-50 border rounded-xl text-sm outline-none focus:ring-2 focus:ring-blue-500 mb-2">
-      <input type="password" id="newStaffPass" autocomplete="new-password" placeholder="รหัสผ่านเริ่มต้น (ค่าว่างคือ 1234)" class="w-full p-2.5 bg-slate-50 border rounded-xl text-sm outline-none focus:ring-2 focus:ring-blue-500 mb-2">
-      <div class="flex gap-2 mb-2">
-        <label class="flex-1 flex items-center justify-center gap-1.5 p-2.5 border rounded-xl bg-slate-50 text-xs font-medium cursor-pointer">
-          <input type="radio" name="newStaffGroup" value="regular" checked class="accent-blue-600"> คนประจำ
+    <div id="staffControlBox" class="space-y-3" data-kit="card">
+      <div data-kit="cardHead">
+        <span data-kit="listIcon listIconBrand"><i data-ic="user" class="w-5 h-5"></i></span>
+        <h2 class="flex-1 min-w-0" data-kit="titleCard">เพิ่มรายชื่อผู้ปฏิบัติงาน</h2>
+      </div>
+      <div class="space-y-1">
+        <label for="newStaffName" data-kit="label">ชื่อ</label>
+        <input type="text" id="newStaffName" maxlength="60" autocomplete="off" placeholder="พิมพ์ชื่อผู้ปฏิบัติงาน..." data-kit="input">
+      </div>
+      <div class="space-y-1">
+        <label for="newStaffPass" data-kit="label">รหัสผ่านเริ่มต้น</label>
+        <input type="password" id="newStaffPass" autocomplete="new-password" aria-describedby="newStaffPassHint" data-kit="input">
+        <p id="newStaffPassHint" data-kit="textCaption">ถ้าเว้นว่างไว้ รหัสผ่านเริ่มต้นคือ 1234</p>
+      </div>
+      <div class="grid grid-cols-2 gap-2" role="radiogroup" aria-label="กลุ่ม">
+        <label class="flex items-center justify-center gap-2 h-12 px-3 rounded-2xl border-2 border-ink-100 bg-white text-sm font-medium leading-5 text-ink-800 cursor-pointer has-[:checked]:bg-brand-50 has-[:checked]:border-brand-500 has-[:checked]:text-brand-700">
+          <input type="radio" name="newStaffGroup" value="regular" checked class="w-4 h-4 accent-brand-600"> คนประจำ
         </label>
-        <label class="flex-1 flex items-center justify-center gap-1.5 p-2.5 border rounded-xl bg-slate-50 text-xs font-medium cursor-pointer">
-          <input type="radio" name="newStaffGroup" value="backup" class="accent-blue-600"> ทีมแทนเวร
+        <label class="flex items-center justify-center gap-2 h-12 px-3 rounded-2xl border-2 border-ink-100 bg-white text-sm font-medium leading-5 text-ink-800 cursor-pointer has-[:checked]:bg-brand-50 has-[:checked]:border-brand-500 has-[:checked]:text-brand-700">
+          <input type="radio" name="newStaffGroup" value="backup" class="w-4 h-4 accent-brand-600"> ทีมแทนเวร
         </label>
       </div>
-      <button type="button" id="addStaffBtn" class="w-full bg-blue-600 active:bg-blue-700 text-white text-sm font-semibold py-2.5 rounded-xl shadow">เพิ่มรายชื่อ</button>
-      <p class="text-[10px] text-slate-400 mt-1.5">ผู้ใช้ใหม่ต้องเปลี่ยนรหัสผ่านเมื่อเข้าสู่ระบบครั้งแรก</p>
+      <button type="button" id="addStaffBtn" class="w-full" data-kit="btn btnPrimary">เพิ่มรายชื่อ</button>
+      <p class="flex items-start gap-2" data-kit="textCaption"><i data-ic="info" class="w-4 h-4"></i><span>ผู้ใช้ใหม่ต้องเปลี่ยนรหัสผ่านเมื่อเข้าสู่ระบบครั้งแรก</span></p>
     </div>
 
-    <div class="bg-white p-3 rounded-2xl shadow-sm flex items-center justify-between">
-      <h2 class="text-sm font-bold">รายชื่อทั้งหมด</h2>
-      <span id="staffCountBadge" class="text-[11px] bg-blue-100 text-blue-700 px-2.5 py-1 rounded-full font-semibold">0 คน</span>
+    <div data-kit="sectionHead">
+      <h2 class="flex-1 min-w-0" data-kit="sectionTitle">รายชื่อทั้งหมด</h2>
+      <span id="staffCountBadge" data-kit="pill pillNeutral">0 คน</span>
     </div>
 
-    <div id="staffListContainer" class="space-y-3"></div>
+    <div id="staffListContainer" class="space-y-4"></div>
 
-    <!-- นำเข้าข้อมูลจากเวอร์ชันเดิม (localStorage ของเครื่องนี้) -->
-    <div id="importCard" class="hidden bg-indigo-50 border border-indigo-200 p-3 rounded-2xl shadow-sm space-y-2">
-      <h2 class="text-sm font-bold text-indigo-900">📦 นำเข้าข้อมูลจากเวอร์ชันเดิม (เครื่องนี้)</h2>
-      <p id="importInfo" class="text-[11px] text-indigo-800 leading-relaxed">-</p>
-      <label class="flex items-center gap-2 text-xs font-medium text-indigo-900 cursor-pointer">
-        <input type="checkbox" id="importOverwrite" class="accent-indigo-600"> เขียนทับข้อมูลที่มีอยู่แล้ว
+    <!-- import from the v1 app (localStorage of this device) -->
+    <div id="importCard" class="hidden space-y-3" data-kit="cardLilac">
+      <div data-kit="cardHead">
+        <span data-kit="listIcon listIconLilac"><i data-ic="upload" class="w-5 h-5"></i></span>
+        <h2 class="flex-1 min-w-0" data-kit="titleCard">นำเข้าข้อมูลจากเวอร์ชันเดิม (เครื่องนี้)</h2>
+      </div>
+      <p id="importInfo" data-kit="textBody">-</p>
+      <label class="flex items-center gap-2.5 min-h-[44px] text-sm font-medium leading-6 text-ink-800 cursor-pointer">
+        <input type="checkbox" id="importOverwrite" class="w-5 h-5 accent-lilac-600"> เขียนทับข้อมูลที่มีอยู่แล้ว
       </label>
-      <button type="button" id="importBtn" class="w-full bg-indigo-600 active:bg-indigo-700 text-white text-sm font-semibold py-2.5 rounded-xl shadow">⬆️ นำเข้าข้อมูลขึ้นระบบกลาง</button>
-      <div id="importResult" class="hidden text-[11px] text-slate-700 bg-white border border-indigo-100 rounded-xl p-2.5 space-y-1"></div>
-      <button type="button" id="clearLegacyBtn" class="hidden w-full bg-slate-200 active:bg-slate-300 text-slate-700 text-xs font-semibold py-2.5 rounded-xl">🧹 ลบข้อมูลเดิมในเครื่องนี้</button>
+      <button type="button" id="importBtn" class="w-full" data-kit="btn btnPrimary"><i data-ic="upload" class="w-5 h-5"></i>นำเข้าข้อมูลขึ้นระบบกลาง</button>
+      <div id="importResult" class="hidden text-[0.8125rem] leading-5 text-slate-700 bg-white border-2 border-lilac-100 rounded-2xl p-3 space-y-1"></div>
+      <button type="button" id="clearLegacyBtn" class="hidden w-full" data-kit="btn btnSecondary"><i data-ic="trash" class="w-5 h-5"></i>ลบข้อมูลเดิมในเครื่องนี้</button>
     </div>
   </section>
 
-  <!-- TAB 4 : SUMMARY & EXPORT -->
-  <section id="tab-summary" class="tab-panel space-y-3">
-    <!-- บล็อก Export รายงานประจำเดือน -->
-    <div class="bg-white p-3 rounded-2xl shadow-sm space-y-3">
-      <h2 class="text-sm font-bold flex items-center gap-1.5">📊 ส่งออกรายงาน Excel (วันลา &amp; เวรปฏิบัติงาน)</h2>
-
-      <div>
-        <label for="exportTargetStaff" class="block text-[11px] font-medium text-slate-600 mb-1">เลือกบุคลากร:</label>
-        <select id="exportTargetStaff" class="w-full p-2 bg-slate-50 border rounded-xl text-xs outline-none font-medium text-slate-800">
+  <!-- TAB 4 : SUMMARY & EXPORT (รายงานและส่งออก, Supervisor) -->
+  <section id="tab-summary" class="tab-panel space-y-4 md:max-w-2xl md:mx-auto">
+    <div class="space-y-3" data-kit="card">
+      <div data-kit="cardHead">
+        <span data-kit="listIcon listIconSun"><i data-ic="download" class="w-5 h-5"></i></span>
+        <div class="flex-1 min-w-0">
+          <h2 data-kit="titleCard">ส่งออกรายงาน Excel</h2>
+          <p data-kit="textMeta">วันลาและเวร · ไฟล์ CSV เปิดด้วย Excel</p>
+        </div>
+      </div>
+      <div class="space-y-1">
+        <label for="exportTargetStaff" data-kit="label">บุคลากร</label>
+        <select id="exportTargetStaff" data-kit="select">
           <option value="__ALL__">-- ทุกคนรวมในไฟล์เดียว (ภาพรวมทั้งหมด) --</option>
         </select>
       </div>
-
       <div class="grid grid-cols-2 gap-2">
-        <div>
-          <label for="exportStartDate" class="block text-[11px] font-medium text-slate-600 mb-1">ตั้งแต่ วันที่:</label>
-          <input type="date" id="exportStartDate" class="w-full p-2 bg-slate-50 border rounded-xl text-xs outline-none font-medium text-blue-600">
+        <div class="space-y-1">
+          <label for="exportStartDate" data-kit="label">ตั้งแต่วันที่</label>
+          <input type="date" id="exportStartDate" data-kit="input" aria-describedby="exportStartDateBe">
+          <p id="exportStartDateBe" data-be-for="exportStartDate" data-kit="dateCaption"></p>
         </div>
-        <div>
-          <label for="exportEndDate" class="block text-[11px] font-medium text-slate-600 mb-1">ถึง วันที่:</label>
-          <input type="date" id="exportEndDate" class="w-full p-2 bg-slate-50 border rounded-xl text-xs outline-none font-medium text-blue-600">
-        </div>
-      </div>
-      <button type="button" id="exportBtn" class="w-full bg-emerald-600 active:bg-emerald-700 text-white text-sm font-semibold py-3 rounded-xl shadow transition">📥 ดาวน์โหลดรายงาน Excel</button>
-    </div>
-
-    <div class="bg-white p-3 rounded-2xl shadow-sm">
-      <h2 class="text-sm font-bold mb-2">ตัวอย่างภาพที่จะบันทึก (รายวัน)</h2>
-
-      <!-- ===== EXPORT AREA ===== -->
-      <div id="captureArea" style="background:#ffffff; border:1px solid #e2e8f0; border-radius:18px; padding:22px 18px; font-family:'Sarabun','Noto Sans Thai','Leelawadee UI','Thonburi',sans-serif; color:#1e293b;">
-        <div style="text-align:center; border-bottom:1px solid #f1f5f9; padding-bottom:16px; margin-bottom:16px;">
-          <h3 style="font-size:17px; font-weight:700; color:#0f172a; margin:0 0 4px 0; line-height:1.4;">ตารางเวรปฏิบัติงานนักรังสีการแพทย์หน่วยงานผู้ป่วยใน</h3>
-          <p id="displayDate" style="font-size:13px; font-weight:600; color:#64748b; margin:0;">-</p>
-        </div>
-
-        <div id="resultStations" style="display:flex; flex-direction:column; gap:10px;"></div>
-
-        <div style="margin-top:16px; padding-top:14px; border-top:1px solid #f1f5f9;">
-          <h4 style="font-size:13px; font-weight:700; color:#334155; margin:0 0 6px 0;">สรุปรายชื่อผู้ลา / สถานะพิเศษ:</h4>
-          <div id="resultLeaves" style="font-size:12px; font-weight:500; color:#475569; background:#f8fafc; padding:10px 12px; border-radius:12px; border:1px solid #e2e8f0; line-height:1.7;"></div>
-        </div>
-
-        <div id="resultRemarkContainer" style="margin-top:14px; padding-top:14px; border-top:1px solid #f1f5f9; display:none;">
-          <h4 style="font-size:13px; font-weight:700; color:#b45309; margin:0 0 6px 0;">หมายเหตุ:</h4>
-          <p id="resultRemarkText" style="font-size:12.5px; font-weight:500; color:#78350f; background:#fffbeb; padding:10px 12px; border-radius:12px; border:1px solid #fde68a; white-space:pre-wrap; line-height:1.7; margin:0;"></p>
+        <div class="space-y-1">
+          <label for="exportEndDate" data-kit="label">ถึงวันที่</label>
+          <input type="date" id="exportEndDate" data-kit="input" aria-describedby="exportEndDateBe">
+          <p id="exportEndDateBe" data-be-for="exportEndDate" data-kit="dateCaption"></p>
         </div>
       </div>
+      <button type="button" id="exportBtn" class="w-full" data-kit="btn btnPrimary"><i data-ic="download" class="w-5 h-5"></i>ดาวน์โหลดรายงาน Excel</button>
     </div>
 
-    <!-- ปุ่มจัดการคัดลอก/วาง และรูปภาพ -->
-    <div class="bg-white p-3 rounded-2xl shadow-sm space-y-2">
-      <h2 class="text-sm font-bold">📋 เครื่องมือคัดลอกและวางตารางเวร</h2>
-      <div class="grid grid-cols-2 gap-2">
-        <button type="button" id="copyDayBtn" class="day-control bg-indigo-600 active:bg-indigo-700 text-white text-xs font-semibold py-3 rounded-xl shadow">📋 คัดลอกข้อมูลวันนี้</button>
-        <button type="button" id="pasteDayBtn" class="day-control bg-amber-600 active:bg-amber-700 text-white text-xs font-semibold py-3 rounded-xl shadow">📌 วางข้อมูลลงวันนี้</button>
+    <div class="space-y-3" data-kit="card">
+      <div data-kit="cardHead">
+        <span data-kit="listIcon listIconInfo"><i data-ic="image" class="w-5 h-5"></i></span>
+        <div class="flex-1 min-w-0">
+          <h2 data-kit="titleCard">ภาพตารางเวรรายวัน</h2>
+          <p data-kit="textMeta">ตัวอย่างภาพที่จะบันทึกของวันที่เลือก</p>
+        </div>
       </div>
-      <p id="copiedStatusText" class="text-[11px] text-slate-500 italic text-center pt-1">สถานะคลิปบอร์ด: ยังไม่มีข้อมูลที่คัดลอก</p>
-    </div>
+      <!-- the date of the image (R1a fix A-F3): this screen has no header date; it is the app's selected date -->
+      <div class="space-y-1">
+        <label for="summaryImageDate" data-kit="label">วันที่ของภาพ</label>
+        <input type="date" id="summaryImageDate" data-kit="input" aria-describedby="summaryImageDateBe">
+        <p id="summaryImageDateBe" data-be-for="summaryImageDate" data-kit="dateCaption"></p>
+      </div>
 
-    <div class="grid grid-cols-2 gap-2">
-      <button type="button" id="shareImgBtn" class="bg-purple-600 active:bg-purple-700 text-white text-xs font-semibold py-3 rounded-2xl shadow">📤 แชร์ภาพ JPG</button>
-      <button type="button" id="saveImgBtn" class="bg-slate-700 active:bg-slate-800 text-white text-xs font-semibold py-3 rounded-2xl shadow">⬇️ บันทึกภาพ JPG</button>
-      <button type="button" id="clearDayBtn" class="day-control bg-rose-500 active:bg-rose-600 text-white text-xs font-semibold py-3 rounded-2xl shadow col-span-2">🗑️ ล้างข้อมูลทั้งหมดวันนี้</button>
+      <!-- ===== EXPORT AREA — the picture staff post in LINE. Inline styles only (html2canvas draws it; no stylesheet
+           classes), colours = the theme tokens of tools/build-css.html. Exported at a fixed 420 px width × 3 (js/app.js
+           captureImage). Rows: js/app.js renderPreview. ===== -->
+      <div id="captureArea" style="background:#FFFFFF; border:2px solid #FFE3EF; border-radius:24px; padding:14px; font-family:'Sarabun','Noto Sans Thai','Leelawadee UI','Thonburi',sans-serif; color:#1A2C63; overflow-wrap:anywhere;">
+        <div style="display:flex; align-items:center; gap:12px; padding:12px 14px; border-radius:18px; background:linear-gradient(100deg,#BCE8FB 0%,#DDD2FC 55%,#FFC8DF 100%);">
+          <span id="captureLogo" aria-hidden="true" style="display:block; width:56px; height:56px; flex:none; background-image:url(icons/icon-192.png); background-size:contain; background-position:center; background-repeat:no-repeat;"></span>
+          <div style="min-width:0; flex:1;">
+            <p style="margin:0; font-family:'Mitr','Sarabun','Noto Sans Thai','Leelawadee UI','Thonburi',sans-serif; font-size:13px; font-weight:600; line-height:18px; letter-spacing:0.14em; color:#1A2C63;">X-RAY IPD</p>
+            <h3 style="margin:2px 0 0 0; font-family:'Mitr','Sarabun','Noto Sans Thai','Leelawadee UI','Thonburi',sans-serif; font-size:14px; font-weight:500; line-height:21px; color:#1A2C63;"><span style="display:inline-block; max-width:100%;">ตารางเวรปฏิบัติงานนักรังสีการแพทย์</span> <span style="display:inline-block; max-width:100%;">หน่วยงานผู้ป่วยใน</span></h3>
+          </div>
+        </div>
+        <p id="displayDate" style="margin:14px 0 12px 0; text-align:center; font-family:'Mitr','Sarabun','Noto Sans Thai','Leelawadee UI','Thonburi',sans-serif; font-size:17px; font-weight:500; line-height:26px; color:#1A2C63;">-</p>
+
+        <div id="resultStations" style="display:flex; flex-direction:column; gap:6px;"></div>
+
+        <div style="margin-top:12px; padding:12px 14px; border-radius:18px; background:#FFF1F2; border:1.5px solid #FFE0E2;">
+          <h4 style="margin:0 0 6px 0; font-family:'Mitr','Sarabun','Noto Sans Thai','Leelawadee UI','Thonburi',sans-serif; font-size:14px; font-weight:500; line-height:22px; color:#1A2C63;">ผู้ลา / สถานะพิเศษ</h4>
+          <div id="resultLeaves" style="display:flex; flex-direction:column; gap:4px; font-size:14px; line-height:22px; color:#1A2C63;"></div>
+        </div>
+
+        <div id="resultRemarkContainer" style="margin-top:12px; padding:12px 14px; border-radius:18px; background:#FFF9E5; border:1.5px solid #FFE38F; display:none;">
+          <h4 style="margin:0 0 6px 0; font-family:'Mitr','Sarabun','Noto Sans Thai','Leelawadee UI','Thonburi',sans-serif; font-size:14px; font-weight:500; line-height:22px; color:#1A2C63;">หมายเหตุ</h4>
+          <p id="resultRemarkText" style="margin:0; font-size:14px; font-weight:500; line-height:23px; color:#1A2C63; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word;"></p>
+        </div>
+      </div>
+
+      <button type="button" id="saveImgBtn" class="w-full" data-kit="btn btnSecondary"><i data-ic="image" class="w-5 h-5"></i>บันทึกภาพ JPG</button>
     </div>
   </section>
-</main>
 
-<!-- ===== BOTTOM NAV ===== -->
-<div class="fixed bottom-0 inset-x-0 z-40">
-  <nav id="bottomNav" class="bg-white border-t shadow-2xl grid grid-cols-2 safe-bottom">
-    <button type="button" data-tab="station" class="nav-btn py-2.5 flex flex-col items-center gap-0.5 text-blue-600">
-      <span class="text-xl">🏥</span><span class="text-[10px] font-semibold">Station</span>
-    </button>
-    <button type="button" data-tab="leave" class="nav-btn py-2.5 flex flex-col items-center gap-0.5 text-slate-400">
-      <span class="text-xl">📝</span><span class="text-[10px] font-semibold">การลา</span>
-    </button>
-    <button type="button" id="navStaffBtn" data-tab="staff" class="nav-btn py-2.5 flex flex-col items-center gap-0.5 text-slate-400 hidden" style="display:none;">
-      <span class="text-xl">👥</span><span class="text-[10px] font-semibold">รายชื่อ</span>
-    </button>
-    <button type="button" id="navSummaryBtn" data-tab="summary" class="nav-btn py-2.5 flex flex-col items-center gap-0.5 text-slate-400 hidden" style="display:none;">
-      <span class="text-xl">📊</span><span class="text-[10px] font-semibold">สรุป/ส่งออก</span>
-    </button>
+  <!-- feature screens created by App.register are appended here (section#tab-<id>.tab-panel) -->
+
+  <!-- เมนู: content of the "menu" screen (registered in js/app.js with App.register; its mount() moves this block into
+       #tab-menu). #menuNav holds one list per section; nav entries of features with nav.place "menu" are placed in
+       the list of their nav.section (mine | sup | system, anything else → other) by nav.order. -->
+  <div id="menuContent" class="space-y-4 md:max-w-2xl md:mx-auto" hidden>
+    <div id="menuProfile" class="space-y-4" data-kit="card">
+      <div class="flex items-center gap-4 min-w-0">
+        <span id="menuAvatar" class="inline-flex shrink-0"></span>
+        <div class="min-w-0 flex-1">
+          <p id="menuName" class="break-words" data-kit="titleScreen">-</p>
+          <p id="menuGroup" data-kit="textMeta">-</p>
+          <p id="menuRole" class="mt-1.5"></p>
+        </div>
+      </div>
+      <button type="button" id="menuPasswordBtn" class="w-full" data-kit="btn btnTonal"><i data-ic="key" class="w-5 h-5"></i>เปลี่ยนรหัสผ่าน</button>
+    </div>
+    <div id="menuNav" class="space-y-4" data-nav-slot="menu">
+      <section data-menu-section="mine" hidden>
+        <h2 data-kit="sectionLabel">ของฉัน</h2>
+        <div data-menu-list data-kit="list"></div>
+      </section>
+      <section data-menu-section="sup" hidden>
+        <h2 data-kit="sectionLabel">งานหัวหน้า</h2>
+        <div data-menu-list data-kit="list">
+          <button type="button" id="navStaffBtn" data-tab="staff" class="nav-btn hidden" data-kit="listRow" style="display:none;"><span data-kit="listIcon listIconBrand"><i data-ic="users" class="w-5 h-5"></i></span><span class="flex-1 min-w-0">รายชื่อบุคลากร</span><i data-ic="chevron-right" data-kit="listChevron"></i></button>
+          <button type="button" id="navSummaryBtn" data-tab="summary" class="nav-btn hidden" data-kit="listRow" style="display:none;"><span data-kit="listIcon listIconSun"><i data-ic="download" class="w-5 h-5"></i></span><span class="flex-1 min-w-0">รายงานและส่งออก</span><i data-ic="chevron-right" data-kit="listChevron"></i></button>
+        </div>
+      </section>
+      <section data-menu-section="system">
+        <h2 data-kit="sectionLabel">ระบบ</h2>
+        <div data-menu-list data-kit="list">
+          <button type="button" id="menuDiagBtn" data-nav-order="900" data-kit="listRow"><span data-kit="listIcon listIconInfo"><i data-ic="activity" class="w-5 h-5"></i></span><span class="flex-1 min-w-0">ตรวจสอบการเชื่อมต่อ</span><i data-ic="chevron-right" data-kit="listChevron"></i></button>
+          <button type="button" id="menuWhatsNewBtn" data-nav-order="910" data-kit="listRow"><span data-kit="listIcon listIconLilac"><i data-ic="info" class="w-5 h-5"></i></span><span class="flex-1 min-w-0">มีอะไรใหม่</span><i data-ic="chevron-right" data-kit="listChevron"></i></button>
+          <div id="menuVersionRow" data-nav-order="920" data-kit="listRow"><span class="block w-9 h-9 shrink-0 bg-contain bg-center bg-no-repeat" style="background-image:url(icons/icon-192.png);" aria-hidden="true"></span><span class="flex-1 min-w-0">เวอร์ชัน</span><span id="menuVersion" class="text-right" data-kit="textMeta">-</span></div>
+          <button type="button" id="logoutBtn" data-nav-order="990" class="text-rose-700" data-kit="listRow"><span data-kit="listIcon listIconDanger"><i data-ic="log-out" class="w-5 h-5"></i></span><span class="flex-1 min-w-0 font-medium">ออกจากระบบ</span></button>
+        </div>
+      </section>
+      <section data-menu-section="other" hidden>
+        <h2 data-kit="sectionLabel">เพิ่มเติม</h2>
+        <div data-menu-list data-kit="list"></div>
+      </section>
+    </div>
+  </div>
+</main>
+</div>
+
+<!-- ===== SAVE BAR (Supervisor, editable day on วันนี้): unsaved badge · day tools · save ===== -->
+<div id="saveBar" class="hidden fixed inset-x-0 md:left-[88px] bottom-0 z-30 border-t border-brand-100 bg-white/95 backdrop-blur" data-chrome>
+  <div id="saveBarInner" class="mx-auto max-w-6xl flex items-center gap-2 px-4 md:px-6 py-1">
+    <span id="draftBadge" class="hidden inline-flex items-center gap-1 h-7 px-3 rounded-full border border-sun-300 bg-sun-100 text-xs font-semibold leading-4 text-amber-800 whitespace-nowrap">ยังไม่ได้บันทึก</span>
+    <span class="flex-1"></span>
+    <button type="button" id="dayToolsBtn" class="inline-flex items-center justify-center w-11 h-11 shrink-0 rounded-full bg-white border-2 border-b-4 border-ink-200 text-ink-700 active:bg-ink-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2" aria-label="เครื่องมือของวันนี้ (คัดลอก วาง แชร์ภาพ ล้างข้อมูล)" title="เครื่องมือของวันนี้" aria-haspopup="dialog"><i data-ic="more" class="w-5 h-5"></i></button>
+    <button type="button" id="stationSaveBtn" class="day-control hidden" data-kit="saveBtn saveBtnClean"><i data-ic="check" class="w-5 h-5"></i>บันทึก</button>
+  </div>
+</div>
+
+<!-- ===== BOTTOM BAR (phones) / LEFT RAIL (md: and up) — entries come from the registry ===== -->
+<div id="navDock" class="fixed bottom-0 inset-x-0 z-40 bg-white border-t border-brand-100 uk-safe-b md:top-0 md:right-auto md:w-[88px] md:border-t-0 md:border-r md:pb-0" data-chrome>
+  <div class="flex max-md:hidden flex-col items-center gap-1 pt-4 pb-4">
+    <span class="block w-14 h-14 bg-contain bg-center bg-no-repeat drop-shadow-sm" style="background-image:url(icons/icon-192.png);" aria-hidden="true"></span>
+    <span class="font-display text-xs font-semibold leading-4 tracking-[0.08em] text-ink-800 whitespace-nowrap">X-RAY IPD</span>
+  </div>
+  <nav id="bottomNav" class="grid grid-flow-col auto-cols-fr md:grid-flow-row md:auto-rows-min md:gap-1 md:px-2" aria-label="เมนูหลัก">
+    <button type="button" data-tab="station" class="nav-btn relative flex flex-col items-center justify-center gap-0.5 h-14 font-display text-xs font-medium leading-4 select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-400 md:h-[72px] md:w-full md:rounded-2xl pt-1 pb-1.5 md:py-0 text-brand-700"><span class="nav-ic inline-flex items-center justify-center w-14 h-7 rounded-full transition-colors"><i data-ic="calendar-check" class="w-6 h-6"></i></span><span>วันนี้</span></button>
+    <button type="button" data-tab="leave" class="nav-btn relative flex flex-col items-center justify-center gap-0.5 h-14 font-display text-xs font-medium leading-4 select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-400 md:h-[72px] md:w-full md:rounded-2xl pt-1 pb-1.5 md:py-0 text-slate-500"><span class="nav-ic inline-flex items-center justify-center w-14 h-7 rounded-full transition-colors"><i data-ic="calendar-off" class="w-6 h-6"></i></span><span>การลา</span></button>
   </nav>
 </div>
 
-<div id="toast" class="fixed left-1/2 -translate-x-1/2 bottom-20 z-[70] bg-slate-900 text-white text-sm px-4 py-2.5 rounded-xl shadow-xl opacity-0 pointer-events-none transition-opacity" role="status" aria-live="polite"></div>
+<div id="toast" class="fixed inset-x-4 mx-auto w-fit top-20 z-[70] bg-ink-900 text-white text-sm leading-6 px-4 py-2.5 rounded-2xl shadow-lg shadow-ink-900/20 opacity-0 pointer-events-none transition-opacity" role="status" aria-live="polite"></div>
 
-<button type="button" id="updateBanner" class="hidden fixed left-1/2 -translate-x-1/2 bottom-32 z-[65] bg-blue-600 active:bg-blue-700 text-white text-sm font-semibold px-4 py-2.5 rounded-full shadow-xl whitespace-nowrap">🔄 มีเวอร์ชันใหม่ — แตะเพื่อโหลดใหม่</button>
+<button type="button" id="updateBanner" class="hidden fixed left-1/2 -translate-x-1/2 top-32 z-[65] bg-brand-600 active:bg-brand-700 border-b-4 border-brand-800 text-white font-display text-sm font-medium px-5 py-2.5 rounded-full shadow-lg shadow-brand-900/20 whitespace-nowrap">🔄 มีเวอร์ชันใหม่ — แตะเพื่อโหลดใหม่</button>
 
 <script src="config.js"></script>
-<script src="js/utils.js"></script>
-<script src="js/api.js"></script>
-<script src="js/app.js"></script>
+<script src="js/utils.js?v=2.9.0"></script>
+<script src="js/api.js?v=2.9.0"></script>
+<script src="js/ui-kit.js?v=2.9.0"></script>
+<script src="js/app.js?v=2.9.0"></script>
 </body>
 </html>

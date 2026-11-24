@@ -16,8 +16,104 @@
 (function () {
   'use strict';
 
+  /* ------------------------------------------------------------------ */
+  /* boot guard (R1a fix A-F1) — before anything touches Utils/UiKit     */
+  /* ------------------------------------------------------------------ */
+  /*
+   * During an update the v2.2 service worker (stale-while-revalidate, file by file) can pair this file with a page
+   * it was not built for: an old cached index.html (no js/ui-kit.js, no new shell markup), or a page whose other
+   * scripts did not load (offline). Then this file must not throw: it shows "กำลังอัปเดตแอป…" and recovers.
+   *  - The new index.html has an inline boot guard (window.__ipdBoot): hand over to it (it re-checks the files and
+   *    reloads when they answer).
+   *  - An old index.html has none: show the same message here, ask the service worker to update, fetch the page
+   *    with cache:'reload' (which also refreshes the old worker's copy) and reload once the answer is this
+   *    release's page, or when a new worker takes control. Automatic reloads share the sessionStorage counter
+   *    ipd_boot_retry with the inline guard: after 2 only the "โหลดใหม่" button remains. init() clears the counter.
+   * APP_BUILD = sw.js VERSION = the ?v= of index.html's scripts = js/api.js CLIENT_VERSION (tests/sw.test.js).
+   */
+  const APP_BUILD = '2.9.0';
+  const BOOT_RETRY_KEY = 'ipd_boot_retry';
+  if (!window.UiKit || !window.Utils || !window.Api || !document.getElementById('appShell') || !document.getElementById('navDock')) {
+    try { bootRescue(); } catch (e) { /* never throw from the guard */ }
+    return;
+  }
+
+  function bootRescue() {
+    if (window.__ipdBoot && typeof window.__ipdBoot.fail === 'function') { window.__ipdBoot.fail('host'); return; }
+    const MAX_AUTO = 2, POLL_MS = 5000;
+    let timer = 0, reloading = false;
+    const tries = () => { try { return parseInt(sessionStorage.getItem(BOOT_RETRY_KEY), 10) || 0; } catch (e) { return MAX_AUTO; } };
+    const reloadPage = () => { if (typeof window.__ipdTestReload === 'function') window.__ipdTestReload(); else location.reload(); };
+    const note = () => {
+      const el = document.getElementById('bootUpdateNote');
+      if (el) el.textContent = tries() >= MAX_AUTO ? 'ถ้ายังไม่หาย แตะ "โหลดใหม่"' : 'แอปจะโหลดใหม่เองเมื่อเชื่อมต่อได้';
+    };
+    const autoReload = () => {
+      if (reloading) return;
+      const n = tries();
+      if (n >= MAX_AUTO) { note(); return; }
+      try { sessionStorage.setItem(BOOT_RETRY_KEY, String(n + 1)); } catch (e) { note(); return; }
+      reloading = true;
+      clearTimeout(timer);
+      reloadPage();
+    };
+    // the message: plain inline styles (the stylesheet of the old page may not match this release)
+    let box = document.getElementById('bootUpdate');
+    if (!box && document.body) {
+      box = document.createElement('div');
+      box.id = 'bootUpdate';
+      box.setAttribute('role', 'alert');
+      box.style.cssText = 'position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;padding:16px;background:#FFFBF2;color:#1A2C63;font:16px/1.6 Sarabun,"Noto Sans Thai","Leelawadee UI",Thonburi,sans-serif;text-align:center;';
+      const card = document.createElement('div');
+      card.style.cssText = 'max-width:22rem;background:#fff;border:2px solid #FFE3EF;border-radius:20px;padding:24px 20px;';
+      const text = document.createElement('p');
+      text.id = 'bootUpdateText';
+      text.style.cssText = 'margin:0 0 8px;font-size:17px;font-weight:600;';
+      text.textContent = 'กำลังอัปเดตแอปเป็นรุ่นใหม่ กรุณาเชื่อมต่ออินเทอร์เน็ตแล้วเปิดใหม่';
+      const sub = document.createElement('p');
+      sub.id = 'bootUpdateNote';
+      sub.style.cssText = 'margin:0 0 16px;font-size:14px;color:#475569;';
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.id = 'bootUpdateBtn';
+      btn.style.cssText = 'min-height:48px;padding:0 24px;border:0;border-radius:16px;background:#DB2777;color:#fff;font:inherit;font-weight:600;cursor:pointer;';
+      btn.textContent = 'โหลดใหม่';
+      btn.addEventListener('click', () => { try { sessionStorage.removeItem(BOOT_RETRY_KEY); } catch (e) { /* ignore */ } reloadPage(); });
+      card.appendChild(text);
+      card.appendChild(sub);
+      card.appendChild(btn);
+      box.appendChild(card);
+      document.body.appendChild(box);
+      // the old page's own content (and its broken controls) stays behind the message
+    }
+    note();
+    if (tries() >= MAX_AUTO) return;
+    // a new service worker that takes control serves this release's page from its precache
+    const sw = navigator.serviceWorker;
+    if (sw && typeof sw.addEventListener === 'function') {
+      sw.addEventListener('controllerchange', autoReload);
+      if (typeof sw.getRegistration === 'function') {
+        sw.getRegistration().then(reg => (reg && typeof reg.update === 'function' ? reg.update() : null)).catch(() => {});
+      }
+    }
+    // the page as the server has it now (the old worker answers from its cache and refreshes that copy meanwhile)
+    const pageUrl = /^https?:$/.test(location.protocol) ? location.href.split('#')[0] : './index.html';
+    const marker = 'js/app.js?v=' + APP_BUILD;
+    const poll = () => {
+      clearTimeout(timer);
+      if (reloading || typeof window.fetch !== 'function') return;
+      window.fetch(pageUrl, { cache: 'reload' })
+        .then(r => (r && r.ok ? r.text() : ''))
+        .then(t => { if (t.indexOf(marker) >= 0) autoReload(); else timer = setTimeout(poll, POLL_MS); },
+          () => { timer = setTimeout(poll, POLL_MS); });
+    };
+    window.addEventListener('online', poll);
+    poll();
+  }
+
   const U = window.Utils;
   const Api = window.Api;
+  const Kit = window.UiKit;            // js/ui-kit.js (loaded before this file): dialogs, sheet stack, icons, recipes
 
   /* ------------------------------------------------------------------ */
   /* constants                                                           */
@@ -37,6 +133,9 @@
   const REMARK_MAX = 2000;
   const BLOB_URL_TTL_MS = 40000;       // a download prompt may wait for the user before it reads the blob URL
   const HTML2CANVAS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+  /** Subresource integrity of exactly that file (R1a fix B-5; sha384 computed from the cdnjs file, whose sha512 matches the
+   *  value cdnjs publishes). The script runs in the app's origin, next to the session token: a changed file must not run. */
+  const HTML2CANVAS_SRI = 'sha384-ZZ1pncU3bQe8y31yfZdMFdSpttDoPmOZg2wguVK9almUodir1PghgT0eY7Mrty8H';
   const DIAG_TIMEOUT_MS = 20000;       // per connection check
   const DIAG_SLOW_MS = 10000;          // a check that answers after this is reported as slow
   const DIAG_CDN_URLS = ['https://fonts.googleapis.com/css2?family=Sarabun&display=swap', HTML2CANVAS_URL];
@@ -53,34 +152,46 @@
     sessionExpired: 'เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่',
     pwChangedRelogin: 'เปลี่ยนรหัสผ่านสำเร็จแล้ว กรุณาเข้าสู่ระบบด้วยรหัสผ่านใหม่',
     discardDraft: 'มีการแก้ไข Station ที่ยังไม่ได้บันทึก ต้องการทิ้งการแก้ไขหรือไม่?',
+    // native-dialog mode (window.confirm, tests) only: the in-app sheet asks with Thai buttons (conflictText, C-M3)
     conflict: 'ข้อมูลวันนี้ถูกแก้ไขจากเครื่องอื่นแล้ว\nกด OK เพื่อบันทึกทับด้วยข้อมูลของคุณ หรือ Cancel เพื่อโหลดข้อมูลล่าสุด',
     leaveSaved: '✅ บันทึกสถานะสำเร็จ',
     supOnly: '⚠️ เฉพาะ Supervisor เท่านั้น',
     ownLeaveOnly: '⚠️ คุณสามารถแก้ไขวันลาได้เฉพาะของตนเองเท่านั้น',
-    notLoaded: '⏳ ยังไม่มีข้อมูลล่าสุดของวันนี้ กรุณารอให้โหลดเสร็จ (หรือกด 🔄)',
     setupNetwork: 'เชื่อมต่อไม่ได้ — ตรวจสอบอินเทอร์เน็ต หรือ URL / การตั้งค่า Who has access ต้องเป็น Anyone',
-    transferSaveFirst: 'มีการแก้ไข Station ที่ยังไม่ได้บันทึก\nกด OK เพื่อบันทึกก่อนโอนสิทธิ์ หรือ Cancel เพื่อเลือกทิ้งการแก้ไข',
+    transferSaveFirst: 'มีการแก้ไข Station ที่ยังไม่ได้บันทึก\nกด OK เพื่อบันทึกก่อนโอนสิทธิ์ หรือ Cancel เพื่อเลือกทิ้งการแก้ไข',   // native mode
+    transferSaveFirstSheet: 'มีการแก้ไข Station ที่ยังไม่ได้บันทึก\nบันทึกการแก้ไขก่อนโอนสิทธิ์ หรือไม่บันทึก?',
     transferDiscard: 'ทิ้งการแก้ไข Station ที่ยังไม่ได้บันทึก แล้วโอนสิทธิ์ต่อใช่หรือไม่?',
     shareFailed: '⚠️ แชร์ไฟล์ไม่สำเร็จ — ดาวน์โหลดไฟล์แทนแล้ว'
   };
 
-  const LOADING_HTML = '<div class="bg-white p-6 rounded-2xl shadow-sm text-center text-xs text-slate-400 italic" data-loading="1">⏳ กำลังโหลดข้อมูล…</div>';
-  const MISSING_HTML = '<div class="bg-white p-6 rounded-2xl shadow-sm text-center text-xs text-slate-500" data-missing="1">📭 ยังไม่มีข้อมูลของวันนี้ในเครื่อง — กด 🔄 เพื่อโหลดอีกครั้ง</div>';
-  const CHIP_BASE = 'lv-chip px-2.5 py-1.5 rounded-lg text-[11px] font-medium ';
-  const GRP_BASE = 'grp-btn shrink-0 px-3 py-1.5 rounded-full text-xs font-medium ';
-  const REMARK_VIEW_BASE = 'whitespace-pre-wrap break-words text-sm font-medium leading-relaxed rounded-xl border p-3 ';
+  /** Placeholders of the station cards and the leave rows while the selected day is loading / not on this device. */
+  const LOADING_HTML = '<div class="' + Kit.cls.card + ' col-span-full">' + Kit.skeleton(4) + '</div>';
+  /** The selected day is not on this device (and could not be loaded). */
+  function missingHtml(date) {
+    return '<div class="' + Kit.cls.card + ' col-span-full" data-missing="1">' +
+      Kit.empty({ icon: 'cloud-off', title: withDay('ยังไม่มีข้อมูลของ', date, 'ในเครื่อง'), hint: 'แตะปุ่มรีเฟรช (ลูกศรวน) ด้านบนเพื่อโหลดอีกครั้ง' }) + '</div>';
+  }
+  function msgNotLoaded(date) { return withDay('⏳ ยังไม่มีข้อมูลล่าสุดของ', date, ' กรุณารอให้โหลดเสร็จ (หรือกด 🔄)'); }
+  const GRP_BASE = 'grp-btn shrink-0 ' + Kit.cls.chip + ' ';
+  const REMARK_VIEW_BASE = 'whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-sm leading-6 rounded-2xl border-2 px-3.5 py-2.5 ';
+  /** Leave sheet option tiles (UiKit.cls.tile + on/off): ปกติ spans both columns. */
+  const LV_TILE = 'lv-chip ' + Kit.cls.tile + ' ';
   const VERDICT_BASE = 'text-xs font-medium leading-relaxed p-2.5 rounded-xl border ';
   const VERDICT_TONE = {
     ok: 'bg-emerald-50 border-emerald-200 text-emerald-800',
     warn: 'bg-amber-50 border-amber-200 text-amber-800',
-    fail: 'bg-rose-50 border-rose-200 text-rose-700'
+    fail: 'bg-coral-50 border-coral-200 text-coral-700'
   };
+  /** The header's connection pill: label (full), short (tight header), icon (narrowest: icon + dot, never colour alone). */
   const SYNC_LOOK = {
-    online: { color: '#4ade80', label: 'ออนไลน์' },
-    syncing: { color: '#facc15', label: 'กำลังซิงก์…' },
-    reconnecting: { color: '#facc15', label: 'กำลังเชื่อมต่อใหม่…' },
-    offline: { color: '#cbd5e1', label: 'ออฟไลน์' }
+    online: { color: '#10b981', label: 'ออนไลน์', short: 'ออนไลน์', icon: 'cloud' },
+    syncing: { color: '#f2a93b', label: 'กำลังซิงก์…', short: 'ซิงก์…', icon: 'cloud' },
+    reconnecting: { color: '#f2a93b', label: 'กำลังเชื่อมต่อใหม่…', short: 'ต่อใหม่…', icon: 'cloud-off' },
+    offline: { color: '#94a3b8', label: 'ออฟไลน์', short: 'ออฟไลน์', icon: 'cloud-off' }
   };
+  /** Fixed width of the shared image (#captureArea) when it is drawn: the JPG looks the same from every screen. */
+  const CAPTURE_WIDTH = 420;
+  const ERROR_TOAST_MS = 6000;         // an error toast stays at least this long (≥ 5 s, C-M6) unless tapped away
   const DIAG_ICON = { ok: '✅', warn: '⚠️', fail: '❌', skip: '➖', run: '⏳' };
 
   /* ------------------------------------------------------------------ */
@@ -106,9 +217,13 @@
   };
 
   const ui = {
-    tab: 'station',
+    tab: 'station',           // id of the current screen (a registered feature, see the registry section)
+    tabParams: undefined,     // params of the last core.go() to the current screen
+    shownTab: '',             // screen whose show() ran last (hide()/show() follow ui.tab in renderTabs)
+    dateAsking: false,        // setSelectedDate is asking whether to drop unsaved station edits
     epoch: 0,                 // bumps on login/logout → late responses from an old session are dropped
     pending: 0,               // tracked async flows (for App.idle)
+    userWaits: 0,             // flows waiting for the user's answer to a dialog (askUser) — not "busy" for App.idle
     fetchingRanges: [],       // [{from, to}] of getData calls in progress (loading placeholders)
     rangeReqs: {},            // in-flight getData chunks keyed "from|to"
     refreshing: null,
@@ -135,7 +250,8 @@
     pwForced: false,
     pwChangeRetried: false,   // the password change in flight is being sent again (see onSessionError)
     setupCancelable: false,
-    pendingLeave: null,       // {staff, date, type}
+    pendingLeave: null,       // {staff, date, type} — the option picked in the leave sheet, not saved yet
+    leaveSheet: null,         // {staff, date, locked} while the leave sheet (#confirmLeaveModal) is open
     leaveSaving: false,
     auditLoading: {},
     auditFailed: {},
@@ -145,13 +261,16 @@
     legacyKey: null,
     legacy: null,
     summaryPlaceholder: '',
-    toastTimer: null
+    toastTimer: null,
+    usedBefore: false,        // a session or offline copy existed when the app started (an update, not a new device)
+    serverVersion: ''         // Code.gs version from the last ping (connection check / setup); '' = not known
   };
 
   let resolveReady;
   const ready = new Promise(r => { resolveReady = r; });
 
-  /** Test/debug handle (SPEC §6.9). Defined before init so harnesses can find it early. */
+  /** Test/debug handle (SPEC §6.9). Defined before init so harnesses can find it early; the registry section adds
+   *  App.core and App.register (the API of feature files). */
   window.App = {
     state,
     ready,
@@ -179,8 +298,12 @@
     el.classList.toggle('hidden', !on);
     el.style.display = on ? '' : 'none';
   }
-  function showModal(id) { const m = $(id); if (!m) return; m.classList.remove('hidden'); m.classList.add('flex'); m.style.display = ''; }
-  function hideModal(id) { const m = $(id); if (!m) return; m.classList.add('hidden'); m.classList.remove('flex'); }
+  /**
+   * The seven modals are sheets of the UiKit stack (registerModals): open = no `hidden` class + `flex`, closing sets
+   * `hidden` synchronously; the stack adds focus handling and Escape (one Escape closes only the top sheet).
+   */
+  function showModal(id) { if ($(id)) Kit.sheet.open(id); }
+  function hideModal(id) { if ($(id)) Kit.sheet.close(id); }
   function isShown(id) { const m = $(id); return !!m && !m.classList.contains('hidden'); }
 
   /** Replace innerHTML only when the markup actually changed (no DOM churn on no-op renders). */
@@ -191,33 +314,85 @@
     el._html = html;
   }
 
-  function toast(msg, ms) {
+  /** textContent only when it changed (no DOM churn on no-op renders). */
+  function setText(el, s) { if (el && el.textContent !== s) el.textContent = s; }
+
+  /** "วันนี้" only when the date is today, else "วันที่ 25 พ.ย. 2569" (C-M2; opts as Utils.thaiDateShort, e.g. {year:false}). */
+  function dayRef(date, opts) {
+    return date === U.todayStr() ? 'วันนี้' : 'วันที่ ' + U.thaiDateShort(date, opts);
+  }
+  /** before + dayRef(date) + after, with a space after a date that ends in a number ("…2569 ในเครื่อง"). */
+  function withDay(before, date, after, opts) {
+    const ref = dayRef(date, opts);
+    const a = after || '';
+    return before + ref + (a && /\d$/.test(ref) && !/^\s/.test(a) ? ' ' : '') + a;
+  }
+  /** "พรุ่งนี้" / "เมื่อวาน" / "อีก 3 วัน" / "3 วันที่แล้ว" relative to today ('' for today). */
+  function relativeDay(date) {
+    const n = U.daysBetweenInclusive(U.todayStr(), date) - 1;
+    if (!isFinite(n) || n === 0) return '';
+    if (n === 1) return 'พรุ่งนี้';
+    if (n === -1) return 'เมื่อวาน';
+    return n > 0 ? 'อีก ' + n + ' วัน' : (-n) + ' วันที่แล้ว';
+  }
+  const nativeDialogs = () => !!cfg().NATIVE_DIALOGS;
+
+  /**
+   * The toast (C-M6): centred under the header (below the update notice when that shows), as wide as its text up to
+   * min(28rem, 100vw − 2rem). An error stays at least 5 s; any toast closes when tapped.
+   * opts.error marks an error (also detected: a text starting with ⚠️ / ❌ / "เกิดข้อผิดพลาด").
+   */
+  function toast(msg, ms, opts) {
     const t = $('toast');
     if (!t) return;
-    t.textContent = String(msg == null ? '' : msg);
+    const text = String(msg == null ? '' : msg);
+    const error = !!(opts && opts.error) || /^(⚠️|❌|เกิดข้อผิดพลาด)/.test(text);
+    t.textContent = text;
+    t.toggleAttribute('data-long', text.length > 40 || text.indexOf('\n') >= 0);
+    t.dataset.tone = error ? 'error' : 'info';
     t.style.opacity = '1';
+    t.classList.remove('pointer-events-none');
+    placeFloaters();
     clearTimeout(ui.toastTimer);
-    ui.toastTimer = setTimeout(() => { t.style.opacity = '0'; }, ms || 2200);
+    ui.toastTimer = setTimeout(hideToast, Math.max(ms || 2200, error ? ERROR_TOAST_MS : 0));
+  }
+  function hideToast() {
+    const t = $('toast');
+    if (!t) return;
+    clearTimeout(ui.toastTimer);
+    t.style.opacity = '0';
+    t.classList.add('pointer-events-none');
   }
 
-  /** Disable a button and show a busy label while fn runs. */
+  /**
+   * Disable a button and show a busy label while fn runs. A logout / new login releases every busy button at once
+   * (releaseBusyButtons); a flow of the old session that ends later then leaves the button alone.
+   */
+  let busySeq = 0;
   async function withBusy(btn, label, fn) {
     if (!btn) return fn();
     if (btn.dataset.busy === '1') return undefined;
-    const html = btn.innerHTML;
+    const token = String(++busySeq);
+    btn._idleHtml = btn.innerHTML;
     btn.dataset.busy = '1';
+    btn.dataset.busyToken = token;
     btn.disabled = true;
     btn.setAttribute('aria-busy', 'true');
     btn.textContent = label || '…';
     try { return await fn(); }
     finally {
-      btn.innerHTML = html;
-      btn.disabled = false;
-      delete btn.dataset.busy;
-      btn.removeAttribute('aria-busy');
+      if (btn.dataset.busyToken === token) releaseBusy(btn);
       renderDayControls();   // some buttons also stay disabled while their day is not loaded
     }
   }
+  function releaseBusy(btn) {
+    if (typeof btn._idleHtml === 'string') btn.innerHTML = btn._idleHtml;
+    btn.disabled = false;
+    delete btn.dataset.busy;
+    delete btn.dataset.busyToken;
+    btn.removeAttribute('aria-busy');
+  }
+  function releaseBusyButtons() { document.querySelectorAll('[data-busy="1"]').forEach(releaseBusy); }
 
   /** A check that stays true while the session current at call time is still current (no logout / re-login). */
   function sessionAlive() {
@@ -249,10 +424,22 @@
 
   const deviceOffline = () => navigator.onLine === false;
 
+  /**
+   * A question to the user (UiKit dialog: a sheet, or window.confirm/prompt with APP_CONFIG.NATIVE_DIALOGS).
+   * Waiting for the answer is not work in progress, so App.idle() may resolve while the question is open.
+   */
+  function askUser(p) {
+    ui.userWaits++;
+    return Promise.resolve(p).finally(() => { ui.userWaits--; });
+  }
+  function confirmUser(message, opts) { return askUser(Kit.confirm(message, opts)); }
+  function promptUser(message, defaultValue, opts) { return askUser(Kit.prompt(message, defaultValue, opts)); }
+
+  /** Resolves when no request is in flight and no tracked flow runs (flows waiting for the user's answer excepted). */
   function idle() {
     return new Promise(resolve => {
       const check = () => {
-        if (Api.inflight === 0 && ui.pending === 0) resolve();
+        if (Api.inflight === 0 && ui.pending - ui.userWaits <= 0) resolve();
         else setTimeout(check, 10);
       };
       setTimeout(check, 0);
@@ -434,6 +621,7 @@
       const [from, to] = key.split('|');
       if (from <= date && date <= to) delete ui.windowVersions[key];
     });
+    emit('data', { date, local: true });
   }
 
   /* ------------------------------------------------------------------ */
@@ -503,7 +691,7 @@
 
   /** Guard for day writes: the date's fresh data must be loaded and no other write of that day in flight. */
   function requireDayReady(date) {
-    if (dayView(date) !== 'ready') { toast(MSG.notLoaded); return false; }
+    if (dayView(date) !== 'ready') { toast(msgNotLoaded(date)); return false; }
     return ui.dayBusy !== date;
   }
 
@@ -524,7 +712,14 @@
     const s = lsGetJson(LS.session);
     if (!s || typeof s.token !== 'string' || !s.token || typeof s.name !== 'string' || !s.name) return null;
     const exp = expiryMs(s.expiresAt);
-    if (exp !== null && exp <= Date.now()) { lsRemove(LS.session); return null; }
+    if (exp !== null && exp <= Date.now()) {
+      // expired on this device (R1a fix B-4): the offline copy goes with it, exactly as on a logout
+      lsRemove(LS.session);
+      lsRemove(LS.cache);
+      clearUserStorage();   // ipd_dom:* and ipd_draft:*
+      wipeChatMedia();
+      return null;
+    }
     return { token: s.token, name: s.name, expiresAt: s.expiresAt };
   }
   function saveSession(s) { lsSet(LS.session, JSON.stringify(s)); }
@@ -583,10 +778,27 @@
     ui.auditLoading = {};
     ui.auditFailed = {};
     ui.pendingLeave = null;
+    ui.leaveSheet = null;
     ui.importResult = null;
     ui.staffSig = null;
     ui.dayBusy = null;
+    ui.tabParams = undefined;
+    // in-flight / busy state of the previous session (R1a fix A-F4): its requests may still be running, but they
+    // must not block or dim anything for the next user (their own completion checks the session first)
+    ui.leaveSaving = false;
+    ui.staffBusy = false;
+    ui.dateAsking = false;
+    ui.refreshing = null;
+    ui.fetchingRanges = [];
+    ui.pwChangeRetried = false;
+    releaseBusyButtons();
+    const leaveSave = $('confirmLeaveBtn');
+    if (leaveSave) { leaveSave.disabled = true; leaveSave.textContent = 'บันทึก'; }
+    // a new session starts on today (header date, week strip, leave calendar month)
+    state.selectedDate = U.todayStr();
+    ui.calMonth = '';
     resetUserUi();
+    resetCore();   // registered features: reset(), domains, ipd_dom:* / ipd_draft:*, banners, badges, chat media
   }
 
   /**
@@ -596,14 +808,25 @@
   function resetUserUi() {
     setHtml($('leaveSummaryContent'), ui.summaryPlaceholder);
     setHtml($('auditLogContent'), '');
+    if ($('auditCount')) $('auditCount').textContent = '…';
+    if ($('auditLogBox')) $('auditLogBox').open = false;
     setHtml($('staffListContainer'), '');
     setHtml($('importResult'), '');
     setHtml($('leaveCalendar'), '');
     setHtml($('calDayDetail'), '');
-    $('calMonthTotal').textContent = '';
+    setHtml($('calMonthTotal'), '');
     ui.calMonth = '';
     $('transferTargetSelect').innerHTML = '<option value="">-- เลือกผู้รับสิทธิ์ --</option>';
+    renderTransferBtn();   // "โอนสิทธิ์ให้ {ชื่อ}" names a person
     ['newStaffName', 'newStaffPass', 'pwOld', 'pwNew', 'pwConfirm'].forEach(id => { $(id).value = ''; });
+    // R1a fix B-3: the leave sheet (person, date, status, "บันทึกโดย …", data-staff on the tiles), the day's leave
+    // list, the my-day / my-leave cards and the leave rows also name people; render() skips them while nobody is
+    // logged in, so they are emptied here
+    ['confirmLeaveText', 'leaveOptions', 'leaveSheetNote', 'stationLeaves', 'myDayCard', 'myLeaveRow', 'leaveContainer']
+      .forEach(id => setHtml($(id), ''));
+    ['stationLeaveCount', 'leaveCountBadge'].forEach(id => { if ($(id)) $(id).textContent = ''; });
+    const myDay = $('myDayCard');
+    if (myDay) { delete myDay.dataset.myStations; delete myDay.dataset.myDay; }
   }
 
   /* ------------------------------------------------------------------ */
@@ -611,6 +834,7 @@
   /* ------------------------------------------------------------------ */
   /** Apply user / supervisor / staff from any response; re-derives role-dependent state. */
   function applyServerInfo(user, supervisor, staff) {
+    const wasSup = isSup();
     if (user && typeof user === 'object') state.user = Object.assign({}, user);
     if (typeof supervisor === 'string') state.supervisor = supervisor;
     else if (user && user.isSupervisor) state.supervisor = user.name;              // e.g. changePassword response
@@ -626,8 +850,9 @@
       });
       if (!isDraftDirty()) state.draft = null;
     }
-    if (!isSup() && (ui.tab === 'staff' || ui.tab === 'summary')) ui.tab = 'station';
+    ensureVisibleTab();   // a screen this user may no longer see (e.g. staff/summary after losing the role) → station
     if (state.user && state.user.mustChangePassword && !ui.pwForced) openPasswordModal(true);
+    if (wasSup !== isSup()) emit('role', { isSup: isSup() });
   }
 
   function adoptDay(date, day) {
@@ -686,6 +911,7 @@
     state.lastSync = Date.now();
     persistCache();
     warnIfOldServer();
+    emit('data', { from, to, changed: !unchanged });
     return !unchanged;
   }
 
@@ -719,7 +945,8 @@
         if (await p) changed = true;
       }
     } finally {
-      ui.fetchingRanges.splice(ui.fetchingRanges.indexOf(span), 1);
+      const i = ui.fetchingRanges.indexOf(span);   // gone when a logout / new login reset the list meanwhile
+      if (i >= 0) ui.fetchingRanges.splice(i, 1);
       render();
     }
     return changed;
@@ -816,15 +1043,15 @@
     if (!e) return;
     if (e.name !== 'ApiError') {
       console.error(e);
-      toast('เกิดข้อผิดพลาด: ' + (e.message || String(e)));
+      toast('เกิดข้อผิดพลาด: ' + (e.message || String(e)), 0, { error: true });
       return;
     }
     if (Api.isTransient(e)) {
       if (opts.write) {
-        toast(e.code === 'BUSY' ? e.message : MSG.writeFailed, 4000);
+        toast(e.code === 'BUSY' ? e.message : MSG.writeFailed, 5000, { error: true });
         if (!ui.retryTimer) ui.retryStep = 0;   // the write may have landed: check again soon, even after a long outage
         scheduleRetry();
-      } else if (!opts.quiet) toast(e.message);
+      } else if (!opts.quiet) toast(e.message, 0, { error: true });
       return;
     }
     switch (e.code) {
@@ -833,11 +1060,11 @@
         return;   // Api.onAuthError already handled the session (or the reply was for an old token)
       case 'FORBIDDEN':
       case 'CONFLICT':
-        toast(e.message);
+        toast(e.message, 0, { error: true });
         if (!opts.noRefresh) refresh();
         return;
       default:
-        toast(e.message || 'เกิดข้อผิดพลาด');
+        toast(e.message || 'เกิดข้อผิดพลาด', 0, { error: true });
     }
   }
 
@@ -893,7 +1120,9 @@
     state.session = session;
     Api.setToken(session.token);
     restoreCache(session.name);
+    restoreDomains();
     hideModal('loginModal');
+    emit('login', { name: session.name, restored: true });
     render();
     await refresh({ quiet: true });
     if (state.session && !state.user) {
@@ -907,10 +1136,13 @@
   /** Opens the login modal and reloads the user list (a shared device may sit on this screen for hours). */
   function showLogin() {
     $('loginPassword').value = '';
+    resetLoginPasswordToggle();
     showLoginError('');
     setVisible($('loginSettingsLink'), ui.apiUrlSource === 'local');
     renderLoginSelect();
-    showModal('loginModal');
+    // phones: focus on the title (no on-screen keyboard over the form); a desktop: straight into the name list
+    const desktop = typeof window.matchMedia === 'function' && window.matchMedia('(min-width: 768px) and (pointer: fine)').matches;
+    Kit.sheet.open('loginModal', { initialFocus: desktop ? '#loginUserSelect' : '[data-sheet-title]' });
     reloadLoginUsers();
   }
 
@@ -979,16 +1211,19 @@
     });
     if (!d || !d.token || !d.user) return;
     $('loginPassword').value = '';
+    resetLoginPasswordToggle();
     beginSession(d);
     if (state.user.mustChangePassword) openPasswordModal(true);   // before render: no data calls meanwhile (A1)
     render();
     if (ui.pwForced) return;
     toast(`👋 ยินดีต้อนรับคุณ ${state.user.name}`);
     await refresh({ quiet: true });
+    maybeShowWhatsNew();
   }
 
   function beginSession(d) {
     ui.epoch++;
+    closeSessionSheets();
     clearDataState();
     const user = d.user;
     state.session = { token: d.token, name: user.name, expiresAt: d.expiresAt };
@@ -1000,6 +1235,7 @@
     state.staff = orderStaff(ui.loginUsers);   // provisional until getData answers
     ui.tab = 'station';
     hideModal('loginModal');
+    emit('login', { name: user.name, restored: false });
   }
 
   function doLogout() {
@@ -1008,6 +1244,7 @@
     Api.setToken(null);
     ui.epoch++;
     state.session = null;
+    closeSessionSheets();
     clearDataState();
     ui.pwForced = false;
     ui.tab = 'station';
@@ -1015,15 +1252,33 @@
     hideModal('confirmLeaveModal');
     hideModal('transferModal');
     hideModal('stationCountsModal');
+    hideModal('dayToolsModal');
+    hideModal('whatsNewModal');
     showLogin();
     render();
+    emit('logout', {});
   }
 
-  function onLogoutClick() {
+  /**
+   * Sheets and in-app questions belong to the session that opened them (R1a fix A-F2): on logout and before a new
+   * login every open sheet and UiKit dialog is closed (a question resolves with its cancel value, so the flow that
+   * awaits it stops at its sessionAlive() check). The login and setup screens are device level and stay.
+   */
+  function closeSessionSheets() {
+    Kit.sheet.stack().slice().reverse().forEach(el => {
+      if (el.id === 'loginModal' || el.id === 'setupModal') return;
+      Kit.sheet.close(el);
+    });
+    ui.dateAsking = false;
+  }
+
+  async function onLogoutClick() {
     const msg = isDraftDirty()
       ? 'มีการแก้ไข Station ที่ยังไม่ได้บันทึก — ต้องการออกจากระบบใช่หรือไม่?'
       : 'ต้องการออกจากระบบใช่หรือไม่?';
-    if (!window.confirm(msg)) return;
+    const epoch = ui.epoch;
+    if (!(await confirmUser(msg, { title: 'ออกจากระบบ', okLabel: 'ออกจากระบบ', icon: 'log-out' }))) return;
+    if (epoch !== ui.epoch) return;   // the session ended meanwhile (e.g. it expired while the question was open)
     doLogout();
     toast('🚪 ออกจากระบบเรียบร้อย');
   }
@@ -1032,13 +1287,14 @@
   function openPasswordModal(forced) {
     ui.pwForced = !!forced;
     const who = state.session ? state.session.name : myName();   // known even before the first getData answered
-    $('pwTitle').textContent = forced ? '🔑 กรุณาตั้งรหัสผ่านใหม่ก่อนใช้งาน' : '🔑 เปลี่ยนรหัสผ่าน';
+    $('pwTitle').textContent = forced ? 'ตั้งรหัสผ่านใหม่ก่อนใช้งาน' : 'เปลี่ยนรหัสผ่าน';
     $('pwDesc').textContent = forced
       ? `คุณ ${who} ยังใช้รหัสผ่านเริ่มต้นหรือรหัสที่ถูกรีเซ็ต กรุณาตั้งรหัสผ่านใหม่ (4–64 ตัวอักษร และห้ามใช้ 1234)`
       : `ผู้ใช้: ${who}`;
     ['pwOld', 'pwNew', 'pwConfirm'].forEach(id => { $(id).value = ''; });
     pwError('');
     setVisible($('pwCancelBtn'), !forced);
+    setVisible($('pwCloseBtn'), !forced);
     setVisible($('pwLogoutBtn'), !!forced);
     showModal('passwordModal');
   }
@@ -1089,7 +1345,10 @@
     persistCache();
     render();
     toast('🔑 เปลี่ยนรหัสผ่านสำเร็จ');
-    if (wasForced) await refresh({ quiet: true });
+    if (wasForced) {
+      await refresh({ quiet: true });
+      maybeShowWhatsNew();
+    }
   }
 
   /* ---------- setup modal ---------- */
@@ -1098,6 +1357,7 @@
     $('setupApiUrl').value = state.apiUrl || '';
     setupMsg('', '');
     setVisible($('setupCancelBtn'), !!cancelable);
+    setVisible($('setupCloseBtn'), !!cancelable);
     showModal('setupModal');
   }
 
@@ -1105,7 +1365,7 @@
     const el = $('setupError');
     el.textContent = msg || '';
     el.className = 'text-xs font-medium text-center p-2 rounded-xl ' +
-      (kind === 'warn' ? 'text-amber-800 bg-amber-50 border border-amber-200' : 'text-rose-600 bg-rose-50 border border-rose-200');
+      (kind === 'warn' ? 'text-amber-800 bg-amber-50 border border-amber-200' : 'text-coral-700 bg-coral-50 border border-coral-200');
     setVisible(el, !!msg);
   }
 
@@ -1127,6 +1387,7 @@
       try {
         const d = await Api.call('ping');
         if (!d || !d.version) throw new Api.ApiError('BAD_DEPLOYMENT', 'เซิร์ฟเวอร์ตอบกลับไม่ถูกต้อง');
+        ui.serverVersion = String(d.version);
         ok = true;
       } catch (e) {
         Api.configure(prevUrl);
@@ -1148,7 +1409,28 @@
   /* ------------------------------------------------------------------ */
   /* rendering                                                           */
   /* ------------------------------------------------------------------ */
+  let renderDepth = 0;
+  let renderAgain = false;
+
+  /**
+   * Renders everything from state: the legacy screens (always, they are read across tabs), the chrome, banners and
+   * the current feature screen. A render() requested while rendering (e.g. by a feature hook) runs right after.
+   */
   function render() {
+    if (renderDepth) { renderAgain = true; return; }
+    renderDepth++;
+    try {
+      let rounds = 0;
+      do {
+        renderAgain = false;
+        renderOnce();
+      } while (renderAgain && ++rounds < 3);
+    } finally {
+      renderDepth--;
+    }
+  }
+
+  function renderOnce() {
     renderDateInputs();
     renderRole();
     renderTabs();
@@ -1156,91 +1438,386 @@
     renderLeaveTab();
     renderStaffTab();
     renderSummaryTab();
+    renderMenu();
+    renderChrome();
     renderSyncStatus();
     renderOfflineBanner();
+    renderBanners();
+    renderCurrentFeature();
   }
 
   function renderDateInputs() {
     const d = state.selectedDate;
-    $('headerDate').textContent = U.thaiDate(d);
+    $('headerDate').textContent = headerDateText(d);
     if ($('currentDate').value !== d) $('currentDate').value = d;
     if ($('leaveTargetDate').value !== d) $('leaveTargetDate').value = d;
+    const img = $('summaryImageDate');   // รายงานและส่งออก: the date of the image preview (A-F3)
+    if (img && img.value !== d) img.value = d;
+    renderBeCaptions();
+  }
+
+  /** The Buddhist-era date under every native date input (the picker itself shows the device's calendar) — Minor 1. */
+  function renderBeCaptions() {
+    document.querySelectorAll('[data-be-for]').forEach(p => {
+      const inp = $(p.dataset.beFor);
+      setText(p, inp && U.isValidYmd(inp.value) ? U.thaiDateShort(inp.value, { weekday: true }) : '');
+    });
   }
 
   function renderSyncStatus() {
     const el = $('syncStatus');
     if (!el) return;
     const st = state.conn === 'online' && Api.inflight > 0 ? 'syncing' : state.conn;
-    const look = SYNC_LOOK[st];
-    el.dataset.state = st;
-    el.querySelector('[data-role="dot"]').style.color = look.color;
-    el.querySelector('[data-role="label"]').textContent = look.label;
+    if (el.dataset.state !== st || !el._look) {
+      const look = SYNC_LOOK[st];
+      el.dataset.state = st;
+      el._look = st;
+      el.querySelector('[data-role="dot"]').style.color = look.color;
+      setText(el.querySelector('[data-role="label"]'), look.label);
+      const short = el.querySelector('[data-role="short"]');
+      if (short) setText(short, look.short);
+      const ic = el.querySelector('[data-role="icon"]');
+      if (ic) setHtml(ic, Kit.icon(look.icon, 'w-5 h-5'));
+      el.setAttribute('aria-label', 'สถานะการเชื่อมต่อ: ' + look.label);
+    }
+    fitHeader();
+  }
+
+  /**
+   * C-M1: the header date (or title) never gives way. When the row is too tight the sync pill steps down instead:
+   * full (dot + label) → short (dot + short label) → icon (state icon + dot; the label stays for screen readers) →
+   * tight (also without the chevron) → nopill (the extreme: 320 px at a large text size; the pill steps out of the row —
+   * a non-online state is still shown by the line / banner under the header, and the connection check stays in เมนู).
+   * Measured once per width / text / state / font (memo), so render() stays cheap.
+   */
+  const FIT_LEVELS = ['full', 'short', 'icon', 'tight', 'nopill'];
+  let fitMemo = Object.create(null), fitMemoSize = 0;
+  function fitHeader() {
+    const main = $('headerMain'), pill = $('syncStatus'), dateLine = $('headerDateLine'), title = $('headerTitle');
+    if (!main || !pill || !dateLine || !title) return;
+    const dated = !dateLine.classList.contains('hidden');
+    const line = dated ? dateLine : title;
+    const root = document.documentElement;
+    const key = [window.innerWidth, root.classList.contains('no-webfont'), getComputedStyle(root).fontSize, dated,
+      line.textContent, pill.dataset.state, isShown('headerBackBtn'), ($('headerNav') || {}).childElementCount].join('|');
+    const apply = lv => { if (pill.dataset.fit !== lv) pill.dataset.fit = lv; if (main.dataset.fit !== lv) main.dataset.fit = lv; };
+    if (fitMemo[key]) { apply(fitMemo[key]); return; }
+    if (!main.clientWidth) { apply('full'); return; }   // not laid out (e.g. no stylesheet yet): nothing to measure
+    const fits = () => (dated ? dateLine.offsetWidth <= main.clientWidth - 4 + 0.5 : title.scrollWidth <= title.clientWidth + 0.5);
+    let lv = FIT_LEVELS[0];
+    for (let i = 0; i < FIT_LEVELS.length; i++) {
+      lv = FIT_LEVELS[i];
+      apply(lv);
+      if (fits()) break;
+    }
+    if (++fitMemoSize > 64) { fitMemo = Object.create(null); fitMemoSize = 1; }
+    fitMemo[key] = lv;
+  }
+
+  /**
+   * Minor 9: without the web fonts (Mitr never loaded: blocked, offline first run) display text gets weight 600
+   * (html.no-webfont, see the inline <style>), because the system Thai fonts have no 500 and would fall back to 400.
+   */
+  function webFontLoaded() {
+    const fonts = document.fonts;
+    if (!fonts || typeof fonts.forEach !== 'function') return false;
+    let ok = false;
+    fonts.forEach(f => { if (!ok && /mitr/i.test(String(f.family)) && f.status === 'loaded') ok = true; });
+    return ok;
+  }
+  function syncWebFontFlag() {
+    const root = document.documentElement;
+    const off = !webFontLoaded();
+    if (root.classList.contains('no-webfont') === off) return;
+    root.classList.toggle('no-webfont', off);
+    fitHeader();
+  }
+  function watchWebFonts() {
+    syncWebFontFlag();
+    const fonts = document.fonts;
+    if (!fonts) return;
+    if (typeof fonts.addEventListener === 'function') fonts.addEventListener('loadingdone', syncWebFontFlag);
+    if (fonts.ready && typeof fonts.ready.then === 'function') fonts.ready.then(syncWebFontFlag, () => {});
   }
 
   function renderOfflineBanner() {
     const b = $('offlineBanner');
     if (!b) return;
     setVisible(b, state.conn === 'offline');
+    // a non-online state is never shown by the (possibly icon-only) pill alone: reconnecting gets its own line (C-M1)
+    setVisible($('connLine'), state.conn === 'reconnecting');
     const t = state.lastSync || (ui.cacheSavedAt ? Date.parse(ui.cacheSavedAt) : null);
-    const since = 'แสดงข้อมูลล่าสุดเมื่อ ' + (t ? U.formatStamp(t) : '-');
+    const since = 'แสดงข้อมูลล่าสุดเมื่อ ' + (t ? U.thaiStamp(t) : '-');
     $('offlineText').textContent = ui.connReason === 'device'
       ? 'ไม่มีอินเทอร์เน็ต — ' + since
       : 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ — ' + since + ' • ระบบกำลังลองใหม่อัตโนมัติ';
     syncLayout();
   }
 
-  /** Keep the content below the fixed header whatever the header's height. */
+  /** "พฤ. 26 พ.ย. 2569" — the header's form of the date: short weekday, so it always fits (C-M1). */
+  function headerDateText(date) {
+    return U.thaiDateShort(date, { weekday: true });
+  }
+
+  /**
+   * Keeps the content clear of the fixed chrome whatever its height: below the header (+ week strip / offline
+   * banner), above the bottom bar and the save bar (phones; from md: up the bar is a left rail). The toast and
+   * the update notice sit just under the header, never over the save bar or a sheet's buttons.
+   */
   function syncLayout() {
     const h = $('appHeader'), m = $('appMain');
     if (!h || !m) return;
     const ht = h.offsetHeight;
-    if (ht > 0) m.style.paddingTop = (ht + 12) + 'px';
+    if (ht > 0) m.style.paddingTop = (ht + 16) + 'px';
+    placeFloaters();
+    fitHeader();
+    const dock = $('navDock'), bar = $('saveBar');
+    const rail = typeof window.matchMedia === 'function' && window.matchMedia('(min-width: 768px)').matches;
+    const dockH = !dock || rail ? 0 : dock.offsetHeight;
+    if (bar) bar.style.bottom = dockH + 'px';
+    const barH = bar && !bar.classList.contains('hidden') ? bar.offsetHeight : 0;
+    m.style.paddingBottom = (dockH + barH + 24) + 'px';
+  }
+
+  /**
+   * The update notice sits just under the header and the toast under it (never on top of each other, C-M6). In a
+   * phone's landscape (max-height 500 px) the header scrolls away, so both sit at the top edge.
+   */
+  function placeFloaters() {
+    const h = $('appHeader'), t = $('toast'), ub = $('updateBanner');
+    if (!h || !t) return;
+    const fixedHeader = getComputedStyle(h).position === 'fixed' && h.offsetHeight > 0;
+    let top = fixedHeader ? h.offsetHeight + 8 : 12;
+    if (ub) {
+      ub.style.top = top + 'px';
+      if (!ub.classList.contains('hidden')) top += ub.offsetHeight + 8;
+    }
+    t.style.top = top + 'px';
   }
 
   function renderRole() {
     const sup = isSup();
     const badge = $('roleBadge');
-    const notice = $('stationNotice');
-    if (!state.user) {
-      badge.textContent = '';
-      notice.textContent = 'แสดงผลตารางเวรประจำวันที่เลือก';
-    } else if (sup) {
-      badge.textContent = '⭐ Supervisor (สิทธิ์เต็ม)';
-      badge.className = 'text-[10px] px-2.5 py-0.5 rounded-full font-semibold bg-amber-100 text-amber-800';
-      notice.textContent = 'คุณมีสิทธิ์จัดกำลังคนประจำ Station และบันทึกข้อมูล';
-    } else {
-      badge.textContent = `👤 ${myName()} (Staff)`;
-      badge.className = 'text-[10px] px-2.5 py-0.5 rounded-full font-semibold bg-blue-100 text-blue-800';
-      notice.textContent = 'แสดงผลตารางเวรประจำวันที่เลือก (ดูข้อมูลหมายเหตุและเวรได้)';
-    }
+    // the Supervisor's tag in the tool row of วันนี้ (why the stations show pickers); staff see no tag
+    setHtml(badge, sup ? `<span class="${Kit.cls.tagBrand} gap-1">${Kit.icon('crown', 'w-3.5 h-3.5')}Supervisor</span>` : '');
+    setVisible(badge, sup);
     setVisible($('stationSaveBtn'), sup);
     setVisible($('stationCountsBtn'), sup);
     setVisible($('auditLogBox'), sup);
     setVisible($('staffControlBox'), sup);
     setVisible($('summaryTargetSelectContainer'), sup);
-    setVisible($('navStaffBtn'), sup);
-    setVisible($('navSummaryBtn'), sup);
-    $('bottomNav').className = 'bg-white border-t shadow-2xl grid safe-bottom ' + (sup ? 'grid-cols-4' : 'grid-cols-2');
+    // the nav entries (#navStaffBtn, #navSummaryBtn, …) follow the registry: renderTabs → renderNav
     $('currentSupDisplay').textContent = `ผู้ถือสิทธิ์ปัจจุบัน: ${state.supervisor ? 'คุณ ' + state.supervisor : '-'}`;
   }
 
+  /** Current screen (falls back to station when it may not be shown), its hide()/show(), panels and nav entries. */
   function renderTabs() {
-    if (!isSup() && (ui.tab === 'staff' || ui.tab === 'summary')) ui.tab = 'station';
+    ensureVisibleTab();
+    syncShownFeature();
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === 'tab-' + ui.tab));
+    // a child screen (e.g. รายชื่อบุคลากร under เมนู) keeps its parent's bar entry highlighted
+    const owner = barOwner(ui.tab);
     document.querySelectorAll('.nav-btn').forEach(b => {
-      const on = b.dataset.tab === ui.tab;
-      b.classList.toggle('text-blue-600', on);
-      b.classList.toggle('text-slate-400', !on);
+      const bar = b.dataset.navPlace === 'bar';
+      const on = bar ? b.dataset.tab === owner : b.dataset.tab === ui.tab;
+      if (bar) {
+        b.classList.toggle('text-brand-700', on);     // UiKit.cls.navOn
+        b.classList.toggle('text-slate-500', !on);    // UiKit.cls.navOff
+      }
       b.setAttribute('aria-current', on ? 'page' : 'false');
     });
+    renderNav();
   }
 
-  function switchTab(name) {
-    if ((name === 'staff' || name === 'summary') && !isSup()) name = 'station';
-    if (!$('tab-' + name)) return;
-    ui.tab = name;
-    renderTabs();
-    try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (e) { /* ignore */ }
+  /* ---------- chrome (R1a-B2): header, week strip, save bar, เมนู ---------- */
+  /** The bar entry that represents `id`: the screen itself, or the nearest ancestor (def.parent) in the bar. */
+  function barOwner(id) {
+    let f = featById[id];
+    for (let i = 0; f && f.place !== 'bar' && i < 8; i++) f = f.parent ? featById[f.parent] : null;
+    return f ? f.id : id;
+  }
+
+  /** A screen below another one (not in the bar, not วันนี้): the header shows ← instead of the avatar. */
+  function isChildScreen(id) {
+    const f = featById[id];
+    return !!f && f.id !== 'station' && f.place !== 'bar';
+  }
+
+  /**
+   * The chrome of this version needs its markup: an index.html of another version (e.g. a stale copy next to a new
+   * app.js) must not break every render, so a missing piece is skipped.
+   */
+  function hasMarkup(ids) { return ids.every(id => !!$(id)); }
+  const HEADER_IDS = ['headerBackBtn', 'headerAvatarBtn', 'headerAvatar', 'headerDateLine', 'headerTitle', 'headerCaption', 'currentDate'];
+  const MENU_IDS = ['menuAvatar', 'menuName', 'menuGroup', 'menuRole', 'menuVersion'];
+
+  function renderChrome() {
+    if (hasMarkup(HEADER_IDS)) renderHeader();
+    if (hasMarkup(['weekStrip', 'weekDays'])) renderWeekStrip();
+    if (hasMarkup(['saveBar'])) renderSaveBar();
+    syncHistory();
+  }
+
+  /**
+   * Left: the user's avatar (→ เมนู), or ← on a child screen. Middle: "เวร IPD" + the selected date (tap = native
+   * date picker #currentDate) on screens about a date (def.chrome.date), else the screen title (#headerDate stays
+   * in the DOM). Right: #syncStatus and #refreshBtn.
+   */
+  function renderHeader() {
+    const f = featById[ui.tab];
+    const child = !!state.session && isChildScreen(ui.tab);
+    setVisible($('headerBackBtn'), child);
+    setVisible($('headerAvatarBtn'), !child);
+    const who = myName() || (state.session ? state.session.name : '');
+    setHtml($('headerAvatar'), Kit.avatar(who || '?', 'md', { cls: 'ring-2 ring-white' }));
+    const dated = !f || f.chrome.date;
+    setVisible($('headerDateLine'), dated);
+    setVisible($('currentDate'), dated);
+    setVisible($('headerTitle'), !dated);
+    // the caption is the wordmark "X-RAY IPD" (display font, letter-spaced) except on dated screens other than
+    // วันนี้, where it names the screen (Thai text is never letter-spaced)
+    const screenCaption = dated && f && f.id !== 'station';
+    $('headerCaption').textContent = screenCaption ? f.title : 'X-RAY IPD';
+    $('headerCaption').classList.toggle('tracking-[0.12em]', !screenCaption);
+    setText($('headerTitle'), f ? f.title : 'เวร IPD');
+    fitHeader();
+  }
+
+  /**
+   * The seven days (Sunday–Saturday) of the selected date's week. ‹ › move one day (crossing into the next week
+   * shows that week); a tap on a day selects it.
+   */
+  function renderWeekStrip() {
+    const strip = $('weekStrip');
+    const f = featById[ui.tab];
+    const on = !!state.user && !!f && f.chrome.weekStrip;
+    const was = !strip.classList.contains('hidden');
+    setVisible(strip, on);
+    if (was !== on) syncLayout();
+    if (!on) return;
+    const sel = state.selectedDate;
+    const today = U.todayStr();
+    const start = U.addDays(sel, -U.parseYmd(sel).getDay());
+    const k = Kit.cls;
+    let html = '';
+    for (let i = 0; i < 7; i++) {
+      const date = U.addDays(start, i);
+      const isSel = date === sel;
+      const isToday = date === today;
+      const weekend = i === 0 || i === 6;
+      const cellCls = k.dayCell + ' ' + (isSel ? k.dayCellOn : isToday ? k.dayCellToday : k.dayCellOff);
+      const numCls = k.dayNum + (weekend && !isSel ? ' ' + k.dayWeekend : '');
+      const label = U.thaiDate(date) + (isToday ? ' (วันนี้)' : '');
+      html += `<button type="button" class="${cellCls}" data-date="${date}" aria-pressed="${isSel}" aria-label="${esc(label)}"` +
+        `${isToday ? ' aria-current="date" data-today="1"' : ''}>` +
+        `<span class="${k.dayLabel}">${U.THAI_WEEKDAYS_SHORT[i]}</span><span class="${numCls}">${Number(date.slice(8, 10))}</span></button>`;
+    }
+    setHtml($('weekDays'), html);
+  }
+
+  function onWeekDayClick(e) {
+    const b = e.target && e.target.closest ? e.target.closest('.week-day[data-date]') : null;
+    if (b) spawn(() => setSelectedDate(b.dataset.date));
+  }
+
+  /** The save bar: Supervisor, on วันนี้, while the selected day's data is loaded (i.e. the day can be edited). */
+  function saveBarOn() {
+    return isSup() && !ui.pwForced && ui.tab === 'station' && dayView(state.selectedDate) === 'ready';
+  }
+
+  function renderSaveBar() {
+    const bar = $('saveBar');
+    const on = saveBarOn();
+    const was = !bar.classList.contains('hidden');
+    setVisible(bar, on);
+    if (!on && isShown('dayToolsModal')) hideModal('dayToolsModal');
+    renderSaveLook();
+    if (was !== on) syncLayout();
+  }
+
+  /** Replaces the tokens of `from` that `to` does not have by the tokens of `to` (recipe swap, shared tokens stay). */
+  function swapCls(el, from, to) {
+    const keep = new Set(to.split(/\s+/).filter(Boolean));
+    from.split(/\s+/).filter(t => t && !keep.has(t)).forEach(t => el.classList.remove(t));
+    keep.forEach(t => el.classList.add(t));
+  }
+
+  /**
+   * C-M4: with nothing unsaved the save bar is compact (≈52 px: ⋯ and a secondary "บันทึก", no pill); while the draft is
+   * dirty it is the full bar with the primary button and the "ยังไม่ได้บันทึก" pill.
+   */
+  function renderSaveLook() {
+    const btn = $('stationSaveBtn'), inner = $('saveBarInner');
+    if (!btn || !inner) return;
+    const dirty = isSup() && hasDraftFor(state.selectedDate) && isDraftDirty();
+    const look = dirty ? 'dirty' : 'clean';
+    if (btn.dataset.look === look) return;
+    btn.dataset.look = look;
+    swapCls(btn, dirty ? Kit.cls.saveBtnClean : Kit.cls.saveBtnDirty, dirty ? Kit.cls.saveBtnDirty : Kit.cls.saveBtnClean);
+    swapCls(inner, dirty ? 'py-1' : 'py-2.5', dirty ? 'py-2.5' : 'py-1');
+  }
+
+  function openDayTools() {
+    if (!isSup()) { toast(MSG.supOnly); return; }
+    renderDayControls();
+    showModal('dayToolsModal');
+  }
+
+  /**
+   * The day tools name the selected day — "วันนี้" only when it is today (C-M2); "วางข้อมูล" is disabled (aria) with
+   * its reason while nothing is copied (Minor 12; the button stays clickable: its handler explains).
+   */
+  function renderDayTools() {
+    if (!$('dayToolsTitle')) return;
+    const date = state.selectedDate;
+    const today = date === U.todayStr();
+    const rel = relativeDay(date);
+    setText($('dayToolsTitle'), today ? 'เครื่องมือของวันนี้' : 'เครื่องมือของวันที่ ' + U.thaiDateShort(date));
+    setText($('dayToolsDate'), U.thaiDate(date) + (rel ? ' · ' + rel : ''));
+    setText($('copyDayLabel'), withDay('คัดลอกข้อมูล', date, '', { year: false }));
+    setText($('pasteDayLabel'), withDay('วางข้อมูลลง', date, '', { year: false }));
+    setText($('clearDayLabel'), withDay('ล้างข้อมูลทั้งหมดของ', date, '', { year: false }));
+    const paste = $('pasteDayBtn');
+    const noClip = !state.clipboard;
+    if (paste) {
+      if (noClip) paste.setAttribute('aria-disabled', 'true'); else paste.removeAttribute('aria-disabled');
+      setVisible($('pasteDayHint'), noClip);
+    }
+    const tools = $('dayToolsBtn');
+    if (tools) {
+      const label = withDay('เครื่องมือของ', date, ' (คัดลอก วาง แชร์ภาพ ล้างข้อมูล)', { year: false });
+      if (tools.getAttribute('aria-label') !== label) tools.setAttribute('aria-label', label);
+    }
+  }
+
+  /** เมนู: profile card, the sections' visibility (from the nav entries they hold) and the version row. */
+  function renderMenu() {
+    if (!hasMarkup(MENU_IDS)) return;
+    const name = myName() || (state.session ? state.session.name : '');
+    setHtml($('menuAvatar'), name ? Kit.avatar(name, 'lg') : '');
+    $('menuName').textContent = name || '-';
+    const me = state.staff.find(s => s.name === name);
+    const group = (state.user && state.user.group) || (me && me.group) || '';
+    $('menuGroup').textContent = group ? groupLabel(group) : (name ? 'ผู้ใช้งาน' : '-');
+    setHtml($('menuRole'), !name ? '' : isSup() ? Kit.pill('Supervisor', 'pending', 'crown') : Kit.pill('เจ้าหน้าที่', 'neutral', 'user'));
+    setHtml($('menuVersion'), `<span class="block">แอป ${esc(Api.clientVersion)}</span>` +
+      `<span class="block whitespace-nowrap">เซิร์ฟเวอร์ ${esc(serverVersionLabel())}</span>`);
+    renderMenuSections();
+  }
+
+  /** The server version is only known after a ping (connection check, setup); no extra request is sent for it. */
+  function serverVersionLabel() {
+    if (ui.serverVersion) return ui.serverVersion;
+    return Api.serverVersionOk === false ? 'เก่ากว่า 2.1.0' : '— ยังไม่ได้ตรวจ';   // Minor 13: not a bare dash
+  }
+
+  function renderMenuSections() {
+    document.querySelectorAll('#menuNav [data-menu-section]').forEach(sec => {
+      const list = sec.querySelector('[data-menu-list]');
+      const any = !!list && Array.prototype.some.call(list.children,
+        c => !c.hidden && !c.classList.contains('hidden') && c.style.display !== 'none');
+      sec.hidden = !any;   // the attribute (space-y-* ignores [hidden] siblings)
+    });
   }
 
   /* ---------- station tab ---------- */
@@ -1250,12 +1827,16 @@
     const view = dayView(date);
     if (!state.user) setHtml(container, '');
     else if (view === 'loading') setHtml(container, LOADING_HTML);
-    else if (view === 'missing') setHtml(container, MISSING_HTML);
+    else if (view === 'missing') setHtml(container, missingHtml(date));
     else {
-      const card = { sup: isSup(), locked: !canEditDay(date), onLeave: activeLeaves(date), act: activeSet() };
+      const card = { sup: isSup(), locked: !canEditDay(date), onLeave: activeLeaves(date), act: activeSet(), me: myName(),
+        planned: isPlannedDay(date) };
       const slots = viewSlots(date);
       setHtml(container, U.STATIONS.map(st => stationCardHtml(st, slots, card)).join(''));
     }
+    renderMyDay();
+    renderStationNote();
+    renderStationPanels();
     renderStationLeaves();
     renderRemark();
     renderDraftBadge();
@@ -1263,25 +1844,57 @@
     renderDayControls();
   }
 
-  /** card: {sup, locked (selects disabled), onLeave, act (active names)}. */
+  /** A day with a saved plan (at least one saved name). Shortages of an unplanned day are not an alarm (Minor 7). */
+  function isPlannedDay(date) {
+    const d = state.days[date];
+    return !!d && U.STATIONS.some(st => (d.assignments[st.id] || []).some(Boolean));
+  }
+
+  /** One calm line over the stations of an unplanned day — unless "ของฉันวันนี้" already says exactly that. */
+  function renderStationNote() {
+    const el = $('stationNote');
+    if (!el) return;
+    const date = state.selectedDate;
+    const myDay = $('myDayCard');
+    const on = !!state.user && dayKnown(date) && !isPlannedDay(date) && !(myDay && myDay.dataset.myDay === 'unplanned');
+    setVisible(el, on);
+    setHtml(el, on ? `${Kit.icon('clock', 'w-5 h-5 shrink-0 mt-0.5 text-amber-700')}<span class="min-w-0">${esc(withDay('ยังไม่ได้จัดเวรของ', date))}` +
+      ` — ${isSup() ? 'เลือกคนในแต่ละ Station แล้วกดบันทึก' : 'Supervisor ยังไม่ได้บันทึกตาราง'}</span>` : '');
+  }
+
+  /** The station's tinted title chip (colours of Utils.STATIONS; the h3's first child is the name text node). */
+  function stationChipHtml(st, tag) {
+    const t = tag || 'span';
+    return `<${t} class="${Kit.cls.stationChip}" style="background:${st.bg};color:${st.text}">${esc(st.name).replace('/', '/<wbr>')}</${t}>`;
+  }
+
+  /**
+   * One station: a white card with the station's colour as a left edge and a tinted title chip, the line
+   * "ต้องการ N คน" + "(ขาด N)" (or "ครบ"), then the people (chips) or, for the Supervisor, one native picker per slot.
+   * card: {sup, locked (pickers disabled), onLeave, act (active names), me}.
+   */
   function stationCardHtml(st, slots, card) {
-    const { sup, locked, onLeave, act } = card;
+    const { sup, locked, onLeave, act, me, planned } = card;
+    const k = Kit.cls;
     const list = slots[st.id] || [];
     const filled = list.filter(Boolean);
     const need = required(st.id);
     const short = need - filled.length;
     const head =
-      `<div class="flex justify-between items-center mb-2 gap-2">` +
-        `<h3 class="font-bold text-sm" style="color:${st.text}">${esc(st.name)}` +
-          (short > 0 ? ` <span class="station-short" style="font-size:11px; color:#ef4444; font-weight:700;">(ขาด ${short})</span>` : '') +
-        `</h3>` +
-        `<span class="station-need text-[11px] px-2 py-0.5 bg-white/80 rounded-full border shrink-0">ต้องการ ${need} คน</span>` +
+      `<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5">` +
+        `<h3 class="${k.stationChip}" style="background:${st.bg};color:${st.text}">${esc(st.name)}</h3>` +
+        `<span class="ml-auto inline-flex items-center gap-1.5">` +
+          `<span class="station-need ${k.stationNeed}">ต้องการ ${need} คน</span>` +
+          (short > 0   // coral only for a SAVED day that is short; a day nobody planned yet is neutral (Minor 7)
+            ? `<span class="station-short ${k.pill} ${planned ? k.pillDanger : k.pillNeutral}">(ขาด ${short})</span>`
+            : `<span class="${k.pill} ${k.pillOk}">${Kit.icon('check', 'w-3.5 h-3.5')}ครบ</span>`) +
+        `</span>` +
       `</div>`;
     let body;
     if (sup) {
       const pos = new Map();   // name → "stationId:index" of the slot holding it
       U.STATIONS.forEach(s => (slots[s.id] || []).forEach((n, i) => { if (n) pos.set(n, s.id + ':' + i); }));
-      body = '<div class="space-y-2">' + list.map((cur, i) => {
+      body = '<div class="mt-2.5 space-y-2">' + list.map((cur, i) => {
         const here = st.id + ':' + i;
         // a person deleted since stays in their saved slot (history) but is never offered anywhere else
         const gone = cur && !act.has(cur) ? `<option value="${esc(cur)}" selected>${esc(cur + GONE_LABEL)}</option>` : '';
@@ -1289,17 +1902,109 @@
           .filter(s => s.name === cur || (!onLeave[s.name] && (!pos.has(s.name) || pos.get(s.name) === here)))
           .map(s => `<option value="${esc(s.name)}"${s.name === cur ? ' selected' : ''}>${esc(s.name)}${onLeave[s.name] ? ' (ลา: ' + esc(onLeave[s.name].type) + ')' : ''}</option>`)
           .join('');
-        return `<select class="station-select w-full text-sm p-2.5 border rounded-xl outline-none" data-station="${st.id}" data-index="${i}" aria-label="${esc(st.name)} คนที่ ${i + 1}" style="background:#ffffff;"${locked ? ' disabled' : ''}>` +
-          `<option value=""${cur ? '' : ' selected'}>-- เลือกคนที่ ${i + 1} --</option>${gone}${opts}</select>`;
+        const lead = cur ? Kit.avatar(cur, 'sm') : `<span class="${k.slotEmpty}" aria-hidden="true">${i + 1}</span>`;
+        const warn = cur && onLeave[cur]
+          ? `<p class="flex items-center gap-1.5 pl-[42px] text-xs font-medium leading-4 text-coral-700">${Kit.icon('alert-triangle', 'w-3.5 h-3.5')}ลา: ${esc(onLeave[cur].type)} — แต่ยังอยู่ใน Station นี้</p>`
+          : '';
+        return `<div class="${k.slotRow}">${lead}` +
+          `<select class="station-select ${k.select}" data-station="${st.id}" data-index="${i}" aria-label="${esc(st.name)} คนที่ ${i + 1}"${locked ? ' disabled' : ''}>` +
+          `<option value=""${cur ? '' : ' selected'}>-- เลือกคนที่ ${i + 1} --</option>${gone}${opts}</select></div>${warn}`;
       }).join('') + '</div>';
     } else {
-      body = `<div class="station-names flex flex-wrap gap-1.5" data-station="${st.id}">` +
+      body = `<div class="station-names mt-2.5 flex flex-wrap gap-2" data-station="${st.id}">` +
         (filled.length
-          ? filled.map(n => `<span class="station-name text-sm font-semibold bg-white/80 border rounded-lg px-2.5 py-1">${esc(nameLabel(n, act))}</span>`).join('')
-          : '<span class="text-xs text-slate-400 italic">ยังไม่ได้จัดสรร</span>') +
+          ? filled.map(n => {
+            const look = onLeave[n] ? k.personChipLeave : n === me ? k.personChipMe : k.personChip;
+            const tip = onLeave[n] ? ` title="${esc('ลา: ' + onLeave[n].type)}"` : '';
+            return `<span class="station-name ${look}"${tip}>${Kit.avatar(n, 'xs')}<span class="min-w-0 break-words">${esc(nameLabel(n, act))}</span>` +
+              (onLeave[n] ? Kit.icon('calendar-off', 'w-4 h-4 shrink-0') : '') + '</span>';
+          }).join('')
+          : `<span class="${k.personEmpty}">ยังไม่ได้จัดสรร</span>`) +
         '</div>';
     }
-    return `<div class="station-card p-3 rounded-2xl border shadow-sm" data-station-card="${st.id}" style="background:${st.bg}; border-color:${st.border}">${head}${body}</div>`;
+    return `<div class="station-card ${k.stationCard}" data-station-card="${st.id}">` +
+      `<span class="${k.stationEdge}" style="background:${st.border}" aria-hidden="true"></span>${head}${body}</div>`;
+  }
+
+  /** "25 พ.ย." — day + month (no year), for card titles. */
+  function shortDateText(date) {
+    return U.thaiDateShort(date, { year: false });
+  }
+
+  /**
+   * "ของฉันวันนี้" — the answer first: my station(s) or my leave on the selected date, derived from what is loaded
+   * (no request). States (data-my-day): loading · missing (not on this device) · unplanned (nothing saved for the
+   * day yet) · free (the day is planned, I am not in it) · assigned · leave · leave-assigned (on leave but still in a
+   * station). The Supervisor sees the stations as edited (the unsaved draft, marked as such).
+   */
+  function renderMyDay() {
+    const box = $('myDayCard');
+    if (!box) return;
+    const me = myName();
+    const on = !!state.user && !!me;
+    setVisible(box, on);
+    if (!on) { setHtml(box, ''); return; }
+    const k = Kit.cls;
+    const date = state.selectedDate;
+    const view = dayView(date);
+    const title = date === U.todayStr() ? 'ของฉันวันนี้' : 'ของฉัน · ' + shortDateText(date);
+    const head = `<div class="flex items-center gap-3 min-w-0 pr-6">${Kit.avatar(me, 'md')}` +
+      `<div class="min-w-0 flex-1"><h2 class="${k.titleCard}">${esc(title)}</h2><p class="${k.textMeta} break-words">${esc(me)}</p></div></div>` +
+      `<span class="absolute top-3 right-3" aria-hidden="true">${Kit.deco('sparkle', 'w-4 h-4 ' + k.decoStar)}</span>`;
+    const line = (iconName, tone, main, sub) =>
+      `<div class="flex items-start gap-3"><span class="${k.listIcon} ${tone}">${Kit.icon(iconName, 'w-5 h-5')}</span>` +
+      `<div class="min-w-0 flex-1 pt-1.5"><p class="text-sm font-medium leading-6 text-ink-900">${main}</p>` +
+      (sub ? `<p class="${k.textMeta} mt-0.5">${sub}</p>` : '') + '</div></div>';
+    let state1, body;
+    if (view === 'loading') {
+      state1 = 'loading';
+      body = Kit.skeleton(2);
+    } else if (view === 'missing') {
+      state1 = 'missing';
+      body = line('cloud-off', k.listIconNeutral, esc(withDay('ยังไม่มีข้อมูลของ', date, 'ในเครื่อง')), 'แตะปุ่มรีเฟรชด้านบนเพื่อโหลดอีกครั้ง');
+    } else {
+      const slots = viewSlots(date);
+      const mine = U.STATIONS.filter(st => (slots[st.id] || []).indexOf(me) >= 0);
+      const planned = U.STATIONS.some(st => (slots[st.id] || []).some(Boolean));
+      const leave = activeLeaves(date)[me];
+      const draft = isSup() && hasDraftFor(date) && isDraftDirty();
+      const chips = mine.map(st => stationChipHtml(st)).join('');
+      const mates = mine.length ? U.STATIONS.filter(st => mine.indexOf(st) >= 0)
+        .reduce((all, st) => all.concat(slots[st.id].filter(n => n && n !== me)), []) : [];
+      const draftTag = draft ? ` <span class="${k.pill} ${k.pillPending}">ยังไม่ได้บันทึก</span>` : '';   // one wording (Minor 6)
+      if (leave) {
+        const ranked = leaveList(date).filter(l => l.name === me)[0];
+        const label = leave.type + (ranked && ranked.rank ? ` (คนที่ ${ranked.rank})` : '');
+        state1 = mine.length ? 'leave-assigned' : 'leave';
+        body = line('calendar-off', k.listIconDanger, `ลา: <span class="text-coral-700">${esc(label)}</span>`,
+          leave.recordedBy ? 'บันทึกโดย ' + esc(leave.recordedBy) : '');
+        if (mine.length) {
+          body += `<div class="${k.banner} ${k.bannerWarn} mt-3">${Kit.icon('alert-triangle', 'w-5 h-5 shrink-0 mt-0.5')}` +
+            `<div class="min-w-0 flex flex-wrap items-center gap-1.5">ยังมีชื่ออยู่ที่ ${chips}${draftTag}` +
+            `<span class="w-full">${isSup() ? 'นำชื่อออกจาก Station ก่อนบันทึก' : 'แจ้ง Supervisor ให้แก้ไข'}</span></div></div>`;
+        }
+      } else if (mine.length) {
+        state1 = 'assigned';
+        body = `<div class="flex items-start gap-3"><span class="${k.listIcon} ${k.listIconBrand}">${Kit.icon('calendar-check', 'w-5 h-5')}</span>` +
+          `<div class="min-w-0 flex-1"><p class="${k.textMeta}">คุณอยู่ที่</p>` +
+          `<div class="mt-1 flex flex-wrap items-center gap-2">${chips}${draftTag}</div>` +
+          (mates.length ? `<p class="${k.textMeta} mt-2 break-words">ร่วมกับ ${mates.map(esc).join(' · ')}</p>` : '') +
+          '</div></div>';
+      } else if (planned) {
+        state1 = 'free';
+        body = line('user', k.listIconNeutral, esc(withDay('', date, ' ยังไม่มีชื่อคุณใน Station', { year: false })),
+          draft ? 'ตามที่แก้ไขไว้ (ยังไม่ได้บันทึก)' : 'ดูทั้งหมดได้ในรายการ Station');
+      } else {
+        state1 = 'unplanned';
+        body = line('clock', k.listIconSun, esc(withDay('ยังไม่ได้จัดเวรของ', date)),
+          isSup() ? 'เลือกคนในแต่ละ Station แล้วกดบันทึก' : esc(withDay('Supervisor ยังไม่ได้บันทึกตารางของ', date, '', { year: false })));
+      }
+      if (view === 'cached') body += `<p class="${k.textCaption} mt-2">ข้อมูลที่บันทึกไว้ในเครื่อง (ยังไม่ได้อัปเดต)</p>`;
+      box.dataset.myStations = mine.map(st => st.id).join(',');
+    }
+    if (view === 'loading' || view === 'missing') box.dataset.myStations = '';
+    box.dataset.myDay = state1;
+    setHtml(box, head + `<div class="mt-3 pt-3 border-t-2 border-brand-50">${body}</div>`);
   }
 
   /** Who is on leave on the selected date — shown to every role (not while the day is loading or unknown). */
@@ -1307,18 +2012,26 @@
     const date = state.selectedDate;
     const known = dayKnown(date);
     setVisible($('stationLeavesCard'), known);
-    if (!known) return;
+    if (!known) {   // hidden, and empty: names of another day / user must not stay in the DOM (B-3)
+      setHtml($('stationLeaves'), '');
+      $('stationLeaveCount').textContent = '';
+      return;
+    }
     const list = leaveList(date);
     $('stationLeaveCount').textContent = list.length + ' คน';
     setHtml($('stationLeaves'), list.length
       ? list.map(leaveItemHtml).join('')
-      : '<span class="italic text-slate-400">ไม่มีรายการลาวันนี้</span>');
+      : `<p class="${Kit.cls.textMeta}">${esc(withDay('ไม่มีรายการลา', date))}</p>`);
   }
 
-  /** "• ชื่อ: ประเภท (คนที่ N)" — one entry of leaveList() (Station card and the leave calendar's day list). */
+  /**
+   * "• ชื่อ: ประเภท (คนที่ N)" as text (the station card's and the calendar day list's entry, a test contract): drawn
+   * as avatar + name + a status pill; the bullet and the colon stay in the text for screen readers only.
+   */
   function leaveItemHtml(l) {
-    return `<div>• <span class="font-semibold text-slate-800">${esc(l.name)}</span>: ` +
-      `<span class="font-semibold text-rose-600">${esc(l.type)}${l.rank ? ` (คนที่ ${l.rank})` : ''}</span></div>`;
+    return `<div class="flex items-center gap-2.5 min-w-0"><span class="sr-only">• </span>${Kit.avatar(l.name, 'sm')}` +
+      `<span class="min-w-0 flex-1 text-sm font-medium leading-6 text-ink-900 break-words">${esc(l.name)}<span class="sr-only">: </span></span>` +
+      `<span class="${Kit.cls.pill} ${Kit.cls.pillDanger}">${esc(l.type)}${l.rank ? ` (คนที่ ${l.rank})` : ''}</span></div>`;
   }
 
   /** Supervisors edit the remark in the textarea; everyone else reads it in #remarkView. */
@@ -1329,15 +2042,17 @@
     const edit = canEditDay(date);
     const want = sup ? viewRemark(date) : '';
     if (normRemark(ta.value) !== want) ta.value = want;
+    const ph = withDay('เพิ่มหมายเหตุของ', date, '…', { year: false });
+    if (ta.placeholder !== ph) ta.placeholder = ph;
     ta.readOnly = !edit;
-    ta.style.backgroundColor = edit ? '#f8fafc' : '#f1f5f9';
+    ta.style.backgroundColor = edit ? '' : '#F1F4FB';   // ink-50 while the day cannot be edited
     setVisible(ta, sup);
 
     const view = $('remarkView');
     const known = dayKnown(date);
     const remark = known ? viewRemark(date) : '';
-    view.textContent = remark || (known ? 'ไม่มีหมายเหตุสำหรับวันนี้' : '-');
-    view.className = REMARK_VIEW_BASE + (remark ? 'bg-amber-50 border-amber-200 text-amber-900' : 'bg-slate-50 text-slate-400 italic');
+    setText(view, remark || (known ? withDay('ไม่มีหมายเหตุสำหรับ', date) : '-'));
+    view.className = REMARK_VIEW_BASE + (remark ? 'bg-sun-50 border-sun-200 text-ink-900' : 'bg-white border-ink-100 text-slate-500');
     setVisible(view, !sup);
   }
 
@@ -1348,31 +2063,60 @@
     const set = (id, off) => { const b = $(id); if (b && b.dataset.busy !== '1') b.disabled = off; };
     set('copyDayBtn', !ready);
     ['stationSaveBtn', 'pasteDayBtn', 'clearDayBtn'].forEach(id => set(id, !ready || ui.dayBusy === date));
+    renderDayTools();
   }
 
   function renderDraftBadge() {
     setVisible($('draftBadge'), isSup() && hasDraftFor(state.selectedDate) && isDraftDirty());
+    renderSaveLook();
   }
 
-  /** The audit trail of the selected day is loaded once that day's data is (so startup makes one request). */
+  /**
+   * Audit lines (polish): names never break mid-word — every known name (active staff and the actors) is kept on one
+   * line; the time is Buddhist-era (Minor 1).
+   */
+  let nameRe = null, nameReSig = null;
+  function keepNames(escapedText, extra) {
+    const names = state.staff.map(s => s.name).concat(extra || []).filter(n => n && n.length > 1);
+    const sig = names.join('\n');
+    if (sig !== nameReSig) {
+      nameReSig = sig;
+      const parts = names.map(esc).sort((a, b) => b.length - a.length).map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+      nameRe = parts.length ? new RegExp(parts.join('|'), 'g') : null;
+    }
+    return nameRe ? escapedText.replace(nameRe, m => `<span class="whitespace-nowrap">${m}</span>`) : escapedText;
+  }
+
+  /**
+   * The audit trail of the selected day (collapsed <details> with a count) is loaded once that day's data is (so
+   * startup makes one request).
+   */
   function renderAudit() {
     if (!isSup()) return;
     const date = state.selectedDate;
     const box = $('auditLogContent');
     const entries = state.audit[date];
-    const loading = '<div class="italic text-amber-700/70">กำลังโหลด…</div>';
+    const note = t => `<p class="text-slate-500">${t}</p>`;
+    const loading = note('กำลังโหลด…');
+    let count = '…';
     if (entries) {
+      count = entries.length + ' รายการ';
       setHtml(box, entries.length
-        ? entries.map(a => `<div>• ${esc(a.detail)} — <strong>${esc(a.actor)}</strong> เมื่อ ${esc(U.formatStamp(a.timestamp))}</div>`).join('')
-        : '<div class="italic text-amber-700/70">ยังไม่มีประวัติการแก้ไขในวันนี้</div>');
+        ? entries.map(a => `<div class="flex gap-2.5"><span class="mt-1.5 w-2 h-2 shrink-0 rounded-full bg-lilac-300" aria-hidden="true"></span>` +
+          `<p class="min-w-0 break-words">${keepNames(esc(a.detail), entries.map(x => x.actor))} — <strong class="font-semibold text-ink-900 whitespace-nowrap">${esc(a.actor)}</strong>` +
+          ` เมื่อ <span class="whitespace-nowrap">${esc(U.thaiStamp(a.timestamp))}</span></p></div>`).join('')
+        : note(esc(withDay('ยังไม่มีประวัติการแก้ไขใน', date))));
     } else if (ui.auditLoading[date] || inRanges(ui.fetchingRanges, date)) {
       setHtml(box, loading);
     } else if (ui.auditFailed[date] || dayView(date) !== 'ready') {
-      setHtml(box, '<div class="italic text-amber-700/70">โหลดประวัติไม่สำเร็จ (กด 🔄 เพื่อลองใหม่)</div>');
+      count = '-';
+      setHtml(box, note('โหลดประวัติไม่สำเร็จ (แตะปุ่มรีเฟรชด้านบนเพื่อลองใหม่)'));
     } else {
       setHtml(box, loading);
       loadAudit(date);
     }
+    const c = $('auditCount');
+    if (c) c.textContent = count;
   }
 
   function loadAudit(date) {
@@ -1390,69 +2134,90 @@
   }
 
   /* ---------- leave tab ---------- */
-  function chipClass(val, active) {
-    if (active) return CHIP_BASE + (val === '' ? 'bg-emerald-100 text-emerald-700 ring-2 ring-emerald-500' : 'bg-rose-100 text-rose-700 ring-2 ring-rose-500');
-    return CHIP_BASE + (val === '' ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-600');
-  }
-
+  /**
+   * การลา: the calendar, then my own row ("สถานะของฉัน", the first .leave-row of the page), then everybody else as
+   * compact rows (avatar, name, group tag, status pill with data-status, queue rank, who recorded it). A tap on a row
+   * opens the leave sheet (#confirmLeaveModal). Every row is rendered; the group filter only hides rows.
+   */
   function renderLeaveTab() {
     const date = state.selectedDate;
     renderLeaveCalendar();
     document.querySelectorAll('.grp-btn').forEach(b => {
       const on = b.dataset.f === state.filter;
-      b.className = GRP_BASE + (on ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600');
+      b.className = GRP_BASE + (on ? Kit.cls.chipOn : Kit.cls.chipOff);
       b.setAttribute('aria-pressed', on ? 'true' : 'false');
     });
     const container = $('leaveContainer');
-    if (!state.user) { setHtml(container, ''); $('leaveCountBadge').textContent = '0 คน'; return; }
+    const own = $('myLeaveRow');
+    const hint = $('leaveListHint');
+    if (!state.user) {
+      setHtml(container, '');
+      setHtml(own, '');
+      setVisible(hint, false);
+      $('leaveCountBadge').textContent = '0 คน';
+      renderLeaveSheet();
+      return;
+    }
     const leaves = activeLeaves(date);
-    $('leaveCountBadge').textContent = Object.keys(leaves).length + ' คน';
+    $('leaveCountBadge').textContent = 'ลา ' + Object.keys(leaves).length + ' คน';
     const view = dayView(date);
-    if (view === 'loading' || view === 'missing') { setHtml(container, view === 'loading' ? LOADING_HTML : MISSING_HTML); return; }
-
-    const queues = {};
-    U.QUEUE_TYPES.forEach(t => { queues[t] = U.queueOrder(leaves, t); });
     const me = myName();
     const sup = isSup();
-    const rows = state.staff.filter(s => s.name === me).concat(state.staff.filter(s => s.name !== me));
-    setHtml(container, rows.map(s => leaveRowHtml(s, leaves[s.name], me, sup, queues)).join(''));
+    const mine = state.staff.find(s => s.name === me);
+    setVisible($('myLeaveCard'), !!mine);
+    if (view === 'loading' || view === 'missing') {
+      setHtml(container, view === 'loading' ? LOADING_HTML : missingHtml(date));
+      setHtml(own, view === 'loading' ? Kit.skeleton(2) : '');
+      setVisible(hint, false);
+      renderLeaveSheet();
+      return;
+    }
+    const queues = {};
+    U.QUEUE_TYPES.forEach(t => { queues[t] = U.queueOrder(leaves, t); });
+    setHtml(own, mine ? leaveRowHtml(mine, leaves[me], me, sup, queues, true) : '');
+    const others = state.staff.filter(s => s.name !== me);
+    setHtml(container, `<div class="${Kit.cls.list}">` + others.map(s => leaveRowHtml(s, leaves[s.name], me, sup, queues, false)).join('') + '</div>');
+    hint.textContent = sup ? 'แตะชื่อเพื่อบันทึกหรือเปลี่ยนสถานะการลา' : 'แก้ไขได้เฉพาะของตนเอง · แตะชื่อเพื่อดูรายละเอียด';
+    setVisible(hint, true);
+    renderLeaveSheet();
   }
 
-  function leaveRowHtml(s, leave, me, sup, queues) {
+  /** The status of a leave as a pill (word + icon, never colour alone): "ปกติ", or the type with its queue rank. */
+  function leaveStatusPill(type, rank, quietNormal) {
+    if (!type) return quietNormal ? '' : Kit.pill('ปกติ', 'neutral');
+    return Kit.pill(type + (rank ? ` · คนที่ ${rank}` : ''), 'danger', 'calendar-off');
+  }
+
+  /**
+   * One person's row: a button (data-staff, data-group, data-status = the leave type or '' for ปกติ, data-locked when
+   * this user may not change it). own: the prominent own row in "สถานะของฉัน" (never hidden by the group filter).
+   */
+  function leaveRowHtml(s, leave, me, sup, queues, own) {
+    const k = Kit.cls;
     const isOwner = s.name === me;
     const canEdit = sup || isOwner;
     const cur = leave ? leave.type : '';
-    const meta = leave ? [leave.recordedBy || '', U.formatStampShort(leave.recordedAt)].filter(Boolean).join(' · ') : '';
-    const hide = state.filter !== 'all' && s.group !== state.filter;
-    const lock = canEdit ? '' : ' disabled style="cursor:not-allowed;"';
-    const chips = [''].concat(U.LEAVE_TYPES).map(val => {
-      const active = val === cur;
-      let label = val === '' ? 'ปกติ' : val;
-      if (active && queues[val]) {
-        const n = queues[val].indexOf(s.name);
-        if (n >= 0) label = `${val} (คนที่ ${n + 1})`;
-      }
-      return `<button type="button" class="${chipClass(val, active)}" data-staff="${esc(s.name)}" data-val="${esc(val)}" aria-pressed="${active ? 'true' : 'false'}"${lock}>${esc(label)}</button>`;
-    }).join('');
-    // The header wraps instead of truncating: on a phone the badges move to a second line and the
-    // name stays readable.
-    return (
-      `<div class="leave-row bg-white p-3 rounded-2xl shadow-sm${canEdit ? '' : ' opacity-75'}${isOwner ? ' border-2 border-blue-500 shadow-md' : ''}" data-staff="${esc(s.name)}" data-group="${esc(s.group)}"${hide ? ' style="display:none"' : ''}>` +
-        `<div class="flex flex-wrap items-center justify-between mb-2 gap-x-2 gap-y-1">` +
-          `<span class="text-sm font-bold flex items-center gap-1.5">` +
-            `<span class="leave-name">${esc(s.name)}</span>` +
-            (isOwner ? '<span class="text-[9px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded font-bold shrink-0">คุณ (ของฉัน)</span>' : '') +
-            (canEdit ? '' : '<span class="text-[9px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded shrink-0">🔒 ล็อก</span>') +
-          `</span>` +
-          `<div class="flex flex-wrap items-center gap-1.5">` +
-            (isOwner ? '<button type="button" data-action="change-my-password" class="bg-slate-100 active:bg-slate-200 text-slate-700 text-[10px] font-semibold px-2 py-1 rounded-lg border">🔑 เปลี่ยนรหัส</button>' : '') +
-            `<span class="meta-badge text-[10px] text-slate-500 font-semibold bg-slate-100 px-2 py-0.5 rounded-md${meta ? '' : ' hidden'}" data-staff-meta="${esc(s.name)}">${esc(meta)}</span>` +
-            (s.group === 'backup' ? '<span class="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full">แทนเวร</span>' : '') +
-          `</div>` +
-        `</div>` +
-        `<div class="flex flex-wrap gap-1.5">${chips}</div>` +
-      `</div>`
-    );
+    const rank = cur && queues[cur] ? queues[cur].indexOf(s.name) + 1 : 0;
+    const meta = leave ? [leave.recordedBy || '', U.thaiStampShort(leave.recordedAt)].filter(Boolean).join(' · ') : '';
+    const hide = !own && state.filter !== 'all' && s.group !== state.filter;
+    const tags = (isOwner ? `<span class="${k.tagBrand}">คุณ (ของฉัน)</span>` : '') +
+      (s.group === 'backup' ? `<span class="${k.tag}">แทนเวร</span>` : '');
+    // Minor 15: someone else's row shows a pill only for a leave, and no lock (the hint line above the list says why)
+    const trail = canEdit ? Kit.icon('chevron-right', 'w-5 h-5 shrink-0 text-ink-300') : '';
+    const label = s.name + (isOwner ? ' (คุณ)' : '') + ' — ' + (cur ? cur + (rank ? ' คนที่ ' + rank : '') : 'ปกติ') + (canEdit ? '' : ' (แก้ไขไม่ได้)');
+    return `<button type="button" class="leave-row ${k.leaveRow}${own ? ' rounded-2xl border-2 border-brand-100 bg-brand-50/40' : ''}" ` +
+        `data-staff="${esc(s.name)}" data-group="${esc(s.group)}" data-status="${esc(cur)}"${canEdit ? '' : ' data-locked="1"'} ` +
+        `aria-label="${esc(label)}"${hide ? ' hidden style="display:none"' : ''}>` +
+      Kit.avatar(s.name, own ? 'md' : 'sm') +
+      `<span class="min-w-0 flex-1">` +
+        `<span class="flex items-center gap-2">` +
+          `<span class="min-w-0 flex-1 flex flex-wrap items-center gap-x-2 gap-y-1"><span class="leave-name font-medium text-ink-900 break-words">${esc(s.name)}</span>${tags}</span>` +
+          (own || cur ? `<span class="shrink-0">${leaveStatusPill(cur, rank)}</span>` : '') +
+        `</span>` +
+        `<span class="meta-badge block ${k.textMeta} mt-0.5${meta ? '' : ' hidden'}" data-staff-meta="${esc(s.name)}">${meta ? 'บันทึกโดย ' + esc(meta) : ''}</span>` +
+        (own && !meta && canEdit ? `<span class="block ${k.textMeta} mt-0.5">แตะเพื่อบันทึกหรือเปลี่ยนสถานะ</span>` : '') +
+      `</span>${trail}` +
+    `</button>`;
   }
 
   function setFilter(f) {
@@ -1461,10 +2226,72 @@
     renderLeaveTab();
   }
 
+  /* ---------- the leave sheet (#confirmLeaveModal): option tiles for one person and date ---------- */
+  /**
+   * Opens the sheet of `staff` for the selected date. Editable for the Supervisor and for one's own row; any other
+   * row opens read-only and says why (ui.leaveSheet.locked). The pick is kept in ui.pendingLeave until บันทึก.
+   */
+  function openLeaveSheet(staff) {
+    if (!state.user || ui.leaveSaving || !activeSet().has(staff)) return;
+    const date = state.selectedDate;
+    if (!dayKnown(date)) return;
+    ui.leaveSheet = { staff, date, locked: !(isSup() || staff === myName()) };
+    ui.pendingLeave = null;
+    showModal('confirmLeaveModal');
+    renderLeaveSheet();
+  }
+
+  function renderLeaveSheet() {
+    const sh = ui.leaveSheet;
+    if (!sh || !isShown('confirmLeaveModal')) return;
+    if (!state.user || !activeSet().has(sh.staff)) { closeConfirmLeave(); return; }
+    const k = Kit.cls;
+    const leaves = activeLeaves(sh.date);
+    const leave = leaves[sh.staff];
+    const cur = leave ? leave.type : '';
+    const p = ui.pendingLeave;
+    const pick = p ? p.type : cur;
+    const queues = {};
+    U.QUEUE_TYPES.forEach(t => { queues[t] = U.queueOrder(leaves, t); });
+    const rankOf = t => (queues[t] ? queues[t].indexOf(sh.staff) + 1 : 0);
+    const curRank = cur ? rankOf(cur) : 0;
+    const meta = leave ? [leave.recordedBy || '', U.thaiStampShort(leave.recordedAt)].filter(Boolean).join(' · ') : '';
+    $('confirmLeaveTitle').textContent = sh.locked ? 'สถานะการลา' : 'บันทึกการลา';
+    let html = `<div class="flex items-center gap-3 min-w-0">${Kit.avatar(sh.staff, 'md')}<div class="min-w-0 flex-1">` +
+      `<p class="font-display text-base font-medium leading-6 text-ink-900 break-words">${esc(sh.staff)}</p>` +
+      `<p class="${k.textMeta}">${esc(U.thaiDate(sh.date))}</p></div>${leaveStatusPill(cur, curRank)}</div>` +
+      (meta ? `<p class="${k.textCaption}">บันทึกโดย ${esc(meta)}</p>` : '');
+    if (p) {
+      const queue = queues[p.type] ? queues[p.type].filter(n => n !== sh.staff).length : 0;
+      html += `<div class="${k.banner} ${k.bannerInfo}">${Kit.icon('info', 'w-5 h-5 shrink-0 mt-0.5')}<p class="min-w-0">` +
+        `เปลี่ยนเป็น <strong class="font-semibold">${esc(p.type === '' ? 'ปกติ (ยกเลิกวันลา)' : p.type)}</strong>` +
+        (queues[p.type] ? ` — จะเป็นคนที่ ${queue + 1} ของ${esc(p.type)}${esc(dayRef(sh.date, { year: false }))}` : '') +
+        ` · กด "บันทึก" เพื่อยืนยัน</p></div>`;
+    }
+    setHtml($('confirmLeaveText'), html);
+    const note = $('leaveSheetNote');
+    setHtml(note, sh.locked
+      ? `<div class="${k.note}">${Kit.icon('lock', 'w-5 h-5 shrink-0 mt-0.5 text-ink-500')}<p class="min-w-0">แก้ไขได้เฉพาะสถานะของตนเอง — หากข้อมูลไม่ถูกต้อง แจ้ง Supervisor</p></div>`
+      : '');
+    setVisible(note, sh.locked);
+    setHtml($('leaveOptions'), [''].concat(U.LEAVE_TYPES).map(val => {
+      const on = val === pick;
+      const rank = val && val === cur ? curRank : 0;
+      return `<button type="button" class="${LV_TILE}${on ? k.tileOn : k.tileOff}${val === '' ? ' col-span-2' : ''}" ` +
+        `data-staff="${esc(sh.staff)}" data-val="${esc(val)}" aria-pressed="${on ? 'true' : 'false'}"${sh.locked ? ' disabled' : ''}>` +
+        (on ? Kit.icon('check', 'w-4 h-4 shrink-0') : '') + `<span>${esc(val === '' ? 'ปกติ' : val)}</span>` +
+        (rank ? `<span class="text-xs font-medium">(คนที่ ${rank})</span>` : '') + '</button>';
+    }).join(''));
+    const save = $('confirmLeaveBtn');
+    setVisible(save, !sh.locked);
+    if (!ui.leaveSaving) save.disabled = !p;
+    $('confirmLeaveCancelBtn').textContent = sh.locked ? 'ปิด' : 'ยกเลิก';
+  }
+
   /* ---------- leave calendar: how many people are on leave on each day of a month ---------- */
   /** Cell colours by number of people on leave (index = count, the last one for "4 or more"). */
-  const CAL_HEAT = ['bg-white border-slate-200', 'bg-rose-50 border-rose-200', 'bg-rose-100 border-rose-300',
-    'bg-rose-200 border-rose-300', 'bg-rose-300 border-rose-400'];
+  const CAL_HEAT_BG = ['bg-white', 'bg-rose-50', 'bg-rose-100', 'bg-rose-200', 'bg-rose-300'];
+  const CAL_HEAT_BORDER = ['border-ink-100', 'border-rose-200', 'border-rose-300', 'border-rose-300', 'border-rose-400'];
   const CAL_SCOPE = { regular: ' (เฉพาะคนประจำ)', backup: ' (เฉพาะทีมแทนเวร)' };
 
   function calMonth() { return ui.calMonth || U.monthKey(state.selectedDate); }
@@ -1484,48 +2311,65 @@
     const today = U.todayStr();
     $('calMonthLabel').textContent = U.thaiMonthYear(month);
 
-    let loading = false, missing = false, total = 0;
+    let loading = false, missing = false, knownDays = 0, total = 0;
     const byType = nameMap();
     const cells = U.monthGrid(month).flat().map((date, i) => {
-      if (!date) return '<div class="h-11" aria-hidden="true"></div>';
+      if (!date) return '<div class="h-12" aria-hidden="true"></div>';
       const view = dayView(date);
       const known = view === 'ready' || view === 'cached';
       if (view === 'loading') loading = true;
       else if (!known) missing = true;
+      else knownDays++;
       const list = known ? filteredLeaveList(date) : [];
       list.forEach(l => { byType[l.type] = (byType[l.type] || 0) + 1; });
       total += list.length;
       return calDayHtml(date, known ? list.length : null, i % 7 === 0, date === today, date === state.selectedDate);
     });
     const head = U.THAI_WEEKDAYS_SHORT.map((d, i) =>
-      `<div class="text-[10px] font-semibold py-0.5 ${i === 0 ? 'text-rose-500' : 'text-slate-500'}">${d}</div>`).join('');
+      `<div class="text-xs font-medium leading-6 ${i === 0 ? 'text-coral-600' : 'text-slate-500'}">${d}</div>`).join('');
     setHtml(box, `<div class="grid grid-cols-7 gap-1 text-center">${head}${cells.join('')}</div>`);
 
     const status = $('calStatus');
-    setHtml(status, loading ? '⏳ กำลังโหลดข้อมูลของเดือนนี้…'
-      : missing ? '📭 ยังไม่มีข้อมูลบางวันของเดือนนี้ในเครื่อง <button type="button" data-cal="retry" class="font-semibold text-blue-600 underline">โหลดอีกครั้ง</button>'
+    setHtml(status, loading ? `${Kit.icon('clock', 'w-4 h-4 shrink-0')}<span>กำลังโหลดข้อมูลของเดือนนี้…</span>`
+      : missing ? `${Kit.icon('cloud-off', 'w-4 h-4 shrink-0')}<span>ยังไม่มีข้อมูลบางวันของเดือนนี้ในเครื่อง</span> <button type="button" data-cal="retry" class="${Kit.cls.btn} ${Kit.cls.btnTonal} ${Kit.cls.btnCompact}">โหลดอีกครั้ง</button>`
       : '');
     setVisible(status, loading || missing);
 
     const scope = CAL_SCOPE[state.filter] || '';
     const types = U.LEAVE_TYPES.concat(Object.keys(byType).filter(t => U.LEAVE_TYPES.indexOf(t) < 0))
       .filter(t => byType[t]).map(t => `${t} ${byType[t]}`);
-    $('calMonthTotal').textContent = total
-      ? `รวมทั้งเดือน${scope}: ลา ${total} ครั้ง · ${types.join(' · ')}`
-      : `รวมทั้งเดือน${scope}: ไม่มีการลา`;
+    // Minor 8: never "ไม่มีการลา" for days that are not on this device
+    const partial = loading || missing;
+    const totalHead = partial ? `รวมเท่าที่มีข้อมูล${scope}` : `รวมทั้งเดือน${scope}`;
+    // each "type N" stays on one line ("Off In charge 2", "ลาป่วย 2")
+    setHtml($('calMonthTotal'), esc(!knownDays && partial
+      ? `รวมทั้งเดือน${scope}: ${loading ? 'กำลังโหลดข้อมูล…' : 'ยังไม่มีข้อมูลของเดือนนี้ในเครื่อง'}`
+      : total ? `${totalHead}: ลา ${total} ครั้ง · `
+        : partial ? `${totalHead}: ยังไม่พบการลา (ข้อมูลยังไม่ครบทั้งเดือน)` : `${totalHead}: ไม่มีการลา`) +
+      (knownDays && total ? types.map(t => `<span class="whitespace-nowrap">${esc(t)}</span>`).join(' · ') : ''));
     renderCalDayDetail(month);
   }
 
   /** count: people on leave (null = that day's data is not on this device). */
+  /**
+   * One day of the leave calendar — the week strip's selection language (C-M5): the selected day is filled brand-600
+   * with a white number (an inner fill, so the heat colour of the cell stays in its class), today when not selected has
+   * an accent ring and an accent-700 number, keyboard focus is an offset ink ring.
+   */
   function calDayHtml(date, count, sunday, isToday, selected) {
-    const heat = count === null ? 'bg-slate-50 border-dashed border-slate-200' : CAL_HEAT[Math.min(count, CAL_HEAT.length - 1)];
-    const num = isToday ? 'bg-blue-600 text-white' : sunday ? 'text-rose-500' : 'text-slate-600';
-    const label = U.thaiDate(date) + (count === null ? ' — ยังไม่มีข้อมูล' : count ? ` — ลา ${count} คน` : ' — ไม่มีผู้ลา');
-    return `<button type="button" class="cal-day relative h-11 rounded-lg border ${heat}${selected ? ' ring-2 ring-blue-500' : ''}" ` +
-        `data-date="${date}" data-count="${count === null ? '' : count}" aria-pressed="${selected ? 'true' : 'false'}" ` +
-        `aria-label="${esc(label)}" title="${esc(label)}">` +
-      `<span class="absolute top-0.5 left-0.5 px-1 rounded-full text-[10px] leading-4 font-semibold ${num}">${Number(date.slice(8))}</span>` +
-      (count ? `<span class="cal-count absolute bottom-0.5 inset-x-0 text-[10px] leading-4 font-bold text-rose-700">${count} คน</span>` : '') +
+    const k = Kit.cls;
+    const i = count === null ? -1 : Math.min(count, CAL_HEAT_BG.length - 1);
+    const bg = i < 0 ? 'bg-cream-50 border-dashed' : CAL_HEAT_BG[i];
+    const border = isToday && !selected ? k.calCellToday : i < 0 ? 'border-ink-200' : CAL_HEAT_BORDER[i];
+    const num = k.calNum + ' ' + (selected ? k.calNumSel : isToday ? k.calNumToday : sunday ? k.calNumSunday : 'text-ink-700');
+    const label = U.thaiDate(date) + (isToday ? ' (วันนี้)' : '') +
+      (count === null ? ' — ยังไม่มีข้อมูล' : count ? ` — ลา ${count} คน` : ' — ไม่มีผู้ลา');
+    return `<button type="button" class="${k.calCell} ${bg} ${border}" ` +
+        `data-date="${date}" data-count="${count === null ? '' : count}" aria-pressed="${selected ? 'true' : 'false'}"` +
+        `${isToday ? ' aria-current="date" data-today="1"' : ''} aria-label="${esc(label)}" title="${esc(label)}">` +
+      (selected ? `<span class="${k.calSelFill}" data-cal-selected aria-hidden="true"></span>` : '') +
+      `<span class="${num}">${Number(date.slice(8))}</span>` +
+      (count ? `<span class="${selected ? k.calCountSel : k.calCount}">${count} คน</span>` : '') +
     `</button>`;
   }
 
@@ -1533,18 +2377,19 @@
   function renderCalDayDetail(month) {
     const el = $('calDayDetail');
     const date = state.selectedDate;
+    const muted = t => `<p class="text-[0.8125rem] leading-5 text-slate-500">${t}</p>`;
     if (U.monthKey(date) !== month) {
-      setHtml(el, '<span class="italic text-slate-400">แตะวันที่ในปฏิทินเพื่อดูรายชื่อผู้ลา</span>');
+      setHtml(el, muted('แตะวันที่ในปฏิทินเพื่อดูรายชื่อผู้ลา'));
       return;
     }
-    const title = `<div class="font-semibold text-slate-800">${esc(U.thaiDate(date))}`;
+    const title = `<p class="font-display text-sm font-medium leading-6 text-ink-900">${esc(U.thaiDate(date))}`;
     if (!dayKnown(date)) {
-      setHtml(el, title + '</div><span class="italic text-slate-400">ยังไม่มีข้อมูลของวันนี้</span>');
+      setHtml(el, title + '</p>' + muted('ยังไม่มีข้อมูลในเครื่อง'));
       return;
     }
     const list = filteredLeaveList(date);
-    setHtml(el, title + ` — ลา ${list.length} คน</div>` +
-      (list.length ? list.map(leaveItemHtml).join('') : '<span class="italic text-slate-400">ไม่มีผู้ลา</span>'));
+    setHtml(el, title + ` — ลา ${list.length} คน</p>` +
+      (list.length ? list.map(leaveItemHtml).join('') : muted('ไม่มีผู้ลา')));
   }
 
   /** Shows `month` at once (whatever is loaded) and fetches its missing days. */
@@ -1564,42 +2409,57 @@
   function onCalendarClick(e) {
     const t = e.target && e.target.closest ? e.target.closest('.cal-day, [data-cal]') : null;
     if (!t) return;
-    if (t.classList.contains('cal-day')) { setSelectedDate(t.dataset.date); return; }
+    if (t.classList.contains('cal-day')) { spawn(() => setSelectedDate(t.dataset.date)); return; }
     const action = t.dataset.cal;
     if (action === 'prev' || action === 'next') showCalMonth(U.addMonths(calMonth(), action === 'next' ? 1 : -1));
     else if (action === 'retry') showCalMonth(calMonth());
     else if (action === 'today') {
       const today = U.todayStr();
       ui.calMonth = U.monthKey(today);
-      setSelectedDate(today);
+      spawn(() => setSelectedDate(today));
       renderLeaveTab();
     }
   }
 
   /* ---------- staff tab ---------- */
+  /** รายชื่อบุคลากร: one list card per group; each row = avatar, name (+ tags) and labelled icon buttons. */
   function renderStaffTab() {
     renderImportCard();
     if (!isSup()) return;
+    const k = Kit.cls;
     $('staffCountBadge').textContent = state.staff.length + ' คน';
     const me = myName();
+    const action = (act, iconName, word, title, look, hidden) =>
+      `<button type="button" data-action="${act}" class="${look}${hidden ? ' hidden' : ''}" title="${esc(title)}" aria-label="${esc(title)}"` +
+      `${hidden ? ' disabled aria-hidden="true" style="display:none"' : ''}>${Kit.icon(iconName, 'w-5 h-5')}<span>${word}</span></button>`;
+    // the Supervisor's row keeps the columns of the others: an empty slot where the delete button would be (Minor 4)
+    const slot = `<span class="inline-block min-w-[52px] h-12" aria-hidden="true"></span>`;
     const block = (title, list) =>
-      `<div class="bg-white p-3 rounded-2xl shadow-sm">` +
-        `<h3 class="text-xs font-bold text-slate-500 mb-2">${title} (${list.length} คน)</h3>` +
-        `<div class="space-y-1.5">` +
-        (list.length ? list.map(s => {
+      `<section class="space-y-2"><h3 class="flex items-center gap-2 px-1 font-display text-[0.8125rem] font-medium leading-5 tracking-wide text-ink-500">${esc(title)}<span class="${k.tag}">${list.length} คน</span></h3>` +
+      (list.length
+        ? `<div class="${k.list}">` + list.map(s => {
           const isSupRow = s.name === state.supervisor;
-          return `<div class="staff-item flex items-center gap-1 p-2 bg-slate-50 rounded-xl border" data-staff="${esc(s.name)}" data-group="${s.group}">` +
-            (isSupRow ? '<span class="text-[10px] bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded font-bold mr-1">Supervisor</span>' : '') +
-            `<span class="flex-1 text-sm font-semibold truncate">${esc(s.name)}${s.name === me ? ' <span class="text-[10px] text-blue-600 font-bold">(คุณ)</span>' : ''}</span>` +
-            `<button type="button" data-action="reset-password" class="px-2 py-1.5 rounded-lg bg-white border text-[10px]" title="${s.name === me ? 'เปลี่ยนรหัสผ่านของฉัน' : 'ตั้งรหัสผ่านใหม่'}">🔑 รหัส</button>` +
-            `<button type="button" data-action="move" class="px-2 py-1.5 rounded-lg bg-white border text-[10px]" title="ย้ายกลุ่ม">↔️</button>` +
-            `<button type="button" data-action="delete" class="px-2 py-1.5 rounded-lg bg-rose-500 text-white text-[10px]${isSupRow ? ' hidden' : ''}" title="ลบ"${isSupRow ? ' disabled aria-hidden="true" style="display:none"' : ''}>🗑️</button>` +
-          `</div>`;
-        }).join('') : '<p class="text-[11px] text-slate-400 italic py-2">ยังไม่มีรายชื่อในกลุ่มนี้</p>') +
-        `</div></div>`;
+          const mine = s.name === me;
+          return `<div class="staff-item flex items-center gap-3 pl-4 pr-2 py-2 min-h-[64px]" data-staff="${esc(s.name)}" data-group="${s.group}">` +
+            Kit.avatar(s.name, 'sm') +
+            `<div class="min-w-0 flex-1"><p class="text-sm font-medium leading-6 text-ink-900 break-words">${esc(s.name)}</p>` +
+            (isSupRow || mine ? `<p class="flex flex-wrap gap-1 mt-0.5">` +
+              (isSupRow ? `<span class="${k.pill} ${k.pillPending}">${Kit.icon('crown', 'w-3.5 h-3.5')}Supervisor</span>` : '') +
+              (mine ? `<span class="${k.tagBrand}">คุณ</span>` : '') + '</p>' : '') +
+            `</div>` +
+            `<div class="flex items-center shrink-0">` +
+              // every action names the person; "ย้าย" says where to; delete is neutral until its danger confirmation
+              action('reset-password', 'key', 'รหัส', mine ? 'เปลี่ยนรหัสผ่านของฉัน' : 'ตั้งรหัสผ่านใหม่ของ ' + s.name, k.rowAction, false) +
+              action('move', 'swap', s.group === 'backup' ? 'ไปประจำ' : 'ไปแทนเวร',
+                'ย้าย ' + s.name + (s.group === 'backup' ? ' ไปคนประจำ' : ' ไปทีมแทนเวร'), k.rowAction + ' w-16', false) +   // one width for both labels: the columns line up
+              (isSupRow ? slot : action('delete', 'trash', 'ลบ', 'ลบ ' + s.name, k.rowAction, false)) +
+            `</div></div>`;
+        }).join('') + '</div>'
+        : `<div class="${k.card}"><p class="${k.textMeta} text-center">ยังไม่มีรายชื่อในกลุ่มนี้</p></div>`) +
+      '</section>';
     const c = $('staffListContainer');
-    setHtml(c, block('👤 นักรังสีการแพทย์ประจำ', state.staff.filter(s => s.group === 'regular')) +
-      block('🔁 ทีมแทนเวร', state.staff.filter(s => s.group === 'backup')));
+    setHtml(c, block('นักรังสีการแพทย์ประจำ', state.staff.filter(s => s.group === 'regular')) +
+      block('ทีมแทนเวร', state.staff.filter(s => s.group === 'backup')));
     c.classList.toggle('opacity-60', ui.staffBusy);
     c.classList.toggle('pointer-events-none', ui.staffBusy);
     c.setAttribute('aria-busy', ui.staffBusy ? 'true' : 'false');
@@ -1638,13 +2498,13 @@
   function importResultHtml(r) {
     const added = Array.isArray(r.addedStaff) ? r.addedStaff : [];
     const skipped = Array.isArray(r.skipped) ? r.skipped : [];
-    let h = '<div class="font-semibold text-emerald-700">✅ นำเข้าเรียบร้อย</div>' +
+    let h = `<div class="flex items-center gap-1.5 font-semibold text-emerald-700">${Kit.icon('check-circle', 'w-4 h-4')}นำเข้าเรียบร้อย</div>` +
       `<div>• เพิ่มรายชื่อใหม่ ${added.length} คน${added.length ? ': ' + esc(added.join(', ')) : ''}</div>` +
       `<div>• ตารางเวร (Station/หมายเหตุ) ${r.daysWritten | 0} วัน</div>` +
       `<div>• บันทึกการลา ${r.leavesWritten | 0} รายการ</div>` +
       `<div>• นำผู้ลาออกจาก Station ที่มีอยู่แล้ว ${r.unassigned | 0} รายการ</div>`;
     if (skipped.length) {
-      h += `<details><summary class="cursor-pointer text-amber-700 font-semibold">ข้าม ${skipped.length} รายการ (แตะเพื่อดูเหตุผล)</summary>` +
+      h += `<details><summary class="cursor-pointer min-h-[44px] flex items-center text-amber-800 font-semibold">ข้าม ${skipped.length} รายการ (แตะเพื่อดูเหตุผล)</summary>` +
         '<ul class="pl-4 list-disc text-slate-600">' + skipped.slice(0, 50).map(s => `<li>${esc(s)}</li>`).join('') +
         (skipped.length > 50 ? `<li>…และอีก ${skipped.length - 50} รายการ</li>` : '') + '</ul></details>';
     }
@@ -1674,28 +2534,42 @@
     renderCopiedStatus();
   }
 
-  /** The capture area (#captureArea) for the selected date — reflects the draft if present. */
+  /**
+   * The capture area (#captureArea, the picture staff post in LINE) for the selected date — reflects the draft if present.
+   * Inline styles only (html2canvas); colours are the theme tokens. Each station row: label (the pastel station chip +
+   * "(ขาด N)") | the names. Text stays at least 12 px with AA contrast (Minor 2).
+   */
+  const IMG_FONT = "font-family:'Mitr','Sarabun','Noto Sans Thai','Leelawadee UI','Thonburi',sans-serif;";
   function renderPreview() {
     const date = state.selectedDate;
     $('displayDate').textContent = 'ประจำ' + U.thaiDate(date);
     const slots = state.user ? viewSlots(date) : storedSlots(date);
     const act = activeSet();
+    const planned = isPlannedDay(date);
     setHtml($('resultStations'), U.STATIONS.map(st => {
       const arr = (slots[st.id] || []).filter(Boolean);
       const need = required(st.id);
-      const warn = arr.length < need ? `<span style="font-size:11px; color:#ef4444; font-weight:700;">(ขาด ${need - arr.length})</span>` : '';
-      return `<div style="background:${st.bg}; border:1px solid ${st.border}; border-radius:14px; padding:12px 14px; display:flex; align-items:center; justify-content:space-between; gap:10px;">` +
-        `<div style="font-size:14px; font-weight:700; color:${st.text}; min-width:110px;">${esc(st.name)} ${warn}</div>` +
-        `<div style="display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; flex:1;">` +
-        (arr.length ? arr.map(a => `<span style="font-size:13.5px; font-weight:600; color:#1e293b;">${esc(nameLabel(a, act))}</span>`).join('')
-          : '<span style="font-size:12px; color:#94a3b8; font-style:italic;">ยังไม่ได้จัดสรร</span>') +
+      const warn = arr.length < need
+        ? ` <span style="display:inline-block; padding:0 8px; border-radius:999px; font-size:12px; font-weight:600; line-height:20px; white-space:nowrap; ` +
+          `${planned ? 'background:#FFF1F2; color:#B32A45; border:1px solid #FFC2C6;' : 'background:#F1F4FB; color:#2A3F86; border:1px solid #E3E8F6;'}">(ขาด ${need - arr.length})</span>`
+        : '';
+      // label | names on one line at the exported width; in a narrow preview the names wrap under the label
+      return `<div style="display:flex; flex-wrap:wrap; align-items:flex-start; gap:4px 10px; padding:8px 10px; border-radius:16px; background:#FFFFFF; border:1.5px solid #FFE3EF;">` +
+        `<div style="flex:0 0 auto; width:38%; min-width:134px; max-width:142px; display:flex; flex-wrap:wrap; align-items:center; gap:4px; padding-top:1px;">` +
+          `<span style="display:inline-block; max-width:100%; padding:2px 10px; border-radius:12px; background:${st.bg}; color:${st.text}; ${IMG_FONT} font-size:13px; font-weight:500; line-height:20px;">${esc(st.name).replace('/', '/<wbr>')}</span>${warn}</div>` +
+        `<div style="flex:1 1 150px; min-width:0; display:flex; flex-wrap:wrap; gap:2px 12px; padding-top:1px;">` +
+        (arr.length ? arr.map(a => `<span style="font-size:15px; font-weight:600; line-height:22px; color:#1A2C63;">${esc(nameLabel(a, act))}</span>`).join(' ')
+          : '<span style="font-size:13px; line-height:22px; color:#64748b;">ยังไม่ได้จัดสรร</span>') +
         `</div></div>`;
     }).join(''));
 
     const leaves = leaveList(date);
     setHtml($('resultLeaves'), leaves.length
-      ? leaves.map(l => `<div>• <span class="font-semibold">${esc(l.name)}</span>: <span class="text-rose-600 font-semibold">${esc(l.type)}</span></div>`).join('')
-      : '<span class="text-slate-400 italic">ไม่มีรายการลาวันนี้</span>');
+      ? leaves.map(l => `<div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">` +
+        `<span style="min-width:0; font-weight:600;"><span style="color:#B32A45;">• </span>${esc(l.name)}</span>` +
+        `<span style="flex:none; padding:0 10px; border-radius:999px; background:#FFFFFF; border:1px solid #FFC2C6; color:#B32A45; font-size:13px; font-weight:600; line-height:22px;">` +
+        `${esc(l.type)}${l.rank ? ` (คนที่ ${l.rank})` : ''}</span></div>`).join('')
+      : `<span style="color:#475569;">${esc(withDay('ไม่มีรายการลา', date))}</span>`);
 
     const rv = (state.user ? viewRemark(date) : '').trim();
     const rc = $('resultRemarkContainer');
@@ -1705,19 +2579,36 @@
 
   function renderCopiedStatus() {
     const c = state.clipboard;
-    $('copiedStatusText').textContent = c
-      ? `📋 คัดลอกข้อมูลของวันที่ ${c.fromDate} เรียบร้อยแล้ว`
-      : 'สถานะคลิปบอร์ด: ยังไม่มีข้อมูลที่คัดลอก';
+    const st = $('copiedStatusText');
+    setText(st, c
+      ? `📋 คัดลอกข้อมูลของวันที่ ${U.thaiDateShort(c.fromDate)} ไว้แล้ว`
+      : 'สถานะคลิปบอร์ด: ยังไม่มีข้อมูลที่คัดลอก');
+    setVisible(st, !!c);   // without a copy, "วางข้อมูล" itself says so (Minor 12)
+    renderDayTools();
   }
 
   /* ------------------------------------------------------------------ */
   /* handlers — date                                                     */
   /* ------------------------------------------------------------------ */
-  function setSelectedDate(date) {
-    if (!U.isValidYmd(date)) { renderDateInputs(); return false; }
+  /**
+   * Selects `date` everywhere. → Promise<boolean>: true when `date` is the selected date afterwards. Unsaved station
+   * edits of another date are only dropped after the user agreed (UiKit.confirm: a sheet, or window.confirm with
+   * APP_CONFIG.NATIVE_DIALOGS). While that question is open the date inputs keep showing the current date and
+   * further date changes are ignored (resolve false). Without that question everything happens synchronously.
+   */
+  async function setSelectedDate(date) {
+    if (ui.dateAsking || !U.isValidYmd(date)) { renderDateInputs(); return false; }
     if (date === state.selectedDate) { renderDateInputs(); return true; }
     if (state.draft && state.draft.date !== date) {
-      if (isDraftDirty() && !window.confirm(MSG.discardDraft)) { renderDateInputs(); return false; }
+      if (isDraftDirty()) {
+        renderDateInputs();   // revert the input the user changed while the question is open
+        const alive = sessionAlive();
+        ui.dateAsking = true;
+        let ok = false;
+        try { ok = await confirmUser(MSG.discardDraft, { title: 'ทิ้งการแก้ไข?', okLabel: 'ทิ้งการแก้ไข', danger: true, icon: 'alert-triangle' }); }
+        finally { if (alive()) ui.dateAsking = false; }   // a new session has its own flag (reset by closeSessionSheets)
+        if (!ok || !alive()) { renderDateInputs(); return false; }
+      }
       state.draft = null;
     }
     state.selectedDate = date;
@@ -1731,12 +2622,8 @@
         handleError(e, { quiet: true });
       });
     }
+    emit('date', { date });
     return true;
-  }
-
-  function toggleDatePicker() {
-    $('datePickerBar').classList.toggle('hidden');
-    syncLayout();
   }
 
   /* ------------------------------------------------------------------ */
@@ -1796,11 +2683,12 @@
 
   /** Locks the date's station editor while a write of that day runs: edits made meanwhile would be lost. */
   async function withDayLock(date, fn) {
+    const epoch = ui.epoch;
     ui.dayBusy = date;
     renderStationTab();
     try { return await fn(); }
     finally {
-      if (ui.dayBusy === date) ui.dayBusy = null;
+      if (epoch === ui.epoch && ui.dayBusy === date) ui.dayBusy = null;   // else reset by a logout / new login
       render();
     }
   }
@@ -1815,7 +2703,13 @@
       if (!alive()) return null;
       if (!e || e.code !== 'CONFLICT') throw e;
       const serverDay = e.details && e.details.day ? e.details.day : null;
-      if (window.confirm(MSG.conflict)) {
+      // C-M3: in the app's own sheet the choice has Thai labels (overwrite = danger, focus starts on "load the latest");
+      // window.confirm (native-dialog mode) keeps the old text with its OK / Cancel wording
+      const overwrite = await confirmUser(nativeDialogs() ? MSG.conflict : conflictText(date), {
+        title: 'ข้อมูลถูกแก้ไขจากเครื่องอื่น', okLabel: 'บันทึกทับ', cancelLabel: 'โหลดข้อมูลล่าสุด', danger: true, icon: 'alert-triangle'
+      });
+      if (!alive()) return null;   // the session ended while the question was open
+      if (overwrite) {
         res = await userCall('saveDay', { date, assignments, remark, baseVersion: serverDay ? (parseInt(serverDay.version, 10) || 0) : 0 });
         spawn(() => refresh());
       } else {
@@ -1825,7 +2719,7 @@
         markTouched(date);
         persistCache();
         render();
-        toast('🔄 โหลดข้อมูลล่าสุดของวันนี้แล้ว');
+        toast(withDay('🔄 โหลดข้อมูลล่าสุดของ', date, 'แล้ว'));
         spawn(() => refresh());
         return null;
       }
@@ -1845,37 +2739,45 @@
     return res;
   }
 
+  function conflictText(date) {
+    return withDay('ข้อมูลของ', date, ' ถูกแก้ไขจากเครื่องอื่นแล้ว') +
+      '\nบันทึกทับด้วยข้อมูลของคุณ (การแก้ไขจากเครื่องอื่นจะหายไป) หรือโหลดข้อมูลล่าสุดมาดูก่อน?';
+  }
+
   /* ------------------------------------------------------------------ */
   /* handlers — leave                                                    */
   /* ------------------------------------------------------------------ */
-  function onLeaveContainerClick(e) {
-    const t = e.target;
-    if (!t || !t.closest) return;
-    if (t.closest('[data-action="change-my-password"]')) { openPasswordModal(false); return; }
-    const chip = t.closest('.lv-chip');
-    if (!chip || chip.disabled) return;
-    const staff = chip.dataset.staff;
-    const val = chip.dataset.val || '';
-    if (!state.user) return;
-    if (!(isSup() || staff === myName())) { toast(MSG.ownLeaveOnly); return; }
+  /** A tap on a row of การลา (own row or the list): opens that person's leave sheet. */
+  function onLeaveRowClick(e) {
+    const row = e.target && e.target.closest ? e.target.closest('.leave-row[data-staff]') : null;
+    if (row) openLeaveSheet(row.dataset.staff);
+  }
+
+  /**
+   * A tap on an option tile of the leave sheet: picks it (บันทึก saves). Someone else's row (a forced click on a
+   * locked sheet) is refused with the reason; without a network nothing can be saved, so the sheet closes.
+   */
+  function onLeaveOptionClick(e) {
+    const t = e.target && e.target.closest ? e.target.closest('.lv-chip') : null;
+    if (!t || t.disabled) return;
+    const sh = ui.leaveSheet;
+    if (!sh || ui.leaveSaving || !state.user) return;
+    const staff = t.dataset.staff;
+    const val = t.dataset.val || '';
+    if (staff !== sh.staff) return;
+    if (sh.locked || !(isSup() || staff === myName())) { toast(MSG.ownLeaveOnly); closeConfirmLeave(); return; }
     if (!activeSet().has(staff)) return;
     if (val !== '' && U.LEAVE_TYPES.indexOf(val) < 0) return;
-    const date = state.selectedDate;
-    const cur = (activeLeaves(date)[staff] || {}).type || '';
-    if (val === cur) return;
-    if (!requireInternet()) return;
-    ui.pendingLeave = { staff, date, type: val };
-    const label = val === '' ? 'ปกติ (ยกเลิกวันลา)' : val;
-    $('confirmLeaveText').innerHTML =
-      `ผู้ลา: <strong class="text-slate-900">${esc(staff)}</strong><br>` +
-      `วันที่: <strong class="text-blue-600">${esc(U.thaiDate(date))}</strong><br>` +
-      `สถานะ: <strong class="${val === '' ? 'text-emerald-600' : 'text-rose-600'}">${esc(label)}</strong>`;
-    showModal('confirmLeaveModal');
+    if (!requireInternet()) { closeConfirmLeave(); return; }
+    const cur = (activeLeaves(sh.date)[staff] || {}).type || '';
+    ui.pendingLeave = val === cur ? null : { staff, date: sh.date, type: val };
+    renderLeaveSheet();
   }
 
   function closeConfirmLeave() {
     if (ui.leaveSaving) return;
     ui.pendingLeave = null;
+    ui.leaveSheet = null;
     hideModal('confirmLeaveModal');
   }
 
@@ -1894,11 +2796,13 @@
     try { res = await userCall('setLeave', { date: p.date, staff: p.staff, type: p.type }); }
     catch (e) { err = e; }
     finally {
-      ui.leaveSaving = false;
-      btn.disabled = false;
-      btn.textContent = label;
+      if (alive() || !ui.leaveSaving) {   // never end a save that the next session started meanwhile
+        ui.leaveSaving = false;
+        btn.disabled = false;
+        btn.textContent = label;
+      }
     }
-    if (!alive()) return;
+    if (!alive()) { renderLeaveSheet(); return; }   // the next user's sheet (if open) decides its own button state
     closeConfirmLeave();
     if (err) throw err;
     applyLeaveResult(p, res || {}, base);
@@ -1925,14 +2829,14 @@
   async function onSummary() {
     const from = $('summaryStartDate').value, to = $('summaryEndDate').value;
     const box = $('leaveSummaryContent');
-    const fail = msg => setHtml(box, `<p class="text-rose-500 font-medium">⚠️ ${esc(msg)}</p>`);
+    const fail = msg => setHtml(box, `<p class="${Kit.cls.banner} ${Kit.cls.bannerDanger}">${Kit.icon('alert-triangle', 'w-5 h-5 shrink-0 mt-0.5')}<span>${esc(msg)}</span></p>`);
     if (!state.user) return;
     if (!from || !to || !U.isValidYmd(from) || !U.isValidYmd(to)) { fail('กรุณาเลือกวันที่เริ่มต้นและสิ้นสุด'); return; }
     if (from > to) { fail('วันที่เริ่มต้นต้องมาก่อนวันที่สิ้นสุด'); return; }
     if (U.daysBetweenInclusive(from, to) > MAX_REPORT_DAYS) { fail('ช่วงเวลาต้องไม่เกิน 2 ปี'); return; }
     const pick = isSup() ? $('summaryTargetStaff').value : myName();
     const alive = sessionAlive();
-    setHtml(box, '<p class="italic text-slate-400">⏳ กำลังโหลด…</p>');
+    setHtml(box, Kit.skeleton(3));
     let note = '';
     await withBusy($('summaryBtn'), 'กำลังโหลด…', async () => {
       // always refetch: the range may have been loaded long ago and changed on other devices since
@@ -1951,6 +2855,7 @@
 
   /** people: [{name, group}] (reportStaff) — the summary lists their leave dates by type. */
   function leaveSummaryHtml(from, to, people, note) {
+    const k = Kit.cls;
     const byName = new Map(people.map(s => [s.name, nameMap()]));
     U.eachDate(from, to).forEach(date => {
       const day = leavesOn(date);
@@ -1962,21 +2867,24 @@
     });
     const typeRank = t => { const i = U.LEAVE_TYPES.indexOf(t); return i < 0 ? 99 : i; };
     let any = false;
-    let html = '<div class="space-y-3">';
+    let html = '<div class="space-y-2.5">';
     people.forEach(s => {
       const dates = byName.get(s.name);
       const types = Object.keys(dates).sort((a, b) => typeRank(a) - typeRank(b));
       if (!types.length) return;
       any = true;
       const total = types.reduce((n, t) => n + dates[t].length, 0);
-      html += `<div class="p-2.5 bg-slate-50 border rounded-xl space-y-1" data-summary-staff="${esc(s.name)}">` +
-        `<div class="font-bold text-slate-800 text-xs border-b pb-1 flex justify-between items-center"><span>👤 ${esc(personLabel(s))}</span><span class="text-[10px] text-slate-500">รวม ${total} วัน</span></div>` +
-        '<div class="pl-2 space-y-1 pt-1">' +
-        types.map(t => `<div><span class="font-semibold text-rose-600">• ${esc(t)}</span> (${dates[t].length} ครั้ง): <span class="text-slate-600">${dates[t].map(esc).join(', ')}</span></div>`).join('') +
+      html += `<div class="rounded-2xl border-2 border-ink-100 bg-white p-3 space-y-2" data-summary-staff="${esc(s.name)}">` +
+        `<div class="flex items-center gap-2.5 min-w-0">${Kit.avatar(s.name, 'sm')}` +
+        `<span class="min-w-0 flex-1 font-medium text-ink-900 break-words">${esc(personLabel(s))}</span>` +
+        `<span class="${k.pill} ${k.pillNeutral}">รวม ${total} วัน</span></div>` +
+        '<div class="space-y-1.5">' +
+        types.map(t => `<div class="text-[0.8125rem] leading-5"><span class="font-semibold text-coral-700">${esc(t)}</span>` +
+          ` <span class="text-slate-500">(${dates[t].length} ครั้ง):</span> <span class="text-slate-600 break-words">${dates[t].map(d => esc(U.thaiDateShort(d))).join(', ')}</span></div>`).join('') +
         '</div></div>';
     });
-    if (!any) html += '<p class="text-slate-400 italic text-center py-2">ไม่มีประวัติการลาในช่วงเวลาดังกล่าว</p>';
-    if (note) html += `<p class="text-[10px] text-amber-700">${esc(note)}</p>`;
+    if (!any) html += `<p class="text-[0.8125rem] leading-5 text-slate-500 text-center py-2">ไม่มีประวัติการลาในช่วงเวลาดังกล่าว</p>`;
+    if (note) html += `<p class="${k.banner} ${k.bannerWarn} text-[0.8125rem] leading-5">${Kit.icon('alert-triangle', 'w-4 h-4 shrink-0 mt-0.5')}<span>${esc(note)}</span></p>`;
     return html + '</div>';
   }
 
@@ -1992,10 +2900,14 @@
 
   async function staffOp(fn) {
     if (ui.staffBusy) return;
+    const epoch = ui.epoch;
     ui.staffBusy = true;
     renderStaffTab();
     try { await fn(); }
-    finally { ui.staffBusy = false; renderStaffTab(); }
+    finally {
+      if (epoch === ui.epoch) ui.staffBusy = false;   // else a logout / new login already reset it
+      renderStaffTab();
+    }
   }
 
   async function onAddStaff() {
@@ -2040,11 +2952,11 @@
   async function resetPasswordFlow(name) {
     if (name === myName()) { openPasswordModal(false); return; }
     if (!requireInternet()) return;
-    const ans = window.prompt(`ตั้งรหัสผ่านใหม่ให้คุณ "${name}" (เว้นว่าง = 1234)`);
-    if (ans === null || ans === undefined) return;
-    const np = String(ans).trim();
-    if (np) { const pe = U.validatePassword(np); if (pe) { toast('⚠️ ' + pe); return; } }
     const alive = sessionAlive();
+    const ans = await promptUser(`ตั้งรหัสผ่านใหม่ให้คุณ "${name}" (เว้นว่าง = 1234)`, undefined, { title: 'ตั้งรหัสผ่านใหม่', okLabel: 'ตั้งรหัสผ่าน', placeholder: '1234' });
+    if (ans === null || ans === undefined || !alive()) return;
+    const np = String(ans).trim();   // (the prompt's own text says that empty = 1234)
+    if (np) { const pe = U.validatePassword(np); if (pe) { toast('⚠️ ' + pe); return; } }
     await staffOp(async () => {
       await userCall('resetPassword', { name, newPassword: np });
       if (!alive()) return;
@@ -2067,8 +2979,9 @@
   async function deleteStaffFlow(name) {
     if (!requireInternet()) return;
     if (name === state.supervisor) { toast('⚠️ ไม่สามารถลบ Supervisor ได้ กรุณาโอนสิทธิ์ให้ผู้อื่นก่อน'); return; }
-    if (!window.confirm(`ต้องการลบ "${name}" ออกจากระบบใช่หรือไม่?`)) return;
     const alive = sessionAlive();
+    if (!(await confirmUser(`ต้องการลบ "${name}" ออกจากระบบใช่หรือไม่?`, { title: 'ลบรายชื่อ', okLabel: 'ลบ', danger: true, icon: 'trash' }))) return;
+    if (!alive()) return;
     let base = null, deleted = false;
     await staffOp(async () => {
       base = draftBase();
@@ -2091,7 +3004,15 @@
     const sel = $('transferTargetSelect');
     sel.innerHTML = '<option value="">-- เลือกผู้รับสิทธิ์ --</option>' +
       state.staff.filter(s => s.name !== myName()).map(s => `<option value="${esc(s.name)}">${esc(s.name)}</option>`).join('');
+    renderTransferBtn();
     showModal('transferModal');
+  }
+
+  /** C-M7: the confirm button names the person ("โอนสิทธิ์ให้ {ชื่อ}", danger tone). */
+  function renderTransferBtn() {
+    const btn = $('transferConfirmBtn'), sel = $('transferTargetSelect');
+    if (!btn || !sel || btn.dataset.busy === '1') return;
+    setHtml(btn, `<span class="truncate">${esc(sel.value ? 'โอนสิทธิ์ให้ ' + sel.value : 'โอนสิทธิ์')}</span>`);
   }
 
   async function onTransfer() {
@@ -2101,7 +3022,7 @@
     if (!target) { toast('⚠️ กรุณาเลือกผู้รับสิทธิ์ก่อน'); return; }
     const alive = sessionAlive();
     await withBusy($('transferConfirmBtn'), 'กำลังโอน…', async () => {
-      if (!(await settleDraftBeforeTransfer()) || !alive()) return;
+      if (!(await settleDraftBeforeTransfer(alive)) || !alive()) return;
       let res;
       try { res = await userCall('transferSupervisor', { target }); }
       catch (e) {
@@ -2122,10 +3043,14 @@
   }
 
   /** After a transfer this device can no longer save, so a dirty draft is saved first or knowingly discarded. */
-  async function settleDraftBeforeTransfer() {
+  async function settleDraftBeforeTransfer(alive) {
     if (!isDraftDirty()) return true;
-    if (window.confirm(MSG.transferSaveFirst)) return !!(await saveSelectedDay());
-    return window.confirm(MSG.transferDiscard);
+    const saveFirst = await confirmUser(nativeDialogs() ? MSG.transferSaveFirst : MSG.transferSaveFirstSheet,
+      { title: 'โอนสิทธิ์ Supervisor', okLabel: 'บันทึกแล้วโอนสิทธิ์', cancelLabel: 'ไม่บันทึก' });
+    if (!alive()) return false;
+    if (saveFirst) return !!(await saveSelectedDay());
+    const discard = await confirmUser(MSG.transferDiscard, { title: 'ทิ้งการแก้ไข?', okLabel: 'ทิ้งการแก้ไข', danger: true, icon: 'alert-triangle' });
+    return discard && alive();
   }
 
   /* ---------- legacy import ---------- */
@@ -2170,8 +3095,10 @@
     });
   }
 
-  function onClearLegacy() {
-    if (!window.confirm('ต้องการลบข้อมูลของแอปเวอร์ชันเดิมที่เก็บในเครื่องนี้ใช่หรือไม่? (ข้อมูลบนระบบกลางจะไม่ถูกลบ)')) return;
+  async function onClearLegacy() {
+    const alive = sessionAlive();
+    if (!(await confirmUser('ต้องการลบข้อมูลของแอปเวอร์ชันเดิมที่เก็บในเครื่องนี้ใช่หรือไม่? (ข้อมูลบนระบบกลางจะไม่ถูกลบ)', { title: 'ลบข้อมูลเดิม', okLabel: 'ลบ', danger: true, icon: 'trash' }))) return;
+    if (!alive() || !isSup()) return;   // asked in another session: nobody confirmed it in this one
     LEGACY_KEYS.forEach(lsRemove);
     ui.importResult = null;
     ui.legacyKey = null;
@@ -2266,10 +3193,10 @@
   function onCopyDay() {
     if (!isSup()) { toast(MSG.supOnly); return; }
     const date = state.selectedDate;
-    if (dayView(date) !== 'ready') { toast(MSG.notLoaded); return; }   // an unloaded day would copy as empty
+    if (dayView(date) !== 'ready') { toast(msgNotLoaded(date)); return; }   // an unloaded day would copy as empty
     state.clipboard = { fromDate: date, assignments: compactSlots(viewSlots(date)), remark: viewRemark(date) };
     renderCopiedStatus();
-    toast(`📋 คัดลอกข้อมูลของวันที่ ${date} แล้ว`);
+    toast(`📋 คัดลอกข้อมูลของวันที่ ${U.thaiDateShort(date)} แล้ว`);
   }
 
   async function onPasteDay() {
@@ -2279,7 +3206,13 @@
     if (!clip) { toast('⚠️ ยังไม่มีข้อมูลที่ถูกคัดลอก กรุณากดคัดลอกก่อน'); return; }
     const date = state.selectedDate;
     if (!requireDayReady(date)) return;
-    if (!window.confirm(`ต้องการวางข้อมูลตารางเวรและหมายเหตุลงในวันที่ ${date} ใช่หรือไม่? (สถานะวันลาของวันนี้จะยังคงอยู่ตามเดิม)`)) return;
+    const alive = sessionAlive();
+    // the question always names the day (C-M2): "วันนี้ (25 พ.ย. 2569)" or "วันที่ 25 พ.ย. 2569"
+    const today = date === U.todayStr();
+    const target = today ? `วันนี้ (${U.thaiDateShort(date)})` : `วันที่ ${U.thaiDateShort(date)}`;
+    if (!(await confirmUser(`ต้องการวางข้อมูลตารางเวรและหมายเหตุของวันที่ ${U.thaiDateShort(clip.fromDate)} ลงใน${target} ใช่หรือไม่? ` +
+      `(สถานะวันลาของ${today ? 'วันนี้' : 'วันนั้น'}จะยังคงอยู่ตามเดิม)`, { title: 'วางข้อมูลลง' + dayRef(date), okLabel: 'วางข้อมูล' }))) return;
+    if (!alive() || state.selectedDate !== date || !isSup() || !requireDayReady(date)) return;   // changed while the question was open
     // keep only people the target day may hold, not on leave that date, each person once, within capacity
     // (the server's rule: the required count, or the number already saved there when that is larger)
     const allowed = assignableSet(date);
@@ -2298,7 +3231,7 @@
     });
     const remark = normRemark(clip.remark).slice(0, REMARK_MAX);
     await withBusy($('pasteDayBtn'), 'กำลังวาง…', () => withDayLock(date, () =>
-      saveDayFlow(date, assignments, remark, currentVersion(date), `📌 วางข้อมูลลงวันที่ ${date} สำเร็จ`)));
+      saveDayFlow(date, assignments, remark, currentVersion(date), withDay('📌 วางข้อมูลลง', date, ' สำเร็จ'))));
   }
 
   async function onClearDay() {
@@ -2306,8 +3239,12 @@
     if (!isSup()) { toast('⚠️ เฉพาะ Supervisor เท่านั้นที่ล้างข้อมูลได้'); return; }
     const date = state.selectedDate;
     if (!requireDayReady(date)) return;
-    if (!window.confirm('ต้องการล้างข้อมูลการจัดเวร การลา และหมายเหตุของวันนี้ทั้งหมดใช่หรือไม่?')) return;
     const alive = sessionAlive();
+    // a destructive question always names the day (C-M2)
+    const day = date === U.todayStr() ? `วันนี้ (${U.thaiDateShort(date)})` : `วันที่ ${U.thaiDateShort(date)}`;
+    if (!(await confirmUser(`ต้องการล้างข้อมูลการจัดเวร การลา และหมายเหตุของ${day} ทั้งหมดใช่หรือไม่?`,
+      { title: 'ล้างข้อมูล' + dayRef(date), okLabel: 'ล้างข้อมูล', danger: true, icon: 'trash' }))) return;
+    if (!alive() || state.selectedDate !== date || !isSup() || !requireDayReady(date)) return;   // changed while the question was open
     await withBusy($('clearDayBtn'), 'กำลังล้าง…', () => withDayLock(date, async () => {
       const res = await userCall('clearDay', { date });
       if (!alive()) return;
@@ -2333,6 +3270,8 @@
     if (!html2canvasLoading) {
       html2canvasLoading = new Promise((resolve, reject) => {
         const s = document.createElement('script');
+        s.integrity = HTML2CANVAS_SRI;   // checked by the browser; a CORS answer is required (sw.js precaches it in CORS mode)
+        s.crossOrigin = 'anonymous';
         s.src = HTML2CANVAS_URL;
         s.onload = () => (typeof window.html2canvas === 'function' ? resolve(window.html2canvas) : reject(new Error('html2canvas missing')));
         s.onerror = () => { s.remove(); reject(new Error('html2canvas did not load')); };
@@ -2350,26 +3289,85 @@
     let draw;
     try { draw = await loadHtml2canvas(); }
     catch (e) { toast(MSG.imageToolFailed, 4000); return null; }
+    // the preview lives on the รายงาน screen; shared from วันนี้ (day tools) it is drawn from an off-screen stage
+    const area = $('captureArea');
+    const restore = stageCaptureArea(area);
+    const unfix = baselineFix();
+    await new Promise(r => setTimeout(r, 0));   // let the staged width settle
     try {
-      const canvas = await draw($('captureArea'), { scale: 3, backgroundColor: '#ffffff', useCORS: true });
+      const canvas = await draw(area, { scale: 3, backgroundColor: '#ffffff', useCORS: true });
       const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.95));
       if (blob) return new File([blob], `เวร-IPD-${date}.jpg`, { type: 'image/jpeg' });
     } catch (e) { /* reported below */ }
+    finally { restore(); unfix(); }
     toast(MSG.imageFailed);
     return null;
   }
 
-  async function onSaveImage() {
-    const file = await captureImage(state.selectedDate);
-    if (file && await saveFile(file, file.name)) toast('⬇️ บันทึกภาพเรียบร้อย');
+  /**
+   * html2canvas measures the text baseline with an <img> placed in THIS document that must sit on the baseline; the
+   * stylesheet's preflight makes every img a block, which drew all text of the picture about 7 px too low (found in the
+   * real export). While drawing, imgs are inline again (the app shows no <img> of its own; avatar photos are absolute).
+   * → a function that removes the rule.
+   */
+  function baselineFix() {
+    const st = document.createElement('style');
+    st.textContent = 'img{display:inline-block!important;vertical-align:baseline!important}';
+    document.head.appendChild(st);
+    return () => st.remove();
   }
 
-  async function onShareImage() {
-    const date = state.selectedDate;
-    const file = await captureImage(date);
-    if (!file) return;
-    if (!canShareFile(file)) { downloadBlob(file, file.name); toast('⬇️ บันทึกภาพเรียบร้อย'); return; }
-    if (await shareFile(file, { title: 'ตารางเวร IPD', text: U.thaiDate(date) }) === 'failed') downloadBlob(file, file.name);
+  /**
+   * The picture is always drawn at CAPTURE_WIDTH (it looks the same from วันนี้ and from รายงาน, on a phone and on a PC):
+   * the capture area moves into a stage outside the viewport for the drawing (html2canvas can only draw what is
+   * rendered; on the รายงาน screen a placeholder of the same height keeps the page still). → restore() puts it back.
+   */
+  function stageCaptureArea(area) {
+    if (!area) return () => {};
+    const parent = area.parentNode, next = area.nextSibling;
+    const h = area.getClientRects().length ? area.offsetHeight : 0;
+    const hold = document.createElement('div');
+    hold.setAttribute('aria-hidden', 'true');
+    hold.style.height = h + 'px';
+    parent.insertBefore(hold, area);
+    const stage = document.createElement('div');
+    stage.setAttribute('aria-hidden', 'true');
+    stage.style.cssText = 'position:fixed;left:-10000px;top:0;width:' + CAPTURE_WIDTH + 'px;pointer-events:none;';
+    document.body.appendChild(stage);
+    stage.appendChild(area);
+    return () => {
+      parent.insertBefore(area, hold);
+      hold.remove();
+      stage.remove();
+    };
+  }
+
+  /**
+   * One image at a time (R1a fix A-S1): "บันทึกภาพ JPG" / "แชร์รูป" while another save or share is still drawing or
+   * sharing is ignored, so the capture area is staged and put back exactly once.
+   */
+  let imageBusy = false;
+  async function oneImageAtATime(fn) {
+    if (imageBusy) return;
+    imageBusy = true;
+    try { await fn(); } finally { imageBusy = false; }
+  }
+
+  function onSaveImage() {
+    return oneImageAtATime(async () => {
+      const file = await captureImage(state.selectedDate);
+      if (file && await saveFile(file, file.name)) toast('⬇️ บันทึกภาพเรียบร้อย');
+    });
+  }
+
+  function onShareImage() {
+    return oneImageAtATime(async () => {
+      const date = state.selectedDate;
+      const file = await captureImage(date);
+      if (!file) return;
+      if (!canShareFile(file)) { downloadBlob(file, file.name); toast('⬇️ บันทึกภาพเรียบร้อย'); return; }
+      if (await shareFile(file, { title: 'ตารางเวร IPD', text: U.thaiDate(date) }) === 'failed') downloadBlob(file, file.name);
+    });
   }
 
   /** 🔄 in the header and "ลองใหม่" in the offline banner. */
@@ -2401,16 +3399,17 @@
     setHtml($('stationCountsList'), d ? U.STATIONS.map(st => countRowHtml(st, d[st.id])).join('') : '');
   }
 
+  /** A white row like everywhere else: the station chip, then "ลด" N "เพิ่ม" (words, the station in the label) — Minor 5. */
   function countRowHtml(st, n) {
-    const step = (delta, sign, label, off) =>
-      `<button type="button" class="count-step w-9 h-9 rounded-xl bg-white border text-lg font-bold text-slate-700 active:bg-slate-100 disabled:opacity-40" ` +
-      `data-station="${st.id}" data-step="${delta}" aria-label="${label} ${esc(st.name)}"${off ? ' disabled' : ''}>${sign}</button>`;
-    return `<div class="flex items-center justify-between gap-2 p-2.5 rounded-xl border" data-count-row="${st.id}" style="background:${st.bg}; border-color:${st.border}">` +
-      `<span class="text-sm font-bold min-w-0" style="color:${st.text}">${esc(st.name)}</span>` +
-      `<div class="flex items-center gap-2 shrink-0">` +
-        step(-1, '−', 'ลดจำนวนคน', n <= U.STATION_COUNT_MIN) +
-        `<span class="w-8 text-center text-base font-bold text-slate-800" data-count-value="${st.id}">${n}</span>` +
-        step(1, '+', 'เพิ่มจำนวนคน', n >= U.STATION_COUNT_MAX) +
+    const step = (delta, word, label, off) =>
+      `<button type="button" class="${Kit.cls.stepBtn}" data-station="${st.id}" data-step="${delta}" ` +
+      `aria-label="${label} ${esc(st.name)}"${off ? ' disabled' : ''}>${word}</button>`;
+    return `<div class="${Kit.cls.countRow}" data-count-row="${st.id}">` +
+      `<span class="min-w-0 flex-1">${stationChipHtml(st)}</span>` +
+      `<div class="flex items-center gap-1.5 shrink-0">` +
+        step(-1, 'ลด', 'ลดจำนวนคน', n <= U.STATION_COUNT_MIN) +
+        `<span class="w-9 text-center font-display text-lg font-semibold leading-7 text-ink-900 tabular-nums" data-count-value="${st.id}" aria-live="polite">${n}</span>` +
+        step(1, 'เพิ่ม', 'เพิ่มจำนวนคน', n >= U.STATION_COUNT_MAX) +
       `</div></div>`;
   }
 
@@ -2497,24 +3496,25 @@
     const d = ui.diag;
     setHtml($('diagResults'), d
       ? d.rows.map(diagRowHtml).join('')
-      : '<p class="text-xs text-slate-500 text-center">กด "เริ่มตรวจสอบ" เพื่อทดสอบการเชื่อมต่อทีละขั้น</p>');
+      : '<p class="text-sm leading-6 text-slate-500 text-center py-2">กด "เริ่มตรวจสอบ" เพื่อทดสอบการเชื่อมต่อทีละขั้น</p>');
     const v = $('diagVerdict');
     v.textContent = d && d.verdict ? d.verdict.text : '';
     v.className = VERDICT_BASE + (d && d.verdict ? VERDICT_TONE[d.verdict.tone] : '');
     setVisible(v, !!(d && d.verdict));
     const run = $('diagRunBtn');
     run.disabled = !!(d && d.running);
-    run.textContent = d && d.running ? 'กำลังตรวจสอบ…' : d ? '🔁 ตรวจสอบอีกครั้ง' : '▶️ เริ่มตรวจสอบ';
+    setHtml(run, d && d.running ? 'กำลังตรวจสอบ…'
+      : d ? Kit.icon('refresh', 'w-5 h-5') + 'ตรวจสอบอีกครั้ง' : Kit.icon('activity', 'w-5 h-5') + 'เริ่มตรวจสอบ');
     $('diagCopyBtn').disabled = !d || d.running;
   }
 
   function diagRowHtml(r) {
-    return `<div class="diag-row flex items-start gap-2 p-2 rounded-xl bg-slate-50 border" data-diag="${r.key}" data-status="${r.status}">` +
-      `<span class="shrink-0 text-sm leading-5">${DIAG_ICON[r.status]}</span>` +
+    return `<div class="diag-row flex items-start gap-2.5 p-3 rounded-2xl bg-cream-50 border-2 border-cream-100" data-diag="${r.key}" data-status="${r.status}">` +
+      `<span class="shrink-0 text-sm leading-6">${DIAG_ICON[r.status]}</span>` +
       `<div class="min-w-0 flex-1">` +
-        `<div class="flex justify-between gap-2 text-xs font-semibold text-slate-800"><span>${esc(r.label)}</span>` +
-          (r.ms === null ? '' : `<span class="shrink-0 text-[10px] font-medium text-slate-400">${r.ms} ms</span>`) + `</div>` +
-        (r.note ? `<p class="text-[11px] text-slate-500 leading-snug">${esc(r.note)}</p>` : '') +
+        `<div class="flex justify-between gap-2 text-sm font-semibold leading-6 text-ink-900"><span class="min-w-0">${esc(r.label)}</span>` +
+          (r.ms === null ? '' : `<span class="shrink-0 text-xs font-medium leading-6 text-slate-500 tabular-nums">${r.ms} ms</span>`) + `</div>` +
+        (r.note ? `<p class="text-[0.8125rem] text-slate-500 leading-5">${esc(r.note)}</p>` : '') +
       `</div></div>`;
   }
 
@@ -2562,6 +3562,7 @@
     if (!Api.url) return DIAG_NO_URL;
     try {
       const d = await Api.call('ping', {}, { attempts: 1, timeoutMs: DIAG_TIMEOUT_MS });
+      if (d && d.version) ui.serverVersion = String(d.version);
       return { status: 'ok', note: 'เซิร์ฟเวอร์ตอบกลับปกติ (เวอร์ชัน ' + (d.version || '-') + ')' };
     } catch (e) {
       const firstHopOk = rows.some(r => r.key === 'script' && (r.status === 'ok' || r.status === 'warn'));
@@ -2607,7 +3608,7 @@
     const lines = [
       'เวร IPD — ผลตรวจสอบการเชื่อมต่อ',
       'เวอร์ชันแอป: ' + Api.clientVersion,
-      'เวลา: ' + U.formatStamp(d.at),
+      'เวลา: ' + U.thaiStamp(d.at),
       'เบราว์เซอร์: ' + navigator.userAgent,
       'สถานะในแอป: ' + SYNC_LOOK[state.conn].label + ' (ล้มเหลวติดกัน ' + ui.failStreak + ' ครั้ง)'
     ];
@@ -2630,8 +3631,1021 @@
   function watchForUpdate() {
     const sw = navigator.serviceWorker;
     if (!sw || !sw.controller) return;
-    sw.addEventListener('controllerchange', () => setVisible($('updateBanner'), true), { once: true });
+    sw.addEventListener('controllerchange', () => { setVisible($('updateBanner'), true); placeFloaters(); }, { once: true });
   }
+
+  /* ------------------------------------------------------------------ */
+  /* feature registry and core API → App.register, App.core             */
+  /* ------------------------------------------------------------------ */
+  /*
+   * DEVELOPER NOTE (R1a-B1, apiLevel 1) — the only surface feature files (js/feat-*.js, loaded after this file) use.
+   * Load order: config.js → utils.js → api.js → ui-kit.js → app.js → feat-*.js. A feature file registers at load
+   * time (before init) or later ("late registration" works the same way).
+   *
+   * App.register(def) → true, or false (rejected: invalid/duplicate id, or def.needs > core.apiLevel — then the
+   * "มีเวอร์ชันใหม่" banner is shown). def fields (all optional except id):
+   *   id         /^[a-z][a-z0-9-]{0,31}$/; the screen is <section id="tab-ID" class="tab-panel" data-feature="ID">,
+   *              created in #appMain by the registry (never edit index.html for a feature)
+   *   title      label of the nav entry (Thai)             icon   UiKit icon name of the nav entry
+   *   needs      core.apiLevel the feature needs (default 1)
+   *   nav        { place: 'bar'|'menu'|'header'|'none' (default 'none'), section: 'mine'|'sup'|'system'|…, order }
+   *              → <button class="nav-btn" data-tab="ID" data-nav-place="…"> in #bottomNav / #menuNav /
+   *              #headerNav (none: reachable through core.go only). Lower order first (legacy 10–40, default 100).
+   *              The bar holds วันนี้ (10), การลา (20) and เมนู (90); keep the bar at 3–4 entries.
+   *              place 'menu' → a row in the เมนู screen, in the list of nav.section: 'mine' (ของฉัน), 'sup'
+   *              (งานหัวหน้า: รายชื่อบุคลากร 30, รายงานและส่งออก 40), 'system' (ระบบ: your rows come before the fixed
+   *              ones — connection check 900, what's new 910, version 920, logout 990); any other section → 'other'
+   *              (เพิ่มเติม). A section without a visible row is hidden. เมนู's bar badge = the sum of its rows' badges.
+   *   parent     screen core.back() returns to (default 'station'). Give a screen opened from เมนู parent: 'menu':
+   *              the header then shows ← (any screen that is not in the bar does) and เมนู stays highlighted.
+   *   chrome     { date: bool, weekStrip: bool } (default both false): the header shows the selected date (tap =
+   *              date picker) instead of the screen title; the week strip shows under the header (วันนี้ only)
+   *   visible(c) → bool: role/capability gate (default true). A current screen that turns invisible falls back to
+   *              'station' at the next render; its nav entry is hidden.
+   *   badge(c)   → number shown on the nav entry (else the value of core.badges.set(id, n))
+   *   init(c)    once, when the app starts (or at registration when it already started)
+   *   mount(root, c)   once before the first render/show (again after a logout when the feature has no reset)
+   *   render(root, c)  on every app render while the screen is current (only the current feature renders)
+   *   show(c, params)  when the screen becomes current (also on core.go(id, params) to the current screen)
+   *   hide(c)    when another screen becomes current
+   *   canLeave(c) → true | a message (asked with UiKit.confirm before leaving) | false (stay)
+   *   reset(c)   on logout and before a new login (clearDataState): drop memory and DOM written for the old user.
+   *              Without reset the registry empties the root and mounts again later.
+   *   Isolation: every hook (and visible/badge) runs in try/catch; a returned Promise is tracked (App.idle) and its
+   *   rejection caught. A failure marks the feature broken for this page load: its root shows an error card
+   *   ([data-feature-error]), its later hooks are skipped (a failing visible() also hides it); the app keeps working.
+   *   The four legacy screens (station, leave, staff, summary) are registered by app.js itself, keep their
+   *   index.html markup and are always rendered by render().
+   *
+   * App.core (frozen):
+   *   apiLevel 1 · U (Utils) · Api · Kit (UiKit) · state (App.state — READ ONLY for features)
+   *   isSup() · myName() · staff() (copy of the active staff [{name, group}]) · serverHas(name) (false in R1a: the
+   *     server announces features from R1b on)
+   *   spawn(fn, opts) (run + track + handleError) · track(promise) · alive() → () => bool (session still the same)
+   *     — every async flow goes through these so App.idle() sees it
+   *   call(action, params, opts) (Api.call) · userCall(…) (same, with the "server slow, retrying" toast) ·
+   *     withBusy(btn, label, fn) · requireInternet() · handleError(e, opts) · toast(msg, ms)
+   *   confirm(msg, opts) → Promise<bool> · prompt(msg, default, opts) → Promise<string|null> — UiKit.confirm/prompt
+   *     (sheets; window.confirm/prompt with APP_CONFIG.NATIVE_DIALOGS) that do not keep App.idle() busy while open;
+   *     use these instead of UiKit's directly inside tracked flows
+   *   esc(s) · setHtml(el, html) (no-op when unchanged) · setVisible(el, on) · render()
+   *   go(id, params) → Promise<bool> (true when `id` is current afterwards; a screen the user may not see opens
+   *     'station') · back() → Promise<bool> · current() → id · features(place?) → [{id, title, icon, place,
+   *     section, order, parent, legacy, visible, badge, error}] in nav order (for building nav/menu UIs)
+   *   selectedDate() · setSelectedDate(ymd) → Promise<bool>
+   *   ensureRange(from, to, opts) · dayView(date) → 'ready'|'cached'|'loading'|'missing' · leavesOn(date) ·
+   *     leaveList(date) → [{name, type, rank}] · isAbsent(leave) · saveFile(blob, filename) → Promise<bool>
+   *   domain(name, {persist, empty}) → a per-feature data slice (same object for the same name):
+   *     .data .version .remote .loading .error (read-only getters)
+   *     .begin() → ticket; .commit(ticket, version, fn(data) → newData|undefined) → bool — applies nothing (false)
+   *       when touch() or a logout/login happened after begin(), or nobody is logged in
+   *     .touch(fn?) — a local write: mutate/replace data now and invalidate older tickets
+   *     .load(fetchFn(version) → Promise<{version, data}|null (unchanged)>) → Promise<bool>; never rejects (the
+   *       error is in .error); one load at a time
+   *     .onStale(fn) → unsubscribe; .setRemote(v) — the server's version (fn runs when it differs from .version);
+   *       R1a never calls setRemote (no heartbeat fields yet)
+   *     persist: true keeps {user, v, savedAt, data} in localStorage ipd_dom:<name> (restored for the same user
+   *     after a reload). Logout resets every domain to `empty` and removes ipd_dom:*.
+   *   store.draft.get/set/remove(key) — JSON in ipd_draft:<user>:<key> (unsent input; removed on logout)
+   *   store.prefs.get(key, dflt) / set(key, value) — device preferences in ipd_prefs (kept on logout)
+   *   media — IndexedDB "ipd-media" (stores blobs, chat, outbox), opened lazily on first use; an in-memory map
+   *     when IndexedDB is unavailable. get/put/del(store, key[, value]), keys(store), clear(store) → Promises,
+   *     all tracked; ready() → Promise<'idb'|'memory'>; mode() → '' (not opened yet) | 'idb' | 'memory'.
+   *     The connection closes on versionchange (a deletion is never blocked). Logout clears the chat store when
+   *     it was used. IndexedDB runs on real time: tests must poll, never assume.
+   *   poll.every(id, ms, fn(c)) → cancel(): fn runs every ms (≥ 1 s) while visible and logged in; same id replaces
+   *   on(evt, fn(payload, c)) → unsubscribe; evt 'login' {name, restored} · 'logout' · 'role' {isSup} ·
+   *     'date' {date} · 'data' {from, to, changed} | {date, local} | {domain} · 'visible' · 'online'
+   *   provide(name, fn) · use(name) → fn | null (cross-feature services, e.g. 'leave.decide')
+   *   station.setProposer(fn(date) → {assignments, notes} | null) — stored only; the station editor uses it from
+   *     R2 on · station.addPanel({id, order, render(el, c)}) — extra card on วันนี้ (in #stationPanels)
+   *   banners.set(id, {text, tone: 'info'|'ok'|'warn'|'danger', icon, order, screens: [ids], actionLabel,
+   *     action(c)} | null) — shown in #bannerSlot above the screens · badges.set(id, n) · badges.get(id)
+   *   Logout (and a new login) clears banners, badges, domains, drafts and calls every feature's reset.
+   *
+   * Shell (R1a-B2): Android/browser back (APP_CONFIG.HISTORY_NAV !== false) closes the top sheet, then goes to the
+   * current screen's parent (core.back()); App.shell.onPopState / App.shell.handleBack expose that logic to tests.
+   * "มีอะไรใหม่" is the WHATS_NEW structure below (edit it every release); it opens once per version after an
+   * update (APP_CONFIG.WHATS_NEW !== false; the seen version is core.store.prefs 'whatsNewSeen').
+   * Sheets: give a feature's own sheet the markup of the index.html modals (wrapper + [data-sheet-panel] +
+   * [data-sheet-title] tabindex=-1 + [data-sheet-close]) and open it with UiKit.sheet.open(el, {initialFocus:
+   * '[data-sheet-title]'}) so no on-screen keyboard pops up.
+   */
+  const API_LEVEL = 1;
+  const FEATURE_ID = /^[a-z][a-z0-9-]{0,31}$/;
+  const NAV_PLACES = ['bar', 'menu', 'header', 'none'];
+  const NAV_SLOT = { bar: 'bottomNav', menu: 'menuNav', header: 'headerNav' };
+  const NAV_ORDER_DEFAULT = 100;
+  const MENU_SECTIONS = ['mine', 'sup', 'system'];   // lists in เมนู (#menuNav); any other nav.section → 'other'
+  /** Nav entries of registered features (the legacy entries are in index.html with the same look). */
+  const NAV_BTN = {
+    bar: Kit.cls.navItem + ' ' + Kit.cls.navItemRail + ' ' + Kit.cls.navOff,
+    header: 'nav-btn relative ' + Kit.cls.hdrIconBtn,
+    menu: 'nav-btn ' + Kit.cls.listRow
+  };
+  /** Where a nav entry's count badge sits: next to the bar icon, on the header icon's corner, inline in a menu row. */
+  const NAV_BADGE_BOX = {
+    bar: 'absolute top-1 left-1/2 ml-2 pointer-events-none',
+    header: 'absolute top-0.5 right-0.5 pointer-events-none',
+    menu: 'shrink-0 pointer-events-none'
+  };
+  const LEGACY_SCREENS = [
+    { id: 'station', title: 'วันนี้', icon: 'calendar-check', nav: { place: 'bar', order: 10 }, chrome: { date: true, weekStrip: true } },
+    { id: 'leave', title: 'การลา', icon: 'calendar-off', nav: { place: 'bar', order: 20 }, chrome: { date: true } },
+    { id: 'staff', title: 'รายชื่อบุคลากร', icon: 'users', nav: { place: 'menu', section: 'sup', order: 30 }, parent: 'menu', visible: c => c.isSup() },
+    { id: 'summary', title: 'รายงานและส่งออก', icon: 'download', nav: { place: 'menu', section: 'sup', order: 40 }, parent: 'menu', visible: c => c.isSup() }
+  ];
+  const DOM_PREFIX = 'ipd_dom:';
+  const DRAFT_PREFIX = 'ipd_draft:';
+  const PREFS_KEY = 'ipd_prefs';
+  const MEDIA_DB = 'ipd-media';
+  const MEDIA_DB_VERSION = 1;
+  const MEDIA_STORES = ['blobs', 'chat', 'outbox'];
+  const MEDIA_CHAT_MARK = 'ipd_media:chat';   // set when the chat store got data, so a logout knows it must open and clear it
+
+  const features = [];                       // registration order
+  const featById = Object.create(null);
+  let coreStarted = false;                   // init() attached the registered features; later ones attach at once
+  const listeners = Object.create(null);     // event → [fn]
+  const services = Object.create(null);
+  const bannerDefs = Object.create(null);
+  const badgeCounts = Object.create(null);
+  const panelDefs = [];                      // [{id, order, render, el, failed}]
+  let proposer = null;                       // R2: the daily proposal (station.setProposer)
+  const serverFeatures = Object.create(null);   // R1b fills this from the poll answer; empty in R1a
+  const domains = Object.create(null);       // name → {d (internal), api}
+  const polls = Object.create(null);         // id → cancel
+  const media = { db: null, opening: null, mode: '', mem: null };
+
+  function cloneJson(v) { return v === undefined || v === null ? v : JSON.parse(JSON.stringify(v)); }
+  function isAbsent(leave) { return !!(leave && leave.type); }   // R1b: Utils.isAbsent (pending / partial-day leave)
+
+  /* ---------- registration ---------- */
+  function register(def) { return addFeature(def, false); }
+
+  function addFeature(def, legacy) {
+    const id = def && typeof def === 'object' ? String(def.id || '') : '';
+    if (!FEATURE_ID.test(id)) { console.warn('App.register: invalid feature id', id); return false; }
+    if (featById[id] || (!legacy && document.getElementById('tab-' + id))) {
+      console.warn('App.register: "' + id + '" is already registered');
+      return false;
+    }
+    const needs = def.needs === undefined ? 1 : Number(def.needs);
+    if (!(needs <= API_LEVEL)) {
+      console.warn('App.register: "' + id + '" needs core API level ' + def.needs + ', this app has ' + API_LEVEL);
+      setVisible($('updateBanner'), true);   // a newer feature file than app.js: reloading fetches the matching app
+      return false;
+    }
+    const nav = def.nav && typeof def.nav === 'object' ? def.nav : {};
+    const f = {
+      id, def, legacy: !!legacy,
+      title: String(def.title || id),
+      icon: typeof def.icon === 'string' ? def.icon : '',
+      place: NAV_PLACES.indexOf(nav.place) >= 0 ? nav.place : 'none',
+      section: typeof nav.section === 'string' ? nav.section : '',
+      order: typeof nav.order === 'number' && isFinite(nav.order) ? nav.order : NAV_ORDER_DEFAULT,
+      parent: typeof def.parent === 'string' ? def.parent : '',
+      chrome: {
+        date: !!(def.chrome && def.chrome.date),             // the header shows the selected date (else the title)
+        weekStrip: !!(def.chrome && def.chrome.weekStrip)    // the week strip under the header
+      },
+      root: null, navBtn: null, started: false, mounted: false, error: null
+    };
+    features.push(f);
+    featById[id] = f;
+    if (coreStarted) {
+      attachFeature(f);
+      render();
+    }
+    return true;
+  }
+
+  /** At init: the screens registered so far get their DOM, init() and mount(). */
+  function startCore() {
+    coreStarted = true;
+    features.slice().forEach(attachFeature);
+  }
+
+  function attachFeature(f) {
+    if (f.started) return;
+    if (f.legacy) {
+      f.root = $('tab-' + f.id);
+      f.navBtn = document.querySelector('#bottomNav .nav-btn[data-tab="' + f.id + '"], #menuNav .nav-btn[data-tab="' + f.id + '"]');
+      if (f.navBtn) {
+        f.navBtn.dataset.navPlace = f.place;
+        f.navBtn.dataset.navOrder = String(f.order);
+      }
+      f.started = true;
+      return;
+    }
+    const root = document.createElement('section');
+    root.id = 'tab-' + f.id;
+    root.className = 'tab-panel space-y-3';
+    root.dataset.feature = f.id;
+    const main = $('appMain');
+    main.insertBefore(root, $('menuNav') && $('menuNav').parentNode === main ? $('menuNav') : null);
+    f.root = root;
+    f.navBtn = createNavButton(f);
+    f.started = true;
+    callHook(f, 'init', () => f.def.init && f.def.init(core));
+    mountFeature(f);
+  }
+
+  /** The element a nav entry goes into: the bar / header slot, or the เมนู list of its nav.section. */
+  function navSlot(f) {
+    if (f.place !== 'menu') return $(NAV_SLOT[f.place] || '');
+    const nav = $('menuNav');
+    if (!nav) return null;
+    const list = sec => nav.querySelector('[data-menu-section="' + sec + '"] [data-menu-list]');
+    return (MENU_SECTIONS.indexOf(f.section) >= 0 && list(f.section)) || list('other') || nav;
+  }
+
+  function createNavButton(f) {
+    const slot = navSlot(f);
+    if (!slot) return null;
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = NAV_BTN[f.place];
+    b.dataset.tab = f.id;
+    b.dataset.navPlace = f.place;
+    b.dataset.navOrder = String(f.order);
+    if (f.section) b.dataset.navSection = f.section;
+    const icon = f.icon ? Kit.icon(f.icon, f.place === 'bar' ? 'w-6 h-6' : 'w-5 h-5') : '';
+    if (f.place === 'bar') {
+      b.innerHTML = `<span class="${Kit.cls.navIcon}">${icon}</span><span class="max-w-full truncate px-1">${esc(f.title)}</span>`;
+    } else if (f.place === 'header') {
+      b.setAttribute('aria-label', f.title);
+      b.title = f.title;
+      b.innerHTML = icon || esc(f.title);
+    } else {
+      b.innerHTML = `<span class="${Kit.cls.listIcon} ${Kit.cls.listIconBrand}">${icon}</span>` +
+        `<span class="flex-1 min-w-0">${esc(f.title)}</span>` + Kit.icon('chevron-right', Kit.cls.listChevron);
+    }
+    // by nav.order among the entries (and fixed rows such as เมนู's system rows) that carry data-nav-order
+    const next = Array.prototype.find.call(slot.querySelectorAll('[data-nav-order]'),
+      n => n.parentNode === slot && Number(n.dataset.navOrder) > f.order);
+    slot.insertBefore(b, next || null);
+    return b;
+  }
+
+  /** Runs one hook of a feature in isolation (sync throw or async rejection → the feature is marked broken). */
+  function callHook(f, phase, fn) {
+    if (f.error) return undefined;
+    let r;
+    try { r = fn(); } catch (e) { featureFailed(f, phase, e); return undefined; }
+    if (r && typeof r.then === 'function') track(r).catch(e => featureFailed(f, phase, e));
+    return r;
+  }
+
+  function featureFailed(f, phase, e) {
+    console.error('[feature ' + f.id + '] ' + phase + ' failed:', e);
+    if (f.error) return;
+    f.error = { phase, message: (e && e.message) || String(e) };
+    if (f.root && !f.legacy) {
+      const html = featureErrorHtml(f);
+      f.root.innerHTML = html;
+      f.root._html = html;
+    }
+  }
+
+  function featureErrorHtml(f) {
+    return `<div class="${Kit.cls.banner} ${Kit.cls.bannerDanger}" data-feature-error="${esc(f.id)}" role="alert">` +
+      `${Kit.icon('alert-triangle', 'w-5 h-5 shrink-0 mt-0.5')}<span>ส่วน "${esc(f.title)}" ทำงานผิดพลาด — ส่วนอื่นของแอปยังใช้งานได้ตามปกติ ลองโหลดหน้าใหม่อีกครั้ง</span></div>`;
+  }
+
+  function mountFeature(f) {
+    if (f.legacy || f.mounted || f.error || !f.root) return;
+    f.mounted = true;
+    if (typeof f.def.mount === 'function') callHook(f, 'mount', () => f.def.mount(f.root, core));
+  }
+
+  function featureVisible(f) {
+    if (!f || !f.started || !f.root) return false;
+    if (f.error && f.error.phase === 'visible') return false;
+    if (typeof f.def.visible !== 'function') return true;
+    try { return !!f.def.visible(core); } catch (e) { featureFailed(f, 'visible', e); return false; }
+  }
+
+  function featureBadge(f) {
+    if (typeof f.def.badge !== 'function') return badgeCounts[f.id] || 0;
+    if (f.error) return 0;
+    try { return Math.max(0, Math.floor(Number(f.def.badge(core)) || 0)); } catch (e) { featureFailed(f, 'badge', e); return 0; }
+  }
+
+  function navSorted(list) {
+    return list.slice().sort((a, b) => a.order - b.order || features.indexOf(a) - features.indexOf(b));
+  }
+
+  function featureList(place) {
+    return navSorted(features.filter(f => f.started && (!place || f.place === place))).map(f => Object.freeze({
+      id: f.id, title: f.title, icon: f.icon, place: f.place, section: f.section, order: f.order, parent: f.parent,
+      legacy: f.legacy, visible: featureVisible(f), badge: featureVisible(f) ? featureBadge(f) : 0,
+      error: f.error ? f.error.phase : ''
+    }));
+  }
+
+  /* ---------- screens and navigation ---------- */
+  function ensureVisibleTab() {
+    if (!coreStarted || featureVisible(featById[ui.tab])) return;
+    ui.tab = 'station';
+    ui.tabParams = undefined;
+  }
+
+  /** hide() of the screen shown before, mount()/show() of the current one (whoever changed ui.tab). */
+  function syncShownFeature() {
+    if (ui.shownTab === ui.tab) return;
+    const prev = featById[ui.shownTab];
+    const next = featById[ui.tab];
+    ui.shownTab = ui.tab;
+    if (prev && prev.id === 'leave' && isShown('confirmLeaveModal')) closeConfirmLeave();   // the sheet belongs to การลา
+    if (prev && !prev.legacy && typeof prev.def.hide === 'function') callHook(prev, 'hide', () => prev.def.hide(core));
+    if (next && !next.legacy) {
+      mountFeature(next);
+      if (typeof next.def.show === 'function') callHook(next, 'show', () => next.def.show(core, ui.tabParams));
+    }
+  }
+
+  function renderCurrentFeature() {
+    const f = featById[ui.tab];
+    if (!f || f.legacy || f.error || !f.root) return;
+    mountFeature(f);
+    if (typeof f.def.render === 'function') callHook(f, 'render', () => f.def.render(f.root, core));
+  }
+
+  /** Visibility and badges of every nav entry; the bottom bar gets one column per visible entry. */
+  function renderNav() {
+    let header = 0;
+    features.forEach(f => {
+      const b = f.navBtn;
+      if (!b) return;
+      const vis = featureVisible(f);
+      setVisible(b, vis);
+      if (vis && f.place === 'header') header++;
+      renderNavBadge(b, vis ? featureBadge(f) : 0, f.place);
+    });
+    // the bar is a grid-flow-col grid (UiKit.cls.navInner): one equal column per visible entry, nothing to count
+    setVisible($('headerNav'), header > 0);   // a class, not the hidden attribute: .flex would override [hidden]
+    renderMenuSections();
+  }
+
+  function renderNavBadge(btn, n, place) {
+    let el = btn.querySelector('[data-nav-badge]');
+    if (!n) { if (el) el.remove(); return; }
+    if (!el) {
+      el = document.createElement('span');
+      el.className = NAV_BADGE_BOX[place] || NAV_BADGE_BOX.header;
+      el.dataset.navBadge = '1';
+      btn.classList.add('relative');
+      const chevron = place === 'menu' ? btn.querySelector('svg[data-icon="chevron-right"]') : null;
+      btn.insertBefore(el, chevron);
+    }
+    setHtml(el, Kit.badge(n));
+  }
+
+  /**
+   * → Promise<boolean> (true when `id` is the current screen afterwards). An unknown id changes nothing; a screen
+   * the user may not see opens station instead (as v2 did for staff/summary). The current feature's canLeave()
+   * may ask first.
+   */
+  function go(id, params) {
+    const want = featById[String(id)];
+    if (!want || !want.started || !want.root) return Promise.resolve(false);
+    const cur = featById[ui.tab];
+    let leave = true;
+    if (cur && cur !== want && !cur.legacy && !cur.error && typeof cur.def.canLeave === 'function') {
+      try { leave = cur.def.canLeave(core); } catch (e) { featureFailed(cur, 'canLeave', e); leave = true; }
+    }
+    if (leave === false) return Promise.resolve(false);
+    if (typeof leave === 'string' && leave) {
+      const epoch = ui.epoch;   // a logout / new login while the question is open cancels the navigation
+      return track(confirmUser(leave, { okLabel: 'ออกจากหน้านี้' }).then(ok => (ok && epoch === ui.epoch ? switchTo(want.id, params) : false)));
+    }
+    return Promise.resolve(switchTo(want.id, params));
+  }
+
+  function switchTo(id, params) {
+    const target = featureVisible(featById[id]) ? id : 'station';
+    if (target === ui.tab && params !== undefined) ui.shownTab = '';   // show(c, params) runs again
+    ui.tab = target;
+    ui.tabParams = params;
+    renderTabs();
+    renderChrome();
+    renderBanners();
+    renderCurrentFeature();
+    try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (e) { /* ignore */ }
+    return ui.tab === id;
+  }
+
+  /** To the current screen's parent (default station). → Promise<boolean>; false on station. */
+  function back() {
+    const f = featById[ui.tab];
+    const parent = f && f.parent && featById[f.parent] ? f.parent : 'station';
+    return parent === ui.tab ? Promise.resolve(false) : go(parent);
+  }
+
+  /* ---------- events and services ---------- */
+  function onEvent(evt, fn) {
+    if (typeof fn !== 'function') return () => {};
+    (listeners[evt] = listeners[evt] || []).push(fn);
+    return () => {
+      const l = listeners[evt];
+      const i = l ? l.indexOf(fn) : -1;
+      if (i >= 0) l.splice(i, 1);
+    };
+  }
+
+  /** Synchronous; a listener that throws (or rejects) is logged and never breaks the app flow that emitted. */
+  function emit(evt, payload) {
+    const l = listeners[evt];
+    if (!l || !l.length) return;
+    l.slice().forEach(fn => {
+      try {
+        const r = fn(payload, core);
+        if (r && typeof r.then === 'function') track(r).catch(e => console.error('[core] "' + evt + '" listener failed:', e));
+      } catch (e) {
+        console.error('[core] "' + evt + '" listener failed:', e);
+      }
+    });
+  }
+
+  function provide(name, fn) {
+    if (services[name] && services[name] !== fn) console.warn('core.provide: "' + name + '" replaced');
+    services[name] = fn;
+  }
+  function use(name) { return services[name] || null; }
+  function serverHas(name) { return serverFeatures[String(name)] === true; }
+
+  function pollEvery(id, ms, fn) {
+    id = String(id);
+    if (polls[id]) polls[id]();
+    const period = Math.max(1000, Number(ms) || REFRESH_EVERY_MS);
+    let timer = null, stopped = false;
+    const cancel = () => {
+      stopped = true;
+      clearTimeout(timer);
+      if (polls[id] === cancel) delete polls[id];
+    };
+    const tick = () => {
+      timer = setTimeout(() => {
+        if (stopped) return;
+        const run = document.visibilityState === 'visible' && !!state.session && !ui.pwForced;
+        const p = run ? track(Promise.resolve().then(() => fn(core))).catch(e => {
+          if (e && e.name === 'ApiError') handleError(e, { quiet: true });
+          else console.error('[core] poll "' + id + '" failed:', e);
+        }) : Promise.resolve();
+        p.then(() => { if (!stopped) tick(); });
+      }, period);
+    };
+    polls[id] = cancel;
+    tick();
+    return cancel;
+  }
+
+  /* ---------- banners, badges, station hooks ---------- */
+  const BANNER_TONE = { info: Kit.cls.bannerInfo, ok: Kit.cls.bannerOk, warn: Kit.cls.bannerWarn, danger: Kit.cls.bannerDanger };
+
+  function renderBanners() {
+    const slot = $('bannerSlot');
+    if (!slot) return;
+    const list = Object.keys(bannerDefs).map(id => ({ id, d: bannerDefs[id] }))
+      .filter(b => !Array.isArray(b.d.screens) || b.d.screens.indexOf(ui.tab) >= 0)
+      .sort((a, b) => (Number(a.d.order) || 0) - (Number(b.d.order) || 0));
+    slot.hidden = !list.length;
+    setHtml(slot, list.map(b => {
+      const d = b.d;
+      const icon = d.icon ? Kit.icon(d.icon, 'w-5 h-5 mt-0.5') : '';
+      const act = d.actionLabel && typeof d.action === 'function'
+        ? `<button type="button" class="${Kit.cls.btn} ${Kit.cls.btnTonal} shrink-0" data-banner-action="${esc(b.id)}">${esc(d.actionLabel)}</button>` : '';
+      return `<div class="${Kit.cls.banner} ${BANNER_TONE[d.tone] || BANNER_TONE.info}" data-banner="${esc(b.id)}" role="status">` +
+        `${icon}<div class="flex-1 min-w-0 whitespace-pre-line">${esc(d.text)}</div>${act}</div>`;
+    }).join(''));
+  }
+
+  function onBannerClick(e) {
+    const b = e.target && e.target.closest ? e.target.closest('[data-banner-action]') : null;
+    const d = b && bannerDefs[b.dataset.bannerAction];
+    if (d && typeof d.action === 'function') spawn(() => d.action(core));
+  }
+
+  const banners = Object.freeze({
+    set(id, def) {
+      id = String(id);
+      if (def && typeof def === 'object') bannerDefs[id] = def;
+      else delete bannerDefs[id];
+      if (coreStarted) renderBanners();
+    }
+  });
+
+  const badges = Object.freeze({
+    set(id, n) {
+      const v = Math.max(0, Math.floor(Number(n) || 0));
+      if (v) badgeCounts[String(id)] = v;
+      else delete badgeCounts[String(id)];
+      if (coreStarted) renderNav();
+    },
+    get(id) {
+      const f = featById[String(id)];
+      return f && f.started && typeof f.def.badge === 'function' ? featureBadge(f) : (badgeCounts[String(id)] || 0);
+    }
+  });
+
+  /** Extra cards on วันนี้ (station.addPanel), each in its own element that the panel keeps between renders. */
+  function renderStationPanels() {
+    const box = $('stationPanels');
+    if (!box) return;
+    box.hidden = !panelDefs.length;
+    panelDefs.forEach((p, i) => {
+      if (!p.el) {
+        p.el = document.createElement('div');
+        p.el.dataset.panel = p.id;
+      }
+      if (box.children[i] !== p.el) box.insertBefore(p.el, box.children[i] || null);
+      if (p.failed) return;
+      try { p.render(p.el, core); } catch (e) {
+        p.failed = true;
+        console.error('[panel ' + p.id + '] render failed:', e);
+        p.el.innerHTML = `<div class="${Kit.cls.banner} ${Kit.cls.bannerDanger}" data-panel-error="${esc(p.id)}">${Kit.icon('alert-triangle', 'w-5 h-5 shrink-0 mt-0.5')}<span>แสดงส่วนนี้ไม่ได้</span></div>`;
+      }
+    });
+  }
+
+  const station = Object.freeze({
+    setProposer(fn) { proposer = typeof fn === 'function' ? fn : null; },
+    addPanel(def) {
+      if (!def || !FEATURE_ID.test(String(def.id || '')) || typeof def.render !== 'function') {
+        console.warn('core.station.addPanel: needs {id, render}');
+        return false;
+      }
+      const old = panelDefs.findIndex(p => p.id === def.id);
+      if (old >= 0) {
+        if (panelDefs[old].el) panelDefs[old].el.remove();
+        panelDefs.splice(old, 1);
+      }
+      panelDefs.push({ id: def.id, order: Number(def.order) || 0, render: def.render, el: null, failed: false });
+      panelDefs.sort((a, b) => a.order - b.order);
+      if (coreStarted) renderStationPanels();
+      return true;
+    }
+  });
+
+  /* ---------- domains (per-feature data slices with the stale-write guard) ---------- */
+  function domain(name, opts) {
+    name = String(name || '');
+    if (!FEATURE_ID.test(name)) throw new Error('core.domain: invalid name "' + name + '"');
+    if (domains[name]) return domains[name].api;
+    const o = opts || {};
+    const d = { name, persist: !!o.persist, empty: o.empty === undefined ? null : cloneJson(o.empty), seq: 0,
+      data: null, version: '', remote: '', loading: false, error: null, loadingP: null, stale: [] };
+    d.data = cloneJson(d.empty);
+    const api = Object.freeze({
+      get name() { return d.name; },
+      get data() { return d.data; },
+      get version() { return d.version; },
+      get remote() { return d.remote; },
+      get loading() { return d.loading; },
+      get error() { return d.error; },
+      begin() { return Object.freeze({ domain: d.name, epoch: ui.epoch, seq: d.seq }); },
+      commit(ticket, version, fn) {
+        if (!ticket || ticket.domain !== d.name || ticket.epoch !== ui.epoch || ticket.seq !== d.seq || !state.session) return false;
+        if (typeof fn === 'function') {
+          const r = fn(d.data);
+          if (r !== undefined) d.data = r;
+        }
+        d.version = version === undefined || version === null ? '' : String(version);
+        d.error = null;
+        persistDomain(d);
+        emit('data', { domain: d.name });
+        render();
+        return true;
+      },
+      touch(fn) {
+        d.seq++;
+        if (typeof fn === 'function') {
+          const r = fn(d.data);
+          if (r !== undefined) d.data = r;
+        }
+        persistDomain(d);
+        render();
+      },
+      load(fetchFn) {
+        if (d.loadingP) return d.loadingP;
+        const ticket = api.begin();
+        d.loading = true;
+        d.error = null;
+        let started;
+        try { started = fetchFn(d.version); } catch (e) { started = Promise.reject(e); }
+        const p = track(Promise.resolve(started).then(res => {
+          if (res === null || res === undefined) return false;   // unchanged
+          return api.commit(ticket, res.version, () => res.data);
+        }, e => {
+          if (ticket.epoch === ui.epoch) d.error = e;
+          return false;
+        }).then(ok => {
+          if (d.loadingP === p) { d.loading = false; d.loadingP = null; }
+          render();
+          return ok;
+        }));
+        d.loadingP = p;
+        render();
+        return p;
+      },
+      onStale(fn) {
+        if (typeof fn !== 'function') return () => {};
+        d.stale.push(fn);
+        return () => { const i = d.stale.indexOf(fn); if (i >= 0) d.stale.splice(i, 1); };
+      },
+      setRemote(v) {
+        d.remote = v === undefined || v === null ? '' : String(v);
+        if (!d.remote || d.remote === d.version) return;
+        d.stale.slice().forEach(fn => {
+          try { fn(api); } catch (e) { console.error('[domain ' + d.name + '] onStale listener failed:', e); }
+        });
+      }
+    });
+    domains[name] = { d, api };
+    if (state.session) restoreDomain(d);
+    return api;
+  }
+
+  function persistDomain(d) {
+    if (!d.persist || !state.session) return;
+    lsSet(DOM_PREFIX + d.name, JSON.stringify({ user: state.session.name, v: d.version, savedAt: new Date().toISOString(), data: d.data }));
+  }
+
+  function restoreDomain(d) {
+    if (!d.persist || !state.session) return;
+    const s = lsGetJson(DOM_PREFIX + d.name);
+    if (!s || s.user !== state.session.name) return;
+    d.data = s.data === undefined ? cloneJson(d.empty) : s.data;
+    d.version = typeof s.v === 'string' ? s.v : '';
+  }
+
+  /** A remembered session after a reload: persisted domains of this user come back. */
+  function restoreDomains() { Object.keys(domains).forEach(n => restoreDomain(domains[n].d)); }
+
+  function resetDomain(d) {
+    d.seq++;
+    d.data = cloneJson(d.empty);
+    d.version = '';
+    d.remote = '';
+    d.loading = false;
+    d.loadingP = null;
+    d.error = null;
+  }
+
+  /* ---------- localStorage slices (core.store) ---------- */
+  function draftKey(key) {
+    const user = state.session && state.session.name;
+    return user && key ? DRAFT_PREFIX + user + ':' + key : null;
+  }
+
+  const store = Object.freeze({
+    draft: Object.freeze({
+      get(key) { const k = draftKey(key); return k ? lsGetJson(k) : null; },
+      set(key, value) {
+        const k = draftKey(key);
+        if (!k) return false;
+        if (value === undefined || value === null || value === '') lsRemove(k);
+        else lsSet(k, JSON.stringify(value));
+        return true;
+      },
+      remove(key) { const k = draftKey(key); if (k) lsRemove(k); }
+    }),
+    prefs: Object.freeze({
+      get(key, dflt) {
+        const p = lsGetJson(PREFS_KEY);
+        return p && typeof p === 'object' && Object.prototype.hasOwnProperty.call(p, key) ? p[key] : dflt;
+      },
+      set(key, value) {
+        const cur = lsGetJson(PREFS_KEY);
+        const p = cur && typeof cur === 'object' && !Array.isArray(cur) ? cur : {};
+        if (value === undefined) delete p[key];
+        else p[key] = value;
+        lsSet(PREFS_KEY, JSON.stringify(p));
+      }
+    })
+  });
+
+  /** ipd_dom:* and ipd_draft:* belong to the user who was logged in (ipd_prefs stays). */
+  function clearUserStorage() {
+    const keys = [];
+    try { for (let i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i)); } catch (e) { return; }
+    keys.forEach(k => { if (typeof k === 'string' && (k.indexOf(DOM_PREFIX) === 0 || k.indexOf(DRAFT_PREFIX) === 0)) lsRemove(k); });
+  }
+
+  /* ---------- IndexedDB (core.media) ---------- */
+  /** → Promise<IDBDatabase|null>; null = in-memory mode for the rest of this page load. */
+  function mediaOpen() {
+    if (media.mode === 'memory') return Promise.resolve(null);
+    if (media.db) return Promise.resolve(media.db);
+    if (media.opening) return media.opening;
+    media.opening = new Promise(resolve => {
+      let idb = null;
+      try { idb = window.indexedDB || null; } catch (e) { idb = null; }
+      if (!idb || typeof idb.open !== 'function') { resolve(null); return; }
+      let req;
+      try { req = idb.open(MEDIA_DB, MEDIA_DB_VERSION); } catch (e) { resolve(null); return; }
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        MEDIA_STORES.forEach(s => { if (!db.objectStoreNames.contains(s)) db.createObjectStore(s); });
+      };
+      req.onsuccess = () => {
+        const db = req.result;
+        // another page (or BootApp.clearAppStorage) deletes or upgrades the database: never block it
+        db.onversionchange = () => { db.close(); if (media.db === db) media.db = null; };
+        db.onclose = () => { if (media.db === db) media.db = null; };
+        resolve(db);
+      };
+      req.onerror = e => { if (e && e.preventDefault) e.preventDefault(); resolve(null); };
+      // onblocked: an older connection is still open somewhere; keep waiting for it to close
+    }).then(db => {
+      media.opening = null;
+      if (db) {
+        media.db = db;
+        media.mode = 'idb';
+      } else {
+        media.mode = 'memory';
+        if (!media.mem) {
+          media.mem = {};
+          MEDIA_STORES.forEach(s => { media.mem[s] = new Map(); });
+        }
+      }
+      return db;
+    });
+    return media.opening;
+  }
+
+  /** One tracked operation on `storeName` (IndexedDB transaction, or the in-memory map). */
+  function mediaRun(storeName, write, idbFn, memFn, retried) {
+    if (MEDIA_STORES.indexOf(storeName) < 0) return Promise.reject(new Error('core.media: unknown store "' + storeName + '"'));
+    return track(mediaOpen().then(db => {
+      if (!db) return memFn(media.mem[storeName]);
+      return new Promise((resolve, reject) => {
+        let tx, req;
+        try {
+          tx = db.transaction(storeName, write ? 'readwrite' : 'readonly');
+          req = idbFn(tx.objectStore(storeName));
+        } catch (e) {
+          if (!retried && e && e.name === 'InvalidStateError') {   // closed meanwhile (versionchange): open again
+            if (media.db === db) media.db = null;
+            resolve(mediaRun(storeName, write, idbFn, memFn, true));
+          } else reject(e);
+          return;
+        }
+        tx.oncomplete = () => resolve(req ? req.result : undefined);
+        tx.onerror = () => reject(tx.error || (req && req.error) || new Error('IndexedDB error'));
+        tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction aborted'));
+      });
+    }));
+  }
+
+  const mediaApi = Object.freeze({
+    mode() { return media.mode; },
+    ready() { return track(mediaOpen()).then(() => media.mode); },
+    get(storeName, key) { return mediaRun(storeName, false, s => s.get(key), m => m.get(key)); },
+    put(storeName, key, value) {
+      if (storeName === 'chat') lsSet(MEDIA_CHAT_MARK, '1');
+      return mediaRun(storeName, true, s => s.put(value, key), m => { m.set(key, value); }).then(() => undefined);
+    },
+    del(storeName, key) { return mediaRun(storeName, true, s => s.delete(key), m => { m.delete(key); }).then(() => undefined); },
+    keys(storeName) { return mediaRun(storeName, false, s => s.getAllKeys(), m => Array.from(m.keys())); },
+    clear(storeName) { return mediaRun(storeName, true, s => s.clear(), m => { m.clear(); }).then(() => undefined); }
+  });
+
+  /** Chat messages never outlive the session on a shared device (avatars, photos and the outbox stay). */
+  function wipeChatMedia() {
+    if (!media.db && media.mode !== 'memory' && !lsGet(MEDIA_CHAT_MARK)) return;   // never used: do not open IndexedDB
+    mediaApi.clear('chat').then(() => lsRemove(MEDIA_CHAT_MARK), e => console.error('[core] clearing chat media failed:', e));
+  }
+
+  /* ---------- logout / new login ---------- */
+  function resetCore() {
+    Object.keys(domains).forEach(n => resetDomain(domains[n].d));
+    clearUserStorage();
+    wipeChatMedia();
+    Object.keys(bannerDefs).forEach(k => { delete bannerDefs[k]; });
+    Object.keys(badgeCounts).forEach(k => { delete badgeCounts[k]; });
+    features.forEach(f => {
+      if (f.legacy || !f.started) return;
+      if (typeof f.def.reset === 'function') callHook(f, 'reset', () => f.def.reset(core));
+      else if (f.root && !f.error) {
+        f.root.innerHTML = '';
+        f.root._html = '';
+        f.mounted = false;
+      }
+    });
+  }
+
+  /** The app's modals join the UiKit sheet stack; Escape asks each modal's own close routine. */
+  function registerModals() {
+    const opts = {
+      setupModal: { onRequestClose: () => { if (ui.setupCancelable) hideModal('setupModal'); } },
+      loginModal: { dismissible: false },
+      passwordModal: { onRequestClose: closePasswordModal },   // refuses while the change is forced
+      transferModal: {},
+      confirmLeaveModal: { onRequestClose: closeConfirmLeave },
+      stationCountsModal: { onRequestClose: closeStationCountsModal },
+      diagModal: {},
+      dayToolsModal: { backdrop: true },
+      whatsNewModal: { backdrop: true }
+    };
+    // focus goes to the sheet's title, not to its first input: opening a sheet must not pop the on-screen keyboard
+    Object.keys(opts).forEach(id => {
+      if ($(id)) Kit.sheet.register(id, Object.assign({ initialFocus: '[data-sheet-title]' }, opts[id]));
+    });
+    Kit.sheet.onChange(() => syncHistory());
+  }
+
+  /** A sheet that Escape / Android back may close (the login, a forced password change and a first setup may not). */
+  function sheetDismissible(el) {
+    if (!el) return false;
+    if (el.id === 'loginModal') return false;
+    if (el.id === 'passwordModal') return !ui.pwForced;
+    if (el.id === 'setupModal') return ui.setupCancelable;
+    return true;
+  }
+
+  /* ---------- app shell (R1a-B2): markup recipes, เมนู, what's new, back navigation ---------- */
+  /**
+   * index.html markup helpers, applied once at start: data-kit="key …" prepends the UiKit.cls recipes to the
+   * element's classes; <i data-ic="name" class="…"> becomes UiKit.icon(name, class); <i data-deco="star|heart|sparkle"
+   * class="…"> becomes UiKit.deco(name, class) (a small filled decoration glyph, theme v2).
+   */
+  function applyKit(root) {
+    (root || document).querySelectorAll('[data-kit]').forEach(el => {
+      if (el._kit) return;
+      el._kit = true;
+      const kit = el.getAttribute('data-kit').split(/\s+/).filter(Boolean).map(k => Kit.cls[k] || '').filter(Boolean).join(' ');
+      const own = el.getAttribute('class');
+      el.setAttribute('class', own ? kit + ' ' + own : kit);
+    });
+    (root || document).querySelectorAll('i[data-deco]').forEach(el => {
+      const tpl = document.createElement('template');
+      tpl.innerHTML = Kit.deco ? Kit.deco(el.getAttribute('data-deco'), el.getAttribute('class') || '') : '';
+      if (tpl.content.firstElementChild) el.replaceWith(tpl.content.firstElementChild); else el.remove();
+    });
+    (root || document).querySelectorAll('i[data-ic]').forEach(el => {
+      const tpl = document.createElement('template');
+      tpl.innerHTML = Kit.icon(el.getAttribute('data-ic'), el.getAttribute('class') || '');
+      if (tpl.content.firstElementChild) el.replaceWith(tpl.content.firstElementChild);
+    });
+  }
+
+  /** The เมนู screen: a registered feature (App.register) whose markup lives in index.html (#menuContent). */
+  const MENU_DEF = {
+    id: 'menu', title: 'เมนู', icon: 'menu',
+    nav: { place: 'bar', order: 90 },
+    // the sum of the badges of the entries it holds (e.g. approvals from R1b on)
+    badge: () => featureList('menu').reduce((n, f) => n + (f.visible ? f.badge : 0), 0),
+    mount(root) {
+      const el = $('menuContent');
+      if (!el) return;
+      root.appendChild(el);
+      el.hidden = false;
+    },
+    reset() {   // nothing of the previous user may stay in the DOM of a shared device (render rewrites the rest)
+      if (!hasMarkup(MENU_IDS)) return;
+      setHtml($('menuAvatar'), '');
+      $('menuName').textContent = '-';
+      $('menuGroup').textContent = '-';
+      setHtml($('menuRole'), '');
+    }
+  };
+
+  /**
+   * "มีอะไรใหม่" — edit this one structure for every release. Shown from เมนู at any time, and once per version after
+   * an update (never on a first-ever login on a device) unless APP_CONFIG.WHATS_NEW === false.
+   */
+  const WHATS_NEW = Object.freeze({
+    version: '2.9.0',
+    title: 'มีอะไรใหม่',
+    subtitle: 'เวอร์ชัน 2.9 — โฉมใหม่',
+    items: Object.freeze([
+      { icon: 'eye', title: 'หน้าตาใหม่ทั้งแอป', text: 'โทนสีพาสเทลตามไอคอนใหม่ ตัวอักษรอ่านง่ายขึ้น ปุ่มใหญ่กดง่าย และใช้บนคอมพิวเตอร์ได้สะดวกขึ้น' },
+      { icon: 'user', title: 'การ์ด "ของฉันวันนี้"', text: 'เปิดแอปแล้วเห็นทันทีว่าวันนี้คุณอยู่ Station ไหน ทำงานกับใคร หรือลาอะไร' },
+      { icon: 'calendar-off', title: 'บันทึกการลาแบบใหม่', text: 'ในหน้าการลา แตะชื่อแล้วเลือกสถานะจากแผ่นตัวเลือก จากนั้นกด "บันทึก" — ปฏิทินอยู่บนสุด ตามด้วยสถานะของฉัน ส่วนสรุปประวัติการลาพับไว้ด้านล่าง' },
+      { icon: 'menu', title: 'เมนูใหม่', text: 'แถบด้านล่างเหลือ 3 ปุ่ม: วันนี้ · การลา · เมนู — เปลี่ยนรหัสผ่าน ตรวจสอบการเชื่อมต่อ ออกจากระบบ (และรายชื่อบุคลากร รายงานและส่งออก สำหรับ Supervisor) อยู่ในเมนู' },
+      { icon: 'calendar', title: 'แถบเลือกวันทั้งสัปดาห์', text: 'แตะวันในแถบใต้หัวแอปเพื่อดูเวรของวันนั้น หรือแตะวันที่ด้านบนเพื่อเลือกวันอื่น' },
+      { icon: 'more', title: 'ปุ่มบันทึกอยู่ด้านล่างเสมอ (Supervisor)', text: 'ปุ่มบันทึกตารางอยู่ติดด้านล่างของหน้าวันนี้ ส่วนคัดลอก วาง แชร์ภาพ และล้างข้อมูล อยู่ในปุ่ม ⋯ ข้างปุ่มบันทึก' },
+      { icon: 'check-circle', title: 'กล่องยืนยันในแอป', text: 'คำถามยืนยัน เช่น ออกจากระบบ หรือล้างข้อมูล แสดงในแอปแทนหน้าต่างของเบราว์เซอร์' },
+      { icon: 'image', title: 'ไอคอนใหม่', text: 'ไอคอนบนหน้าจอโทรศัพท์เป็นภาพ X-RAY IPD ลายน่ารัก (iPhone: ลบไอคอนเดิมแล้วเพิ่มลงหน้าจอโฮมใหม่จึงจะเปลี่ยน)' }
+    ])
+  });
+  const WHATS_NEW_SEEN = 'whatsNewSeen';   // core.store.prefs key: the version whose notes were shown on this device
+
+  function openWhatsNew() {
+    $('whatsNewTitle').textContent = WHATS_NEW.title;
+    $('whatsNewVersion').textContent = WHATS_NEW.subtitle;
+    const tones = [Kit.cls.listIconBrand, Kit.cls.listIconInfo, Kit.cls.listIconLilac, Kit.cls.listIconSun];
+    setHtml($('whatsNewList'), WHATS_NEW.items.map((it, i) =>
+      `<li class="flex items-start gap-3"><span class="${Kit.cls.listIcon} ${tones[i % tones.length] || ''}">${Kit.icon(it.icon, 'w-5 h-5')}</span>` +
+      `<div class="min-w-0 flex-1"><p class="font-display text-[0.9375rem] font-medium leading-6 text-ink-900">${esc(it.title)}</p>` +
+      `<p class="text-sm leading-6 text-slate-600">${esc(it.text)}</p></div></li>`).join(''));
+    showModal('whatsNewModal');
+  }
+
+  /**
+   * After a login / an app start with a session: the notes of this version, once. A device without a recorded
+   * version is new to the app unless it was used before this version (a v2.2 session or cache was found at start),
+   * so a first-ever login records the version silently.
+   */
+  function maybeShowWhatsNew() {
+    if (cfg().WHATS_NEW === false || !state.session || ui.pwForced || Kit.sheet.top()) return;
+    const seen = store.prefs.get(WHATS_NEW_SEEN, '');
+    if (seen === WHATS_NEW.version) return;
+    store.prefs.set(WHATS_NEW_SEEN, WHATS_NEW.version);
+    if (seen || ui.usedBefore) openWhatsNew();
+  }
+
+  /*
+   * Android back / browser back (APP_CONFIG.HISTORY_NAV !== false): while there is something to go back from — a
+   * sheet that may be closed, or a screen other than วันนี้ — one extra history entry ("guard") is kept; a back
+   * press pops it, handleBack() closes the top sheet or goes to the screen's parent, and a new guard is pushed if
+   * there is still something to go back from. A guard that is no longer needed is popped again (ignored pop).
+   */
+  const hist = { guard: false, ignore: 0 };
+  function historyOn() {
+    return cfg().HISTORY_NAV !== false && !!window.history && typeof window.history.pushState === 'function';
+  }
+  function canGoBack() {
+    const top = Kit.sheet.top();
+    if (top) return sheetDismissible(top);
+    return !!state.session && ui.tab !== 'station';
+  }
+  function syncHistory() {
+    if (!historyOn()) return;
+    const need = canGoBack();
+    try {
+      if (need && !hist.guard) {
+        window.history.pushState({ ipdShell: 1 }, '');
+        hist.guard = true;
+      } else if (!need && hist.guard) {
+        hist.guard = false;
+        hist.ignore++;
+        window.history.back();
+      }
+    } catch (e) { /* history unavailable (sandboxed frame): back simply leaves the page */ }
+  }
+
+  /** One "back": the top sheet closes (if it may), else the current screen returns to its parent. → Promise<bool> */
+  function handleBack() {
+    const top = Kit.sheet.top();
+    if (top) return Promise.resolve(sheetDismissible(top) && Kit.sheet.closeTop());
+    if (!state.session || ui.tab === 'station') return Promise.resolve(false);
+    return back();
+  }
+
+  /** The popstate listener (attached only with HISTORY_NAV on; tests call it directly). */
+  function onPopState(e) {
+    const onGuard = !!(e && e.state && e.state.ipdShell);
+    if (hist.ignore > 0) {
+      hist.ignore--;
+      hist.guard = onGuard;
+      syncHistory();
+      return Promise.resolve(false);
+    }
+    hist.guard = onGuard;
+    return track(handleBack()).then(done => { syncHistory(); return done; });
+  }
+
+  /** The password show/hide eye of the login screen. */
+  function toggleLoginPassword() {
+    const input = $('loginPassword'), btn = $('loginPwToggle');
+    const show = input.type === 'password';
+    input.type = show ? 'text' : 'password';
+    btn.setAttribute('aria-pressed', show ? 'true' : 'false');
+    btn.setAttribute('aria-label', show ? 'ซ่อนรหัสผ่าน' : 'แสดงรหัสผ่าน');
+    setHtml(btn, Kit.icon(show ? 'eye-off' : 'eye', 'w-5 h-5'));
+  }
+
+  function resetLoginPasswordToggle() {
+    if ($('loginPassword').type !== 'password') toggleLoginPassword();
+  }
+
+  const core = Object.freeze({
+    apiLevel: API_LEVEL,
+    U, Api, Kit, state,
+    isSup, myName, staff: () => state.staff.slice(), serverHas,
+    spawn, track, alive: sessionAlive,
+    call: (action, params, opts) => Api.call(action, params, opts), userCall, withBusy,
+    requireInternet, handleError, toast, confirm: confirmUser, prompt: promptUser,
+    esc, setHtml, setVisible, render: () => render(),
+    go, back, current: () => ui.tab, features: featureList,
+    selectedDate: () => state.selectedDate,
+    setSelectedDate: date => track(setSelectedDate(date)),
+    ensureRange, dayView, leavesOn, leaveList, isAbsent, saveFile,
+    domain, store, media: mediaApi,
+    poll: Object.freeze({ every: pollEvery }),
+    on: onEvent, provide, use,
+    station, banners, badges
+  });
+
+  LEGACY_SCREENS.forEach(def => addFeature(def, true));
+  register(MENU_DEF);
+  window.App.core = core;
+  window.App.register = register;
+  /** Shell internals for tests/debugging: the back logic and the release notes. */
+  window.App.shell = Object.freeze({ onPopState, handleBack, openWhatsNew, whatsNew: WHATS_NEW });
 
   /* ------------------------------------------------------------------ */
   /* wiring                                                              */
@@ -2639,6 +4653,7 @@
   function on(id, ev, fn) { const el = $(id); if (el) el.addEventListener(ev, fn); }
   function onEnter(id, fn) { on(id, 'keydown', e => { if (e.key === 'Enter') { e.preventDefault(); fn(); } }); }
 
+  let hadKeyboard = false;   // the last interaction was a key press (for the header date's focus ring)
   function bindEvents() {
     // setup / login / password
     on('setupSaveBtn', 'click', () => spawn(onSetupSave));
@@ -2655,16 +4670,45 @@
     on('pwCancelBtn', 'click', closePasswordModal);
     on('pwLogoutBtn', 'click', () => { doLogout(); toast('🚪 ออกจากระบบเรียบร้อย'); });
 
-    // header
+    on('loginPwToggle', 'click', toggleLoginPassword);
+
+    // header, week strip, save bar, เมนู
+    on('headerAvatarBtn', 'click', () => spawn(() => go('menu')));
+    on('headerBackBtn', 'click', () => spawn(back));
+    on('weekDays', 'click', onWeekDayClick);
+    on('dayToolsBtn', 'click', openDayTools);
+    // a picked day tool closes the sheet; the tool's own handler (bound to its id below) does the work
+    on('dayToolsModal', 'click', e => {
+      const t = e.target && e.target.closest ? e.target.closest('[data-day-tool]') : null;
+      if (t && t.getAttribute('aria-disabled') !== 'true') hideModal('dayToolsModal');   // a disabled tool explains and stays
+    });
+    on('dayToolsCloseBtn', 'click', () => hideModal('dayToolsModal'));
+    on('toast', 'click', hideToast);
+    on('menuPasswordBtn', 'click', () => openPasswordModal(false));
+    on('menuDiagBtn', 'click', openDiag);
+    on('menuWhatsNewBtn', 'click', openWhatsNew);
+    on('whatsNewOkBtn', 'click', () => hideModal('whatsNewModal'));
+    // the ✕ of a sheet's title row: dismisses the top sheet exactly like Escape (its own close routine)
+    document.addEventListener('click', e => {
+      if (e.target && e.target.closest && e.target.closest('[data-sheet-close]')) Kit.sheet.closeTop();
+    });
     on('refreshBtn', 'click', () => spawn(() => onRefreshClick($('refreshBtn'), '…')));
     on('syncStatus', 'click', openDiag);
     on('offlineRetryBtn', 'click', () => spawn(() => onRefreshClick($('offlineRetryBtn'), 'กำลังลองใหม่…')));
     on('offlineDiagBtn', 'click', openDiag);
-    on('datePickerBtn', 'click', toggleDatePicker);
-    on('prevDayBtn', 'click', () => setSelectedDate(U.addDays(state.selectedDate, -1)));
-    on('nextDayBtn', 'click', () => setSelectedDate(U.addDays(state.selectedDate, 1)));
-    on('currentDate', 'change', e => setSelectedDate(e.target.value));
-    on('logoutBtn', 'click', onLogoutClick);
+    on('prevDayBtn', 'click', () => spawn(() => setSelectedDate(U.addDays(state.selectedDate, -1))));
+    on('nextDayBtn', 'click', () => spawn(() => setSelectedDate(U.addDays(state.selectedDate, 1))));
+    on('currentDate', 'change', e => spawn(() => setSelectedDate(e.target.value)));
+    on('summaryImageDate', 'change', e => spawn(() => setSelectedDate(e.target.value)));
+    // the Buddhist-era caption follows every date input as it is edited (also the ones not bound to the selected date)
+    ['summaryStartDate', 'summaryEndDate', 'exportStartDate', 'exportEndDate', 'leaveTargetDate', 'summaryImageDate']
+      .forEach(id => { on(id, 'input', renderBeCaptions); on(id, 'change', renderBeCaptions); });
+    // keyboard focus on the header date picker draws a ring around the date (some engines do not match :has())
+    on('currentDate', 'focus', () => { const m = $('headerMain'); if (m && hadKeyboard) m.classList.add('kbd-focus'); });
+    on('currentDate', 'blur', () => { const m = $('headerMain'); if (m) m.classList.remove('kbd-focus'); });
+    document.addEventListener('keydown', e => { if (e.key === 'Tab') hadKeyboard = true; }, true);
+    document.addEventListener('pointerdown', () => { hadKeyboard = false; }, true);
+    on('logoutBtn', 'click', () => spawn(onLogoutClick));
     on('updateBanner', 'click', () => location.reload());
 
     // connection check
@@ -2684,22 +4728,25 @@
 
     // leave tab
     on('summaryBtn', 'click', () => spawn(onSummary));
-    on('leaveTargetDate', 'change', e => setSelectedDate(e.target.value));
+    on('leaveTargetDate', 'change', e => spawn(() => setSelectedDate(e.target.value)));
     on('groupFilterBar', 'click', e => { const b = e.target.closest && e.target.closest('.grp-btn'); if (b) setFilter(b.dataset.f); });
     on('leaveCalendarCard', 'click', onCalendarClick);
-    on('leaveContainer', 'click', onLeaveContainerClick);
+    on('leaveContainer', 'click', onLeaveRowClick);
+    on('myLeaveRow', 'click', onLeaveRowClick);
+    on('leaveOptions', 'click', onLeaveOptionClick);
     on('confirmLeaveCancelBtn', 'click', closeConfirmLeave);
     on('confirmLeaveBtn', 'click', () => spawn(onConfirmLeave, WRITE));
 
     // staff tab
     on('openTransferBtn', 'click', openTransferModal);
+    on('transferTargetSelect', 'change', renderTransferBtn);
     on('transferCancelBtn', 'click', () => hideModal('transferModal'));
     on('transferConfirmBtn', 'click', () => spawn(onTransfer, WRITE));
     on('addStaffBtn', 'click', () => spawn(onAddStaff, WRITE));
     onEnter('newStaffName', () => spawn(onAddStaff, WRITE));
     on('staffListContainer', 'click', onStaffListClick);
     on('importBtn', 'click', () => spawn(onImport, WRITE));
-    on('clearLegacyBtn', 'click', onClearLegacy);
+    on('clearLegacyBtn', 'click', () => spawn(onClearLegacy));
 
     // summary tab
     on('exportBtn', 'click', () => spawn(onExport));
@@ -2709,21 +4756,17 @@
     on('saveImgBtn', 'click', () => spawn(onSaveImage));
     on('clearDayBtn', 'click', () => spawn(onClearDay, WRITE));
 
-    // bottom nav
-    on('bottomNav', 'click', e => { const b = e.target.closest && e.target.closest('.nav-btn'); if (b) switchTab(b.dataset.tab); });
-
-    // global
-    document.addEventListener('keydown', e => {
-      if (e.key !== 'Escape') return;
-      if (isShown('diagModal')) hideModal('diagModal');
-      else if (isShown('confirmLeaveModal')) closeConfirmLeave();
-      else if (isShown('stationCountsModal')) closeStationCountsModal();
-      else if (isShown('transferModal')) hideModal('transferModal');
-      else if (isShown('passwordModal')) closePasswordModal();
-      else if (isShown('setupModal') && ui.setupCancelable) hideModal('setupModal');
+    // navigation: every nav entry of every registered screen, wherever it sits (bottom bar, header, menu)
+    document.addEventListener('click', e => {
+      const b = e.target && e.target.closest ? e.target.closest('.nav-btn[data-tab]') : null;
+      if (b) spawn(() => go(b.dataset.tab));
     });
+    on('bannerSlot', 'click', onBannerClick);
+
+    // global — Escape is handled by the UiKit sheet stack (registerModals): it closes only the top modal
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState !== 'visible') return;
+      emit('visible', {});
       if (!state.session) { if (isShown('loginModal')) reloadLoginUsers(); return; }
       if (!state.lastSync || Date.now() - state.lastSync > STALE_AFTER_MS) refresh({ silent: true });
     });
@@ -2731,6 +4774,7 @@
       if (document.visibilityState === 'visible' && state.session && !ui.pwForced) refresh({ silent: true });
     }, REFRESH_EVERY_MS);
     window.addEventListener('online', () => {
+      emit('online', {});
       if (state.session) refresh({ silent: true });
       else if (isShown('loginModal')) reloadLoginUsers();
     });
@@ -2740,7 +4784,15 @@
     });
     window.addEventListener('resize', syncLayout);
     if (typeof ResizeObserver === 'function') {
-      try { new ResizeObserver(syncLayout).observe($('appHeader')); } catch (e) { /* ignore */ }
+      try {
+        const ro = new ResizeObserver(syncLayout);
+        ['appHeader', 'saveBar', 'navDock'].forEach(id => { if ($(id)) ro.observe($(id)); });
+      } catch (e) { /* ignore */ }
+    }
+    if (historyOn()) {
+      // a reload on a guard entry: the next syncHistory() pops it when there is nothing to go back from
+      hist.guard = !!(window.history.state && window.history.state.ipdShell);
+      window.addEventListener('popstate', onPopState);
     }
   }
 
@@ -2750,6 +4802,7 @@
     $('summaryEndDate').value = m.to;
     $('exportStartDate').value = m.from;
     $('exportEndDate').value = m.to;
+    renderBeCaptions();
   }
 
   function registerServiceWorker() {
@@ -2762,18 +4815,34 @@
 
   function init() {
     LEGACY_SECRET_KEYS.forEach(lsRemove);
+    ui.usedBefore = !!(lsGet(LS.session) || lsGet(LS.cache));   // the app was used on this device before this start
+    applyKit();
+    watchWebFonts();
+    // the picture's logo as an absolute URL: html2canvas loads background images itself and must find the file
+    const logo = $('captureLogo');
+    if (logo) { try { logo.style.backgroundImage = 'url("' + new URL('icons/icon-192.png', document.baseURI).href + '")'; } catch (e) { /* keep the relative one */ } }
     ui.summaryPlaceholder = $('leaveSummaryContent').innerHTML;
+    registerModals();
     bindEvents();
     initDateInputs();
     Api.onActivity(() => renderSyncStatus());
     Api.onStatus(onApiStatus);
     Api.onAuthError = onSessionError;
     if (deviceOffline()) setConn('offline', 'device');
+    startCore();   // attaches the registered screens (legacy four + feature files loaded before init)
     render();
     syncLayout();
     registerServiceWorker();
     watchForUpdate();
-    spawn(startup).then(() => { render(); resolveReady(); });
+    spawn(startup).then(() => { render(); resolveReady(); bootSucceeded(); maybeShowWhatsNew(); });
+  }
+
+  /** A good start ends the boot guard's automatic-reload budget (see the boot guard at the top of this file). */
+  function bootSucceeded() {
+    const boot = window.__ipdBoot;
+    // the inline guard shows (or is about to show) its message, e.g. the stylesheet did not load or is v2.2's
+    if ($('bootUpdate') || (boot && typeof boot.healthy === 'function' && !boot.healthy())) return;
+    try { sessionStorage.removeItem(BOOT_RETRY_KEY); } catch (e) { /* ignore */ }
   }
 
   U.onReady(init);

@@ -11,13 +11,13 @@
   /* ---------- shared domain constants (identical to the backend) ---------- */
   /** `count` is the DEFAULT number of people a station needs; the supervisor can change it (stationCounts). */
   const STATIONS = Object.freeze([
-    { id: 'portable',   name: 'Portable',             count: 3, bg: '#fffbeb', border: '#fde68a', text: '#b45309' },
-    { id: 'ipd',        name: 'IPD',                  count: 3, bg: '#eff6ff', border: '#bfdbfe', text: '#1d4ed8' },
-    { id: 'us',         name: 'US',                   count: 2, bg: '#f0fdf4', border: '#bbf7d0', text: '#15803d' },
-    { id: 'or',         name: 'OR',                   count: 2, bg: '#faf5ff', border: '#e9d5ff', text: '#7e22ce' },
-    { id: 'er',         name: 'ER',                   count: 3, bg: '#fff1f2', border: '#fecdd3', text: '#be123c' },
-    { id: 'cancer',     name: 'CANCER CENTER',        count: 1, bg: '#ecfeff', border: '#a5f3fc', text: '#0e7490' },
-    { id: 'supervisor', name: 'Prereview/Supervisor', count: 1, bg: '#eef2ff', border: '#c7d2fe', text: '#4338ca' }
+    { id: 'portable',   name: 'Portable',             count: 3, bg: '#FFF4D1', border: '#FFC94A', text: '#8A5300' },
+    { id: 'ipd',        name: 'IPD',                  count: 3, bg: '#DDF3FE', border: '#58C3EC', text: '#115A80' },
+    { id: 'us',         name: 'US',                   count: 2, bg: '#DCF6E9', border: '#5CCB98', text: '#17694A' },
+    { id: 'or',         name: 'OR',                   count: 2, bg: '#EEE9FE', border: '#AD91F2', text: '#563A8F' },
+    { id: 'er',         name: 'ER',                   count: 3, bg: '#FFE3EF', border: '#FB6FA8', text: '#9A1B55' },
+    { id: 'cancer',     name: 'CANCER CENTER',        count: 1, bg: '#FFE8DA', border: '#FF9A5C', text: '#93400F' },
+    { id: 'supervisor', name: 'Prereview/Supervisor', count: 1, bg: '#E5EAF8', border: '#7186C4', text: '#2A3F86' }
   ].map(Object.freeze));
   const LEAVE_TYPES = Object.freeze(['พักร้อน', 'Off เวร', 'Off In charge', 'ลาป่วย', 'ลากิจ', 'ลาประชุม']);
   const QUEUE_TYPES = Object.freeze(['พักร้อน', 'Off เวร']);
@@ -29,6 +29,8 @@
   const THAI_MONTHS_FULL = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม',
     'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
   const THAI_WEEKDAYS_SHORT = Object.freeze(['อา', 'จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส']);   // Sunday first
+  /** The abbreviated weekday as written in a date ("พฤ. 26 พ.ย. 2569"), Sunday first. */
+  const THAI_WEEKDAYS_ABBR = Object.freeze(['อา.', 'จ.', 'อ.', 'พ.', 'พฤ.', 'ศ.', 'ส.']);
   const YMD_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
   const DAY_MS = 86400000;
 
@@ -159,6 +161,18 @@
     return 'วัน' + THAI_DAYS[d.getDay()] + 'ที่ ' + d.getDate() + ' ' + THAI_MONTHS[d.getMonth()] + ' ' + (d.getFullYear() + 543);
   }
 
+  /**
+   * THE short date format shown to users (R1a FIX-2, Minor 1): 'YYYY-MM-DD' (or Date) → "26 พ.ย. 2569" (Buddhist year).
+   * opts.weekday → "พฤ. 26 พ.ย. 2569" (the header); opts.year === false → "26 พ.ย.". '-' when invalid.
+   */
+  function thaiDateShort(str, opts) {
+    const d = str instanceof Date ? str : parseYmd(str);
+    if (!d || isNaN(d.getTime())) return '-';
+    const o = opts || {};
+    return (o.weekday ? THAI_WEEKDAYS_ABBR[d.getDay()] + ' ' : '') + d.getDate() + ' ' + THAI_MONTHS[d.getMonth()] +
+      (o.year === false ? '' : ' ' + (d.getFullYear() + 543));
+  }
+
   function toDate_(v) {
     if (v instanceof Date) return v;
     if (typeof v === 'number') return new Date(v);
@@ -178,6 +192,20 @@
     const d = toDate_(iso);
     if (!d || isNaN(d.getTime())) return '';
     return pad2(d.getDate()) + '/' + pad2(d.getMonth() + 1) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ' น.';
+  }
+
+  /** ISO timestamp → "18 พ.ย. 2569 08:30 น." in LOCAL time ('' when invalid) — timestamps shown to users. */
+  function thaiStamp(iso) {
+    const d = toDate_(iso);
+    if (!d || isNaN(d.getTime())) return '';
+    return thaiDateShort(d) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ' น.';
+  }
+
+  /** ISO timestamp → "18 พ.ย. 08:30 น." in LOCAL time ('' when invalid) — the compact form (no year). */
+  function thaiStampShort(iso) {
+    const d = toDate_(iso);
+    if (!d || isNaN(d.getTime())) return '';
+    return thaiDateShort(d, { year: false }) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ' น.';
   }
 
   /* ---------- escaping / CSV ---------- */
@@ -282,10 +310,10 @@
   }
 
   global.Utils = {
-    STATIONS, LEAVE_TYPES, QUEUE_TYPES, STATION_COUNT_MIN, STATION_COUNT_MAX, THAI_WEEKDAYS_SHORT,
+    STATIONS, LEAVE_TYPES, QUEUE_TYPES, STATION_COUNT_MIN, STATION_COUNT_MAX, THAI_WEEKDAYS_SHORT, THAI_WEEKDAYS_ABBR,
     pad2, ymd, todayStr, parseYmd, addDays, compareYmd, eachDate, monthRange, daysBetweenInclusive,
     monthKey, addMonths, thaiMonthYear, monthGrid,
-    thaiDate, formatStamp, formatStampShort, escapeHtml, csvCell, buildCsv,
+    thaiDate, thaiDateShort, thaiStamp, thaiStampShort, formatStamp, formatStampShort, escapeHtml, csvCell, buildCsv,
     normalizeName, validateName, validatePassword, isValidYmd, queueOrder, stationById, normalizeStationCounts, onReady
   };
 })(window);

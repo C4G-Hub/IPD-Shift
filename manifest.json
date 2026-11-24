@@ -6,19 +6,27 @@
   "lang": "th",
   "icons": [
     {
-      "src": "icon-192.png",
+      "src": "icons/icon-192.png",
       "type": "image/png",
-      "sizes": "192x192"
+      "sizes": "192x192",
+      "purpose": "any"
     },
     {
-      "src": "icon-512.png",
+      "src": "icons/icon-512.png",
       "type": "image/png",
-      "sizes": "512x512"
+      "sizes": "512x512",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-maskable-512.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "maskable"
     }
   ],
   "start_url": "./index.html",
   "scope": "./",
-  "background_color": "#2563eb",
-  "theme_color": "#2563eb",
+  "background_color": "#FFFBF2",
+  "theme_color": "#8FD8F5",
   "display": "standalone"
 }
