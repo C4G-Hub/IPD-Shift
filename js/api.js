@@ -28,13 +28,13 @@
 (function (global) {
   'use strict';
 
-  const CLIENT_VERSION = '3.0.1';
+  const CLIENT_VERSION = '3.1.0';
   const MSG_NETWORK = 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ กรุณาตรวจสอบอินเทอร์เน็ต';
   const MSG_BAD_DEPLOYMENT = 'การตั้งค่า Web App ไม่ถูกต้อง (ต้องตั้งค่า Who has access เป็น Anyone)';
   const MSG_BAD_RESPONSE = 'เซิร์ฟเวอร์ตอบกลับผิดพลาดชั่วคราว';
   const MSG_GOOGLE_ERROR = 'เซิร์ฟเวอร์ Google ขัดข้องชั่วคราว';
   const MSG_NOT_CONFIGURED = 'ยังไม่ได้ตั้งค่า URL ของ Web App';
-  const READ_ACTIONS = ['ping', 'listUsers', 'me', 'getData', 'getAudit', 'getMyPassword', 'getAvatars'];
+  const READ_ACTIONS = ['ping', 'listUsers', 'me', 'getData', 'getAudit', 'getMyPassword', 'getAvatars', 'getPlan'];
   const SESSION_ERRORS = ['AUTH_REQUIRED', 'PASSWORD_CHANGE_REQUIRED'];
   const TRANSIENT = ['NETWORK', 'BAD_RESPONSE', 'GOOGLE_ERROR', 'BUSY'];
   const READ_POLICY = { timeoutMs: 40000, waits: [1500] };           // 2 attempts

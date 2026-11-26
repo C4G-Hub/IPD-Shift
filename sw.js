@@ -2,7 +2,7 @@
  * sw.js — service worker for "เวร IPD" (SPEC §7, R2 §3.5, R1a fix A-F1)
  *
  *  - Releases are atomic. The stylesheet and every local script of index.html carry the release in their URL
- *    (css/tailwind.css?v=3.0.0, js/app.js?v=3.0.0 …) and APP_SHELL lists exactly those URLs. As a safety net the
+ *    (css/tailwind.css?v=3.1.0, js/app.js?v=3.1.0 …) and APP_SHELL lists exactly those URLs. As a safety net the
  *    inline boot guard of index.html also recognises a stylesheet left from v2.2 and reloads once the new one answers.
  *    A release reaches a device only through a new sw.js: its install precaches the whole shell in one `addAll` (all
  *    files or nothing), it takes over at once (skipWaiting + clients.claim) and the page shows "มีเวอร์ชันใหม่ — แตะเพื่อ
@@ -25,8 +25,8 @@
  *    origin (all GitHub Pages sites of an account), so only this app's own "ipd-" caches (plus the v1 app's cache,
  *    by exact name) are ever deleted.
  * ===================================================================== */
-const VERSION = 'ipd-shift-v3.0.1';
-const RELEASE = VERSION.slice('ipd-shift-v'.length);   // '3.0.1'
+const VERSION = 'ipd-shift-v3.1.0';
+const RELEASE = VERSION.slice('ipd-shift-v'.length);   // '3.1.0'
 const V = '?v=' + RELEASE;                               // query of every versioned shell URL
 const SHELL = VERSION + '-shell';
 const RUNTIME = 'ipd-runtime-v4';      // v4: html2canvas is cached in CORS mode (v3 held an opaque copy)
@@ -42,9 +42,14 @@ const APP_SHELL = [
   './js/utils.js' + V,
   './js/api.js' + V,
   './js/ui-kit.js' + V,
+  './js/plan-engine.js' + V,       // R2: the scheduling engine (window.PlanEngine, pure functions)
   './js/app.js' + V,
+  './js/plan-data.js' + V,         // R2: the plan domain (getPlan, the only owner of plan data)
   './js/feat-profile.js' + V,      // R1b feature files (loaded after app.js, registered through App.register)
   './js/feat-approval.js' + V,
+  './js/feat-roster.js' + V,       // R2 feature files
+  './js/feat-plan-settings.js' + V,
+  './js/feat-backup.js' + V,
   './manifest.json',
   './icons/icon-192.png',          // the logo the UI shows (login, rail, เมนู, what's new)
   './icons/apple-touch-icon-180.png',

@@ -10,6 +10,9 @@
  *  announces 'avatar' or 'password' (core.serverHas). On a Code.gs older than 3.0 nothing is shown and nothing is sent.
  *
  * Screen (sections render only for what the server offers):
+ *  - R2 (I2): เบอร์โทรของฉัน ('plan'): a card whose content is painted on every render by core.use('plan.myPhone').render(el)
+ *    (js/feat-plan-settings.js: tel field + save → setProfiles {phone} of the logged-in user); hidden without the
+ *    service or the plan feature (a 3.0 server)
  *  - header card: large avatar (with a camera button when 'avatar'), name, group, role
  *  - รูปโปรไฟล์ ('avatar'): choose a picture (native file input: camera or library) → UiKit.image.decode (once; a working
  *    copy of at most 1600 px) → FRAMING step (3.0.1): a square stage (≤ 288 px) with a round outline and lightly dimmed
@@ -342,6 +345,7 @@
       `<p class="flex items-start gap-2 ${c.textCaption}">${icon('info', 'w-4 h-4 shrink-0')}<span class="min-w-0">${esc(MSG.smallPrint)}</span></p>` +
       `<p class="flex items-start gap-2 ${c.textCaption}" data-pf="viewsNote">${icon('eye', 'w-4 h-4 shrink-0')}<span class="min-w-0">${esc(MSG.viewsNote)}</span></p>` +
       `</section>` +
+      `<section data-pf="phone" class="${c.card} hidden" aria-label="เบอร์โทรของฉัน"><div data-pf="phoneBody"></div></section>` +
       `<section data-pf="team" class="${c.card} space-y-3 hidden" aria-labelledby="pfTeamTitle">` +
       sectionHead('users', c.listIconLilac, 'pfTeamTitle', 'รูปโปรไฟล์ของทีม', 'Supervisor ลบรูปที่ไม่เหมาะสมได้ (ตั้งรูปแทนคนอื่นไม่ได้)') +
       `<div data-pf="teamBody"></div>` +
@@ -472,6 +476,17 @@
     C.setVisible(ref.password, pwOn);
     C.setVisible(ref.team, av && C.isSup());
     if (av && C.isSup()) C.setHtml(ref.teamBody, teamHtml());
+    renderPhone();
+  }
+
+  /** R2: "เบอร์โทรของฉัน" — painted by the plan-settings feature's service while the server has 'plan'. */
+  function renderPhone() {
+    if (!ref.phone || !ref.phoneBody) return;
+    const svc = C.serverHas('plan') ? C.use('plan.myPhone') : null;
+    const on = !!svc && typeof svc.render === 'function';
+    C.setVisible(ref.phone, on);
+    if (!on) return;   // (the service paints its own content and empties it without the plan feature; logout rebuilds the screen)
+    try { svc.render(ref.phoneBody); } catch (e) { console.error('[profile] plan.myPhone failed:', e); C.setVisible(ref.phone, false); }
   }
 
   /* ------------------------------------------------------------------ own picture */

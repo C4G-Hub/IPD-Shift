@@ -31,12 +31,13 @@
    *    ipd_boot_retry with the inline guard: after 2 only the "โหลดใหม่" button remains. init() clears the counter.
    * APP_BUILD = sw.js VERSION = the ?v= of index.html's scripts = js/api.js CLIENT_VERSION (tests/sw.test.js).
    */
-  const APP_BUILD = '3.0.1';
+  const APP_BUILD = '3.1.0';
   const BOOT_RETRY_KEY = 'ipd_boot_retry';
   // R1b: also a page of another release (its inline guard names its own build, e.g. a v2.9 index.html served from the HTTP cache
   // whose ?v=2.9.0 URLs now answer with these files): its markup is not this release's — the guard of that page takes over
   const otherPage = !!(window.__ipdBoot && window.__ipdBoot.build && window.__ipdBoot.build !== APP_BUILD);
-  if (otherPage || !window.UiKit || !window.Utils || !window.Api || !document.getElementById('appShell') || !document.getElementById('navDock')) {
+  // R2: js/plan-engine.js (loaded before this file) is part of the release too — without it the plan screens cannot work
+  if (otherPage || !window.UiKit || !window.Utils || !window.Api || !window.PlanEngine || !document.getElementById('appShell') || !document.getElementById('navDock')) {
     try { bootRescue(); } catch (e) { /* never throw from the guard */ }
     return;
   }
@@ -155,6 +156,7 @@
     oldServer: 'เซิร์ฟเวอร์ (Code.gs) ยังเป็นเวอร์ชันเก่า กรุณาอัปเดตตามคู่มือ',
     updateCodeGs: 'ต้องอัปเดต Code.gs เป็นเวอร์ชันล่าสุดก่อน',
     serverV3: 'เซิร์ฟเวอร์ (Code.gs) ยังเป็นรุ่นก่อน 3.0 — อัปเดต Code.gs ตามคู่มือเพื่อเปิดใช้การลาหาหมอแบบระบุเวลา การอนุมัติลาพักร้อน และรูปโปรไฟล์',
+    serverV31: 'เซิร์ฟเวอร์ (Code.gs) ยังเป็นรุ่น 3.0 — อัปเดต Code.gs เป็น 3.1 ตามคู่มือเพื่อเปิดใช้ระบบจัดเวร',   // R2-SPEC §3.3
     leaveRequested: '📨 ส่งคำขอแล้ว — รอ Supervisor อนุมัติ',
     requestDeleted: '🗑️ ลบคำขอแล้ว',
     requestCancelled: '🗑️ ยกเลิกคำขอแล้ว',
@@ -209,6 +211,9 @@
   const CAPTURE_WIDTH = 420;
   const ERROR_TOAST_MS = 6000;         // an error toast stays at least this long (≥ 5 s, C-M6) unless tapped away
   const DIAG_ICON = { ok: '✅', warn: '⚠️', fail: '❌', skip: '➖', run: '⏳' };
+  /** R2: the fill order of the daily proposal when the server announced none (PlanEngine.DEFAULT_PRIORITY). */
+  const DEFAULT_PLAN_PRIORITY = Object.freeze(window.PlanEngine.DEFAULT_PRIORITY.slice());
+  const PLAN_SLOT_ORDERS = ['coverage', 'priority'];
 
   /* ------------------------------------------------------------------ */
   /* state (shape per SPEC §6.4) + transient UI bookkeeping             */
@@ -228,7 +233,9 @@
     // R1b: the server's `requests` (frozen LeaveV3[], sorted by date then recordedAt; rows of the last 30 days and later):
     // the Supervisor gets every pending row, anyone else their own pending and rejected rows. [] on an older server.
     requests: [],
-    rules: { vacationAutoSlots: null },   // R1b `rules` of the heartbeat (null = not announced, e.g. an older server)
+    // R1b `rules` of the heartbeat (null = not announced, e.g. an older server); R2: planPriority (the 7 station ids in fill
+    // order) and planSlotOrder ('coverage' | 'priority') — the defaults until a 3.1 server announces its Config (applyRules)
+    rules: defaultRules(),
     loaded: [],               // merged [{from, to}] ranges fetched from the server this session
     selectedDate: U.todayStr(),
     stationCounts: U.normalizeStationCounts(null),   // {[stationId]: people required} (supervisor setting)
@@ -296,7 +303,11 @@
     requestsSeq: 0,           // increments on every local change of state.requests (older getData answers keep away)
     leaveTime: null,          // the leave sheet's custom time range while typed: {start, end} ('' = empty field)
     leaveTimeError: '',       // the error line of the leave sheet's time step
-    leaveBusy: ''              // the leave sheet's action in flight: 'save' | 'rerequest' | 'delete' | 'approved' | 'rejected'
+    leaveBusy: '',             // the leave sheet's action in flight: 'save' | 'rerequest' | 'delete' | 'approved' | 'rejected'
+    // R2: dates whose daily proposal the Supervisor dismissed ("เริ่มจากช่องว่าง", memory only): {[date]: true}
+    proposalOff: {},
+    // R2: the duty sent as saveDay.duty with the next save of that date (core.station.setDutyPatch): {date, duty} | null
+    dutyPatch: null
   };
 
   let resolveReady;
@@ -571,12 +582,69 @@
   function storedRemark(date) { const d = state.days[date]; return d ? normRemark(d.remark) : ''; }
 
   function hasDraftFor(date) { return !!(state.draft && state.draft.date === date); }
-  /** What the station editor shows: the supervisor's draft (fitted to the current counts) if any, else the saved day. */
+  /**
+   * What the station editor shows: the supervisor's draft (fitted to the current counts) if any, else — R2 — the daily
+   * proposal while one is active for the date (a computed view, never stored: R2-SPEC §0.17, §4.2), else the saved day.
+   * Staff never reach the proposer.
+   */
   function viewSlots(date) {
-    if (!(isSup() && hasDraftFor(date))) return storedSlots(date);
+    if (isSup() && hasDraftFor(date)) {
+      const out = {};
+      U.STATIONS.forEach(st => { out[st.id] = fitSlots(state.draft.assignments[st.id] || [], slotCount(date, st.id)); });
+      return out;
+    }
+    const p = currentProposal(date);
+    return p ? slotsFrom(date, p.assignments) : storedSlots(date);
+  }
+
+  /**
+   * R2: the daily proposal of `date` while it is active, else null. Active = the Supervisor (not forced to change the
+   * password), a proposer is set, no draft of that date, not dismissed (ui.proposalOff), today or later, no saved names
+   * (!isPlannedDay) and the day's data is on this device (dayView ready/cached) — and the proposer answers with
+   * assignments. Working day and "the month has a roster" are the proposer's own conditions (it returns null).
+   */
+  function currentProposal(date) {
+    if (!proposer || !isSup() || ui.pwForced || !U.isValidYmd(date) || hasDraftFor(date) || ui.proposalOff[date]) return null;
+    if (date < U.todayStr() || isPlannedDay(date)) return null;
+    const view = dayView(date);
+    if (view !== 'ready' && view !== 'cached') return null;
+    let p = null;
+    try { p = proposer(date); } catch (e) { console.error('[core] the proposer failed:', e); return null; }
+    return p && typeof p === 'object' && p.assignments && typeof p.assignments === 'object' ? p : null;
+  }
+  function proposalActive(date) { return !!currentProposal(date); }
+
+  /**
+   * Slot arrays for `date` from proposed / applied assignments ({[stationId]: string[]}): only names the date may hold
+   * (assignableSet), each person once (first slot wins), fitted to the slot count (fitSlots).
+   */
+  function slotsFrom(date, assignments) {
+    const keep = assignableSet(date);
+    const used = new Set();
     const out = {};
-    U.STATIONS.forEach(st => { out[st.id] = fitSlots(state.draft.assignments[st.id] || [], slotCount(date, st.id)); });
+    U.STATIONS.forEach(st => {
+      const src = assignments && Array.isArray(assignments[st.id]) ? assignments[st.id] : [];
+      const list = src.map(n => {
+        if (typeof n !== 'string' || !n || !keep.has(n) || used.has(n)) return '';
+        used.add(n);
+        return n;
+      });
+      out[st.id] = fitSlots(list, slotCount(date, st.id));
+    });
     return out;
+  }
+
+  /** The station editor of `date` shows something unsaved: a dirty draft or (R2) an active proposal. */
+  function unsavedOn(date) { return isSup() && ((hasDraftFor(date) && isDraftDirty()) || proposalActive(date)); }
+
+  /**
+   * A draft that is no longer different from the saved day is dropped; when it was started from the proposal, the
+   * proposal does not come back by itself (the Supervisor took over the day: "แสดงข้อเสนอ" restores it).
+   */
+  function dropCleanDraft() {
+    if (!state.draft || isDraftDirty()) return;
+    if (state.draft.fromProposal) ui.proposalOff[state.draft.date] = true;
+    state.draft = null;
   }
   function viewRemark(date) { return (isSup() && hasDraftFor(date)) ? normRemark(state.draft.remark) : storedRemark(date); }
 
@@ -593,9 +661,16 @@
       normRemark(d.remark) !== storedRemark(d.date);
   }
 
+  /**
+   * The Supervisor's draft of `date`, created on the first edit. R2: it starts from what the editor shows (viewSlots — the
+   * proposal while one is active, so the first edit freezes the proposal into the draft); baseVersion / base stay those of
+   * the saved day. A proposal-seeded draft is dirty (isDraftDirty compares with the saved day); heartbeats never change it.
+   */
   function ensureDraft(date) {
     if (hasDraftFor(date)) return state.draft;
-    state.draft = { date, baseVersion: currentVersion(date), assignments: storedSlots(date), remark: storedRemark(date), base: draftSnapshot(date) };
+    const p = currentProposal(date);
+    state.draft = { date, baseVersion: currentVersion(date), assignments: p ? slotsFrom(date, p.assignments) : storedSlots(date),
+      remark: storedRemark(date), base: draftSnapshot(date), fromProposal: !!p };
     return state.draft;
   }
 
@@ -882,12 +957,14 @@
     state.audit = {};
     state.lastSync = null;
     state.requests = [];
-    state.rules = { vacationAutoSlots: null };
+    state.rules = defaultRules();
     ui.requestsSeq++;
     clearServerFeatures();   // the next answer announces them again (the server may have changed meanwhile)
     ui.leaveTime = null;
     ui.leaveTimeError = '';
     ui.leaveBusy = '';
+    ui.proposalOff = {};
+    ui.dutyPatch = null;
     ui.cacheLoaded = [];
     ui.cacheSavedAt = null;
     ui.touched = {};
@@ -1038,10 +1115,29 @@
     ui.serverMode = '';
   }
 
+  function defaultRules() {
+    return { vacationAutoSlots: null, planPriority: DEFAULT_PLAN_PRIORITY, planSlotOrder: 'coverage' };
+  }
+  /** A valid permutation of the 7 station ids (frozen), else the default order (R2-SPEC §4.2). */
+  function planPriorityOf(list) {
+    const ids = U.STATIONS.map(st => st.id);
+    const ok = Array.isArray(list) && list.length === ids.length && ids.every(id => list.indexOf(id) >= 0);
+    return ok ? Object.freeze(list.slice()) : DEFAULT_PLAN_PRIORITY;
+  }
+
+  /**
+   * The heartbeat's `rules` (and setPlanSettings' answer): each known field that is present and valid is taken, the
+   * others keep their value. → true when something changed.
+   */
   function applyRules(rules) {
+    const next = Object.assign({}, state.rules);
     const n = rules.vacationAutoSlots;
-    if (!Number.isInteger(n) || n < 0 || n === state.rules.vacationAutoSlots) return false;
-    state.rules = { vacationAutoSlots: n };
+    if (Number.isInteger(n) && n >= 0) next.vacationAutoSlots = n;
+    if (rules.planPriority !== undefined) next.planPriority = planPriorityOf(rules.planPriority);
+    if (rules.planSlotOrder !== undefined) next.planSlotOrder = PLAN_SLOT_ORDERS.indexOf(rules.planSlotOrder) >= 0 ? rules.planSlotOrder : 'coverage';
+    if (next.vacationAutoSlots === state.rules.vacationAutoSlots && next.planSlotOrder === state.rules.planSlotOrder &&
+      next.planPriority.join() === state.rules.planPriority.join()) return false;
+    state.rules = next;
     return true;
   }
 
@@ -2019,7 +2115,7 @@
   function renderSaveLook() {
     const btn = $('stationSaveBtn'), inner = $('saveBarInner');
     if (!btn || !inner) return;
-    const dirty = isSup() && hasDraftFor(state.selectedDate) && isDraftDirty();
+    const dirty = unsavedOn(state.selectedDate);   // R2: an active proposal is unsaved too
     const look = dirty ? 'dirty' : 'clean';
     if (btn.dataset.look === look) return;
     btn.dataset.look = look;
@@ -2101,9 +2197,12 @@
     // "เปลี่ยนรหัสผ่าน" stays in เมนู either way (the profile screen may offer it too, via core.openPasswordChange)
     const note = $('menuServerNote');
     if (note) {
-      const old = !!state.user && isSup() && ui.serverMode === 'old';
-      setHtml(note, old ? `${Kit.icon('alert-triangle', 'w-5 h-5 shrink-0 mt-0.5 text-amber-700')}<span class="min-w-0">${esc(MSG.serverV3)}</span>` : '');
-      setVisible(note, old);
+      const sup = !!state.user && isSup();
+      // R2-SPEC §3.3: a 3.0 server (features without 'plan') gets its own line: the plan screens stay hidden until 3.1
+      const msg = !sup ? '' : ui.serverMode === 'old' ? MSG.serverV3 : ui.serverMode === 'v3' && !serverHas('plan') ? MSG.serverV31 : '';
+      setHtml(note, msg ? `${Kit.icon('alert-triangle', 'w-5 h-5 shrink-0 mt-0.5 text-amber-700')}<span class="min-w-0">${esc(msg)}</span>` : '');
+      note.dataset.server = msg === MSG.serverV31 ? '3.0' : msg ? 'old' : '';
+      setVisible(note, !!msg);
     }
   }
 
@@ -2147,7 +2246,7 @@
     else if (view === 'missing') setHtml(container, missingHtml(date));
     else {
       const card = { sup: isSup(), locked: !canEditDay(date), onLeave: absentLeaves(date), rows: activeLeaves(date),
-        act: activeSet(), me: myName(), planned: isPlannedDay(date) };
+        act: activeSet(), me: myName(), planned: isPlannedDay(date), pairs: isSup() ? avoidPairsNow() : [], proposal: proposalActive(date) };
       const slots = viewSlots(date);
       setHtml(container, U.STATIONS.map(st => stationCardHtml(st, slots, card)).join(''));
     }
@@ -2173,10 +2272,14 @@
     if (!el) return;
     const date = state.selectedDate;
     const myDay = $('myDayCard');
-    const on = !!state.user && dayKnown(date) && !isPlannedDay(date) && !(myDay && myDay.dataset.myDay === 'unplanned');
+    const proposed = proposalActive(date);   // R2 FIX I-6: the slots already hold the proposal — say so, not "choose people"
+    const on = !!state.user && dayKnown(date) && !isPlannedDay(date) && (proposed || !(myDay && myDay.dataset.myDay === 'unplanned'));
     setVisible(el, on);
-    setHtml(el, on ? `${Kit.icon('clock', 'w-5 h-5 shrink-0 mt-0.5 text-amber-700')}<span class="min-w-0">${esc(withDay('ยังไม่ได้จัดเวรของ', date))}` +
-      ` — ${isSup() ? 'เลือกคนในแต่ละ Station แล้วกดบันทึก' : 'Supervisor ยังไม่ได้บันทึกตาราง'}</span>` : '');
+    el.dataset.proposal = proposed ? '1' : '';
+    setHtml(el, !on ? '' : proposed
+      ? `${Kit.icon('wand', 'w-5 h-5 shrink-0 mt-0.5 text-amber-700')}<span class="min-w-0">ระบบเสนอคนไว้แล้ว (ยังไม่ได้บันทึก) — ตรวจแล้วกดบันทึก</span>`
+      : `${Kit.icon('clock', 'w-5 h-5 shrink-0 mt-0.5 text-amber-700')}<span class="min-w-0">${esc(withDay('ยังไม่ได้จัดเวรของ', date))}` +
+        ` — ${isSup() ? 'เลือกคนในแต่ละ Station แล้วกดบันทึก' : 'Supervisor ยังไม่ได้บันทึกตาราง'}</span>`);
   }
 
   /** The station's tinted title chip (colours of Utils.STATIONS; the h3's first child is the name text node). */
@@ -2192,7 +2295,7 @@
    * or a pending request is shown as a tag but never blocks), act (active names), me}.
    */
   function stationCardHtml(st, slots, card) {
-    const { sup, locked, onLeave, rows, act, me, planned } = card;
+    const { sup, locked, onLeave, rows, act, me, planned, pairs, proposal } = card;
     const soft = n => {   // a non-blocking leave of n: {text (option / tag), tone 'partial'|'pending'} or null
       const info = rows && rows[n] ? U.leaveInfo(rows[n]) : null;
       if (!info || info.blocking) return null;
@@ -2241,9 +2344,9 @@
               `${Kit.icon(curSoft.tone === 'partial' ? 'stethoscope' : 'clock', 'w-3.5 h-3.5')}${esc(curSoft.long)}</p>`
             : '';
         return `<div class="${k.slotRow}">${lead}` +
-          `<select class="station-select ${k.select}" data-station="${st.id}" data-index="${i}" aria-label="${esc(st.name)} คนที่ ${i + 1}"${locked ? ' disabled' : ''}>` +
+          `<select class="station-select ${proposal && cur ? PROPOSED_SELECT : k.select}"${proposal && cur ? ' data-proposed="1"' : ''} data-station="${st.id}" data-index="${i}" aria-label="${esc(st.name)} คนที่ ${i + 1}${proposal && cur ? ' (ข้อเสนอ ยังไม่ได้บันทึก)' : ''}"${locked ? ' disabled' : ''}>` +
           `<option value=""${cur ? '' : ' selected'}>-- เลือกคนที่ ${i + 1} --</option>${gone}${opts}</select></div>${warn}`;
-      }).join('') + '</div>';
+      }).join('') + '</div>' + avoidPairLines(filled, pairs);
     } else {
       body = `<div class="station-names mt-2.5 flex flex-wrap gap-2" data-station="${st.id}">` +
         (filled.length
@@ -2262,6 +2365,27 @@
     return `<div class="station-card ${k.stationCard}" data-station-card="${st.id}">` +
       `<span class="${k.stationEdge}" style="background:${st.border}" aria-hidden="true"></span>${head}${body}</div>`;
   }
+
+  /**
+   * R2-SPEC §0.27 "ห้ามอยู่คู่กัน" (Supervisor only): the pairs of js/plan-data.js (getPlan gives them to the Supervisor only)
+   * while the server has the plan feature; [] otherwise or when the provider fails.
+   */
+  function avoidPairsNow() {
+    if (!serverHas('plan')) return [];
+    const plan = use('plan');
+    if (!plan || typeof plan.avoidPairs !== 'function') return [];
+    try { const list = plan.avoidPairs(); return Array.isArray(list) ? list : []; } catch (e) { console.error('[core] avoidPairs failed:', e); return []; }
+  }
+  /** A coral warning line per pair that sits in this station (draft, proposal or saved day) — a warning, never a block. */
+  function avoidPairLines(names, pairs) {
+    if (!pairs || !pairs.length || names.length < 2) return '';
+    return pairs.filter(p => Array.isArray(p) && names.indexOf(p[0]) >= 0 && names.indexOf(p[1]) >= 0).map(p =>
+      `<p class="flex items-center gap-1.5 mt-2 text-xs font-medium leading-4 text-coral-700" data-avoid-pair="1">${Kit.icon('alert-triangle', 'w-3.5 h-3.5 shrink-0')}` +
+      `<span class="min-w-0 break-words">ห้ามอยู่คู่กัน: ${esc(p[0])} · ${esc(p[1])}</span></p>`).join('');
+  }
+
+  /** R2 FIX I-6: a picker holding a proposed (unsaved) name — the select recipe with the draft tint of ตารางเวร. */
+  const PROPOSED_SELECT = Kit.cls.select.replace('border-ink-200', 'border-sun-300').replace('bg-white', 'bg-sun-50');
 
   /** "25 พ.ย." — day + month (no year), for card titles. */
   function shortDateText(date) {
@@ -2306,7 +2430,7 @@
       const row = activeLeaves(date)[me];
       const info = U.leaveInfo(row);
       const leave = info.blocking ? row : null;   // only an approved full-day leave makes me absent (Utils.isAbsent)
-      const draft = isSup() && hasDraftFor(date) && isDraftDirty();
+      const draft = unsavedOn(date);   // R2: an active proposal reads like a draft ("ยังไม่ได้บันทึก")
       const chips = mine.map(st => stationChipHtml(st)).join('');
       const mates = mine.length ? U.STATIONS.filter(st => mine.indexOf(st) >= 0)
         .reduce((all, st) => all.concat(slots[st.id].filter(n => n && n !== me)), []) : [];
@@ -2351,6 +2475,12 @@
           `ขอ${esc(info.type)}${ranked && ranked.rank ? ` (คนที่ ${ranked.rank})` : ''} · <span class="text-amber-800">รออนุมัติ</span>`,
           esc(MSG.pendingNote)) + '</div>';
       } else if (leave) myLeave = 'leave';
+      // R2: my Portable line / lunch duty / special mission of the day (feat-roster's 'plan.myDay'; stored duties only)
+      const planLines = myPlanLines(date, me);
+      if (planLines.length) {
+        body += `<div class="mt-3 space-y-3" data-my-plan="${planLines.length}">` +
+          planLines.map(l => line(l.icon, PLAN_TONE[l.tone] || k.listIconBrand, esc(l.main), l.sub ? esc(l.sub) : '') + telLinkHtml(l.tel)).join('') + '</div>';
+      }
       if (view === 'cached') body += `<p class="${k.textCaption} mt-2">ข้อมูลที่บันทึกไว้ในเครื่อง (ยังไม่ได้อัปเดต)</p>`;
       box.dataset.myStations = mine.map(st => st.id).join(',');
     }
@@ -2358,6 +2488,53 @@
     box.dataset.myDay = state1;
     box.dataset.myLeave = myLeave;   // R1b: '' | 'leave' (absent) | 'partial' | 'pending'
     setHtml(box, head + `<div class="mt-3 pt-3 border-t-2 border-brand-50">${body}</div>`);
+  }
+
+  /** R2: tones of the "ของฉันวันนี้" plan lines → the list-icon recipes (complete literals, UiKit.cls). */
+  const PLAN_TONE = {
+    brand: Kit.cls.listIconBrand, info: Kit.cls.listIconInfo, lilac: Kit.cls.listIconLilac,
+    sun: Kit.cls.listIconSun, danger: Kit.cls.listIconDanger, neutral: Kit.cls.listIconNeutral
+  };
+  const MY_PLAN_MAX = 8;
+  /**
+   * R2: the lines of use('plan.myDay')(date, name) → [{icon, tone, main, sub}] (plain text; escaped by the caller), only
+   * while the server has the plan feature. A failing or missing provider gives no lines (never breaks วันนี้).
+   */
+  function myPlanLines(date, name) {
+    if (!serverHas('plan')) return [];
+    const fn = use('plan.myDay');
+    if (typeof fn !== 'function') return [];
+    let list;
+    try { list = fn(date, name); } catch (e) { console.error('[core] plan.myDay failed:', e); return []; }
+    if (!Array.isArray(list)) return [];
+    return list.filter(l => l && typeof l === 'object' && typeof l.main === 'string' && l.main).slice(0, MY_PLAN_MAX).map(l => ({
+      icon: typeof l.icon === 'string' && l.icon ? l.icon : 'calendar-check',
+      tone: typeof l.tone === 'string' ? l.tone : 'brand',
+      main: l.main,
+      sub: typeof l.sub === 'string' ? l.sub : '',
+      tel: telOf(l.tel)
+    }));
+  }
+  /**
+   * R2 FIX I-7: a plan line's optional `tel` — a phone number with digits only after removing spaces, dashes, dots and
+   * brackets, optionally a leading "+", 9–15 digits → the digits ('' for anything else: never a link from bad data).
+   */
+  function telOf(v) {
+    if (typeof v !== 'string') return '';
+    const t = v.replace(/[\s\-().]/g, '');
+    return /^\+?\d{9,15}$/.test(t) ? t : '';
+  }
+  /** "0812345678" → "081-234-5678" (10-digit Thai mobile / 9-digit landline), anything else as it is. */
+  function phoneText(t) {
+    if (/^0\d{9}$/.test(t)) return t.slice(0, 3) + '-' + t.slice(3, 6) + '-' + t.slice(6);
+    if (/^0\d{8}$/.test(t)) return t.slice(0, 2) + '-' + t.slice(2, 5) + '-' + t.slice(5);
+    return t;
+  }
+  /** The 44 px tel: link under a plan line (indented under the text, past the icon). */
+  function telLinkHtml(t) {
+    if (!t) return '';
+    return `<div class="pl-12 mt-1"><a href="tel:${esc(t)}" class="${Kit.cls.btn} ${Kit.cls.btnTonal} whitespace-nowrap" data-my-plan-tel="${esc(t)}" ` +
+      `aria-label="${esc('โทร ' + phoneText(t))}">${Kit.icon('phone', 'w-4 h-4')}<span>${esc(phoneText(t))}</span></a></div>`;
   }
 
   /** Who is on leave on the selected date — shown to every role (not while the day is loading or unknown). */
@@ -2451,7 +2628,7 @@
   }
 
   function renderDraftBadge() {
-    setVisible($('draftBadge'), isSup() && hasDraftFor(state.selectedDate) && isDraftDirty());
+    setVisible($('draftBadge'), unsavedOn(state.selectedDate));   // R2: also while the proposal is shown (not saved yet)
     renderSaveLook();
   }
 
@@ -3274,7 +3451,8 @@
   function renderPreview() {
     const date = state.selectedDate;
     $('displayDate').textContent = 'ประจำ' + U.thaiDate(date);
-    const slots = state.user ? viewSlots(date) : storedSlots(date);
+    // R2: the shared picture never shows an unsaved proposal (only a draft the Supervisor made)
+    const slots = state.user && !proposalActive(date) ? viewSlots(date) : storedSlots(date);
     const act = activeSet();
     const planned = isPlannedDay(date);
     setHtml($('resultStations'), U.STATIONS.map(st => {
@@ -3350,6 +3528,7 @@
       state.draft = null;
     }
     state.selectedDate = date;
+    if (ui.dutyPatch && ui.dutyPatch.date !== date) ui.dutyPatch = null;   // R2: the patch belongs to the next save of its date
     ui.calMonth = U.monthKey(date);   // the leave calendar follows a date picked anywhere
     render();
     if (state.session) {
@@ -3387,7 +3566,7 @@
       });
     }
     draft.assignments[st.id][idx] = val;
-    if (!isDraftDirty()) state.draft = null;
+    dropCleanDraft();
     renderStationTab();
     renderPreview();
   }
@@ -3397,7 +3576,7 @@
     if (!canEditDay(date)) { renderRemark(); return; }
     const draft = ensureDraft(date);
     draft.remark = normRemark($('dailyRemark').value);
-    if (!isDraftDirty()) state.draft = null;
+    dropCleanDraft();
     renderDraftBadge();
     renderPreview();
   }
@@ -3434,13 +3613,33 @@
   /** saveDay with the CONFLICT dialog (SPEC §6.6). Returns the response or null when nothing was saved. */
   async function saveDayFlow(date, assignments, remark, baseVersion, okMsg) {
     const alive = sessionAlive();
+    // R2: a duty repair accepted in the proposal panel (core.station.setDutyPatch) goes with this save, in the same lock
+    const patch = ui.dutyPatch && ui.dutyPatch.date === date && serverHas('plan') ? ui.dutyPatch.duty : null;
+    const params = { date, assignments, remark, baseVersion };
+    if (patch) params.duty = patch;
     let res;
     try {
-      res = await userCall('saveDay', { date, assignments, remark, baseVersion });
+      res = await userCall('saveDay', params);
     } catch (e) {
       if (!alive()) return null;
       if (!e || e.code !== 'CONFLICT') throw e;
-      const serverDay = e.details && e.details.day ? e.details.day : null;
+      const details = e.details && typeof e.details === 'object' ? e.details : {};
+      const serverDay = details.day ? details.day : null;
+      if (patch) {
+        if (ui.dutyPatch && ui.dutyPatch.date === date) ui.dutyPatch = null;   // a CONFLICT drops the patch
+        if (Object.prototype.hasOwnProperty.call(details, 'duty') && (serverDay ? (parseInt(serverDay.version, 10) || 0) : 0) === (baseVersion | 0)) {
+          // the day is as this draft knows it — the DUTY was changed on another device: nothing was written; the draft
+          // stays, the plan data is refreshed and the Supervisor checks the repair again before saving
+          const plan = use('plan');
+          if (plan) {
+            try { if (details.duty && typeof details.duty === 'object') plan.adoptDuty(details.duty); } catch (e2) { console.error('[core] adoptDuty failed:', e2); }
+            if (typeof plan.refresh === 'function') spawn(() => plan.refresh(), { quiet: true });
+          }
+          render();
+          toast('ตารางเวรของวันนี้เพิ่งถูกแก้จากเครื่องอื่น — ตรวจแล้วกดบันทึกอีกครั้ง', 5000);
+          return null;
+        }
+      }
       // C-M3: in the app's own sheet the choice has Thai labels (overwrite = danger, focus starts on "load the latest");
       // window.confirm (native-dialog mode) keeps the old text with its OK / Cancel wording
       const overwrite = await confirmUser(nativeDialogs() ? MSG.conflict : conflictText(date), {
@@ -3465,11 +3664,19 @@
     if (!alive()) return null;
     adoptDay(date, res.day);
     if (hasDraftFor(date)) state.draft = null;
+    if (ui.dutyPatch && ui.dutyPatch.date === date) ui.dutyPatch = null;   // R2: saved (or not needed any more)
+    if (patch && res.duty && typeof res.duty === 'object') {
+      const plan = use('plan');
+      try { if (plan) plan.adoptDuty(res.duty); } catch (e) { console.error('[core] adoptDuty failed:', e); }
+    }
     delete state.audit[date];
     markTouched(date);
     persistCache();
     render();
-    const warnings = Array.isArray(res.warnings) ? res.warnings : [];
+    // a duty warning (R2: {kind, name, type}) is told in words like the day's own warnings (strings)
+    const warnings = (Array.isArray(res.warnings) ? res.warnings : []).map(w => (typeof w === 'string' ? w
+      : w && typeof w === 'object' && w.name ? w.name + ' มีวันลา' + (w.type ? ' (' + w.type + ')' : '') + (w.kind === 'mission' ? ' — ภารกิจพิเศษ' : w.kind === 'lunch' ? ' — เวรกลางวัน' : '') : ''))
+      .filter(Boolean);
     const head = res.unchanged && !warnings.length ? okMsg + ' (ไม่มีการเปลี่ยนแปลง)' : okMsg;
     toast(warnings.length ? head + '\n⚠️ ' + warnings.join('\n⚠️ ') : head, warnings.length ? 5000 : 2200);
     // warnings = the server knows leaves this device has not seen yet: fetch the date again
@@ -4140,7 +4347,8 @@
     if (!isSup()) { toast(MSG.supOnly); return; }
     const date = state.selectedDate;
     if (dayView(date) !== 'ready') { toast(msgNotLoaded(date)); return; }   // an unloaded day would copy as empty
-    state.clipboard = { fromDate: date, assignments: compactSlots(viewSlots(date)), remark: viewRemark(date) };
+    // R2 FIX I-3: an untouched proposal is not the Supervisor's choice — the saved day is copied (a draft is, as before)
+    state.clipboard = { fromDate: date, assignments: compactSlots(proposalActive(date) ? storedSlots(date) : viewSlots(date)), remark: viewRemark(date) };
     renderCopiedStatus();
     toast(`📋 คัดลอกข้อมูลของวันที่ ${U.thaiDateShort(date)} แล้ว`);
   }
@@ -4231,23 +4439,49 @@
   }
 
   /** The capture area as a JPEG file, or null (with a toast) when it cannot be drawn. */
-  async function captureImage(date) {
+  function captureImage(date) {
+    // the preview lives on the รายงาน screen; shared from วันนี้ (day tools) it is drawn from an off-screen stage
+    return captureNode($('captureArea'), `เวร-IPD-${date}.jpg`);
+  }
+
+  /**
+   * `node` drawn by html2canvas at CAPTURE_WIDTH (staged off-screen; a node that is not in the document is staged and
+   * removed again) → a File named `filename` (PNG when the name ends in .png, else JPEG), or null with a toast.
+   */
+  async function captureNode(node, filename) {
     let draw;
     try { draw = await loadHtml2canvas(); }
     catch (e) { toast(MSG.imageToolFailed, 4000); return null; }
-    // the preview lives on the รายงาน screen; shared from วันนี้ (day tools) it is drawn from an off-screen stage
-    const area = $('captureArea');
-    const restore = stageCaptureArea(area);
+    if (!node) { toast(MSG.imageFailed); return null; }
+    const png = /\.png$/i.test(filename);
+    const type = png ? 'image/png' : 'image/jpeg';
+    const restore = stageCaptureArea(node);
     const unfix = baselineFix();
     await new Promise(r => setTimeout(r, 0));   // let the staged width settle
     try {
-      const canvas = await draw(area, { scale: 3, backgroundColor: '#ffffff', useCORS: true });
-      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.95));
-      if (blob) return new File([blob], `เวร-IPD-${date}.jpg`, { type: 'image/jpeg' });
+      const canvas = await draw(node, { scale: 3, backgroundColor: '#ffffff', useCORS: true });
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, type, png ? undefined : 0.95));
+      if (blob) return new File([blob], filename, { type });
     } catch (e) { /* reported below */ }
     finally { restore(); unfix(); }
     toast(MSG.imageFailed);
     return null;
+  }
+
+  /**
+   * R2 core.shareImage(node, filename) → Promise<bool>: the capture logic of the day picture for any node (e.g. a month
+   * table built off-screen with inline styles, like #captureArea), saved with saveFile; true when it was saved.
+   * One image at a time (a second call while one is drawing resolves false).
+   */
+  async function shareImage(node, filename) {
+    if (imageBusy) return false;
+    let ok = false;
+    await oneImageAtATime(async () => {
+      const name = typeof filename === 'string' && filename ? filename : 'ตารางเวร.png';
+      const file = await captureNode(node, name);
+      if (file && await saveFile(file, file.name)) { toast('⬇️ บันทึกภาพเรียบร้อย'); ok = true; }
+    });
+    return ok;
   }
 
   /**
@@ -4270,7 +4504,15 @@
    */
   function stageCaptureArea(area) {
     if (!area) return () => {};
-    const parent = area.parentNode, next = area.nextSibling;
+    const parent = area.parentNode;
+    if (!parent) {   // R2: a node built for the picture only (core.shareImage): staged, then taken out again
+      const tmp = document.createElement('div');
+      tmp.setAttribute('aria-hidden', 'true');
+      tmp.style.cssText = 'position:fixed;left:-10000px;top:0;width:' + CAPTURE_WIDTH + 'px;pointer-events:none;';
+      document.body.appendChild(tmp);
+      tmp.appendChild(area);
+      return () => { if (area.parentNode === tmp) tmp.removeChild(area); tmp.remove(); };
+    }
     const h = area.getClientRects().length ? area.offsetHeight : 0;
     const hold = document.createElement('div');
     hold.setAttribute('aria-hidden', 'true');
@@ -4587,8 +4829,10 @@
   /* ------------------------------------------------------------------ */
   /*
    * DEVELOPER NOTE (R1a-B1, apiLevel 1) — the only surface feature files (js/feat-*.js, loaded after this file) use.
-   * Load order: config.js → utils.js → api.js → ui-kit.js → app.js → feat-*.js. A feature file registers at load
-   * time (before init) or later ("late registration" works the same way).
+   * Load order (R2-SPEC §4.1): config.js → utils.js → api.js → ui-kit.js → plan-engine.js → app.js → plan-data.js →
+   * feat-profile.js → feat-approval.js → feat-roster.js → feat-plan-settings.js → feat-backup.js. A feature file registers
+   * at load time (before init) or later ("late registration" works the same way). window.PlanEngine (pure engine) is
+   * loaded before this file; the boot guard requires it.
    *
    * App.register(def) → true, or false (rejected: invalid/duplicate id, or def.needs > core.apiLevel — then the
    * "มีเวอร์ชันใหม่" banner is shown). def fields (all optional except id):
@@ -4599,7 +4843,8 @@
    *   nav        { place: 'bar'|'menu'|'header'|'none' (default 'none'), section: 'mine'|'sup'|'system'|…, order }
    *              → <button class="nav-btn" data-tab="ID" data-nav-place="…"> in #bottomNav / #menuNav /
    *              #headerNav (none: reachable through core.go only). Lower order first (legacy 10–40, default 100).
-   *              The bar holds วันนี้ (10), การลา (20) and เมนู (90); keep the bar at 3–4 entries.
+   *              The bar holds วันนี้ (10), การลา (20), R2 ตารางเวร (25, only while the server has 'plan') and เมนู (90);
+   *              keep the bar at 3–4 entries.
    *              place 'menu' → a row in the เมนู screen, in the list of nav.section: 'mine' (ของฉัน), 'sup'
    *              (งานหัวหน้า: รายชื่อบุคลากร 30, รายงานและส่งออก 40), 'system' (ระบบ: your rows come before the fixed
    *              ones — connection check 900, what's new 910, version 920, logout 990); any other section → 'other'
@@ -4628,7 +4873,8 @@
    * App.core (frozen):
    *   apiLevel 1 · U (Utils) · Api · Kit (UiKit) · state (App.state — READ ONLY for features)
    *   isSup() · myName() · staff() (copy of the active staff [{name, group}]) · serverHas(name) (R1b: the `features` of
-   *     the last getData / ping answer: 'leave2', 'approval', 'avatar', 'password'; all false on a Code.gs older than 3.0)
+   *     the last getData / ping answer: 'leave2', 'approval', 'avatar', 'password', R2 'plan' (Code.gs 3.1); all false on
+   *     a Code.gs older than 3.0)
    *     · serverMode() → '' (not known yet) | 'v3' | 'old'
    *   spawn(fn, opts) (run + track + handleError) · track(promise) · alive() → () => bool (session still the same)
    *     — every async flow goes through these so App.idle() sees it
@@ -4645,11 +4891,20 @@
    *   ensureRange(from, to, opts) · dayView(date) → 'ready'|'cached'|'loading'|'missing' · leavesOn(date) ·
    *     leaveList(date) → [{name, type, rank}] of the ABSENT people · leaveLines(date) → {absent, partial, pending} lines
    *     [{name, type, rank, leave, info}] · isAbsent(leave) (= Utils.isAbsent) · saveFile(blob, filename) → Promise<bool>
+   *   R2 FIX I-8: messages.serverV31 — the one wording of the 3.0-server notice (เมนู note; use it for other screens too)
+   *   R2 (I2): openStationCounts() — the station-counts sheet (Supervisor) · refresh() → Promise<bool> — a heartbeat now
+   *     (getData of the selected date's window; never rejects; e.g. after a write whose new plan version must be learnt)
+   *   R2: shareImage(node, filename) → Promise<bool> — node drawn by html2canvas at 420 px (staged off-screen; a node not in
+   *     the document is staged and removed again; inline styles only, like #captureArea), PNG when filename ends in .png,
+   *     else JPEG; saved with saveFile (toast on success). applyRules(rules) → bool — e.g. setPlanSettings' answer
+   *     {planPriority, planSlotOrder} into state.rules (+ offline copy, render).
    *   R1b: applyLeaveResult({leave, day}, {date, staff}) → bool — applies a setLeave / decideLeave answer to the state
    *     (row, auto-unassigned day, draft, state.requests, render) · openLeave(date, staff) → Promise<bool> (selects the
    *     date, loads it, opens the leave sheet) · openPasswordChange() (the non-forced password sheet)
    *   state.requests (frozen LeaveV3[]: the Supervisor gets every pending row, anyone else their own pending + rejected,
-   *     last 30 days and later; on('data') fires with {requests: true} when it changes) · state.rules.vacationAutoSlots
+   *     last 30 days and later; on('data') fires with {requests: true} when it changes) · state.rules.vacationAutoSlots ·
+   *     R2 state.rules.planPriority (frozen permutation of the 7 station ids; default PlanEngine.DEFAULT_PRIORITY) ·
+   *     state.rules.planSlotOrder ('coverage' default | 'priority')
    *   domain(name, {persist, empty}) → a per-feature data slice (same object for the same name):
    *     .data .version .remote .loading .error (read-only getters)
    *     .begin() → ticket; .commit(ticket, version, fn(data) → newData|undefined) → bool — applies nothing (false)
@@ -4673,14 +4928,34 @@
    *   on(evt, fn(payload, c)) → unsubscribe; evt 'login' {name, restored} · 'logout' · 'role' {isSup} ·
    *     'date' {date} · 'data' {from, to, changed} | {date, local} | {domain} · 'visible' · 'online'
    *   provide(name, fn) · provide(name, null) withdraws it (only replacing a live provider warns) · use(name) → fn | null
+   *     (R2: fn may also be an object — js/plan-data.js provides 'plan', its API object; see the header of that file)
    *     (cross-feature services). 'leave.decide' (R1b): fn({date, staff, decision: 'approved'|'rejected', leave,
    *     onSending}, core) → Promise of the decideLeave answer {leave, day} (the leave sheet applies it and closes) or a
    *     falsy value (cancelled, or the request was decided / cancelled elsewhere and the provider showed the fresh state:
    *     the sheet stays); it asks for the optional reason, calls onSending() right before its request goes out (the sheet
    *     is only locked until then, "กำลังบันทึก…" from then on), sends decideLeave with expect = leave's status and shows
    *     the result toast itself; a rejection is shown by handleError. Without a provider the sheet has no buttons.
-   *   station.setProposer(fn(date) → {assignments, notes} | null) — stored only; the station editor uses it from
-   *     R2 on · station.addPanel({id, order, render(el, c)}) — extra card on วันนี้ (in #stationPanels)
+   *   station.setProposer(fn(date) → {assignments, notes, unfilled, lines} | null) — R2: the daily proposal (R2-SPEC §0.17,
+   *     §4.2). viewSlots(date) shows proposer(date).assignments (fitted to the slot counts, names the date may not hold
+   *     dropped) while the proposal is ACTIVE: the Supervisor, a proposer, no draft of the date, not dismissed, today or
+   *     later, no saved names, day data on this device (ready/cached), proposer answers non-null (it returns null without a
+   *     roster or on a non-working day, and must be cheap: memoise it). The first edit seeds the draft from it
+   *     (ensureDraft); the save bar and #draftBadge show it as unsaved; "บันทึก" saves it; leaving the date asks nothing;
+   *     the shared picture (#captureArea) shows the saved day. Staff never reach the proposer.
+   *     station.proposal(date?) → the active proposal | null · station.dismissProposal(date?, off = true) (memory only;
+   *     false shows it again) · station.applyToDraft(date, assignments) → bool (selected + editable date only; creates or
+   *     replaces the draft; dropped when equal to the saved day) · station.setDutyPatch(date, duty | null) — the duty sent
+   *     as saveDay.duty with the next save of that date (server 'plan' only; cleared on success, CONFLICT, date change,
+   *     logout; a duty CONFLICT keeps the draft, refreshes the plan and tells the Supervisor to check and save again; the
+   *     day-CONFLICT dialog's "บันทึกทับ" resends without it; the answer's duty goes to use('plan').adoptDuty) ·
+   *     station.dutyPatch(date?) → its copy | null · station.save() → Promise ("บันทึก") · station.view(date?) →
+   *     {slots, stored, planned, draft, proposal, editable, remark} (copies)
+   *     station.addPanel({id, order, render(el, c)}) — extra card on วันนี้ (in #stationPanels)
+   *   R2 services read by the core: 'plan' (js/plan-data.js) · 'plan.myDay' fn(date, name) → [{icon, tone: 'brand'|'info'|
+   *     'lilac'|'sun'|'danger'|'neutral', main, sub, tel?}] (plain text, max 8; FIX I-7: tel = a phone number, digits with
+   *     an optional leading + after removing spaces/dashes, 9–15 digits — drawn as a 44 px tel: link under the line,
+   *     anything else ignored) appended to "ของฉันวันนี้" while the server has
+   *     'plan'. #menuServerNote tells the Supervisor of a 3.0 server (features without 'plan') to update Code.gs to 3.1.
    *   banners.set(id, {text, tone: 'info'|'ok'|'warn'|'danger', icon, order, screens: [ids], actionLabel,
    *     action(c), dismissLabel, onDismiss(c)} | null) — shown in #bannerSlot above the screens; with dismissLabel AND
    *     onDismiss a ✕ (aria-label = dismissLabel, [data-banner-dismiss]) sits next to the action and calls onDismiss only
@@ -5055,7 +5330,8 @@
 
   /** provide(name, fn) registers a service; provide(name, null) withdraws it (no warning; only replacing one warns). */
   function provide(name, fn) {
-    if (typeof fn !== 'function') { delete services[name]; return; }
+    // R2: a service may also be an object (js/plan-data.js provides 'plan' = its API object)
+    if (typeof fn !== 'function' && !(fn && typeof fn === 'object')) { delete services[name]; return; }
     if (services[name] && services[name] !== fn) console.warn('core.provide: "' + name + '" replaced');
     services[name] = fn;
   }
@@ -5180,7 +5456,70 @@
   }
 
   const station = Object.freeze({
-    setProposer(fn) { proposer = typeof fn === 'function' ? fn : null; },
+    setProposer(fn) {
+      proposer = typeof fn === 'function' ? fn : null;
+      if (coreStarted) render();
+    },
+    /** R2: the active proposal of `date` (default: the selected date) — what the editor shows while untouched — or null. */
+    proposal(date) { return currentProposal(date === undefined ? state.selectedDate : String(date)); },
+    /** R2: off (default true) hides the proposal of `date` ("เริ่มจากช่องว่าง"); false shows it again. Memory only. */
+    dismissProposal(date, off) {
+      const d = String(date === undefined ? state.selectedDate : date);
+      if (!U.isValidYmd(d)) return false;
+      if (off === false) delete ui.proposalOff[d];
+      else ui.proposalOff[d] = true;
+      if (coreStarted) render();
+      return true;
+    },
+    /**
+     * R2: replaces the editor's content of `date` (the selected date, editable: canEditDay) with `assignments`
+     * ({[stationId]: string[]}, '' = empty slot; names the date may not hold are dropped). Creates the draft (based on the
+     * saved day) or replaces its slots; a result equal to the saved day drops the draft. → true, or false when refused.
+     */
+    applyToDraft(date, assignments) {
+      const d = String(date);
+      if (d !== state.selectedDate || !canEditDay(d) || !assignments || typeof assignments !== 'object') return false;
+      if (state.draft && state.draft.date !== d) return false;
+      const draft = ensureDraft(d);
+      draft.assignments = slotsFrom(d, assignments);
+      draft.fromProposal = true;   // the panel's content: a later clean draft does not bring the proposal back
+      dropCleanDraft();
+      render();
+      return true;
+    },
+    /**
+     * R2: `duty` ({lines, lunch, mission, missionNext, note?, baseVersion}) is sent as saveDay.duty with the next save of
+     * `date` (only while the server has 'plan'); null withdraws it. Cleared after that save, on a CONFLICT, when another
+     * date is selected and at logout. → true, or false for an invalid date.
+     */
+    setDutyPatch(date, duty) {
+      const d = String(date);
+      if (!U.isValidYmd(d)) return false;
+      if (duty && typeof duty === 'object') ui.dutyPatch = { date: d, duty: cloneJson(duty) };
+      else if (ui.dutyPatch && ui.dutyPatch.date === d) ui.dutyPatch = null;
+      return true;
+    },
+    /** R2: the duty patch waiting for the next save of `date` (a copy), or null. */
+    dutyPatch(date) {
+      const d = String(date === undefined ? state.selectedDate : date);
+      return ui.dutyPatch && ui.dutyPatch.date === d ? cloneJson(ui.dutyPatch.duty) : null;
+    },
+    /** R2: "บันทึก" of the station editor (the save bar's button): saves what the editor shows. → Promise (never rejects). */
+    save() { return spawn(onSaveStation, WRITE); },
+    /**
+     * R2: what the station editor of `date` holds (copies): {slots (viewSlots: draft / proposal / saved day, '' = empty
+     * slot), stored (the saved day as slots), planned (a saved name exists), draft (a dirty draft of the date),
+     * proposal (the proposal is what it shows), editable (canEditDay), remark (as shown)}.
+     */
+    view(date) {
+      const d = String(date === undefined ? state.selectedDate : date);
+      if (!U.isValidYmd(d)) return null;
+      return Object.freeze({
+        slots: cloneJson(viewSlots(d)), stored: cloneJson(storedSlots(d)), planned: isPlannedDay(d),
+        draft: isSup() && hasDraftFor(d) && isDraftDirty(), proposal: proposalActive(d), editable: canEditDay(d),
+        remark: viewRemark(d)
+      });
+    },
     addPanel(def) {
       if (!def || !FEATURE_ID.test(String(def.id || '')) || typeof def.render !== 'function') {
         console.warn('core.station.addPanel: needs {id, render}');
@@ -5592,16 +5931,18 @@
    * "มีอะไรใหม่" — edit this one structure for every release. Shown from เมนู at any time, and once per version after
    * an update (never on a first-ever login on a device) unless APP_CONFIG.WHATS_NEW === false.
    */
+  // R2-SPEC §4.7 + decisions 26–28 (final wording, I2)
   const WHATS_NEW = Object.freeze({
-    version: '3.0.0',
+    version: '3.1.0',
     title: 'มีอะไรใหม่',
-    subtitle: 'เวอร์ชัน 3.0 — ส่วนบุคคล',
+    subtitle: 'เวอร์ชัน 3.1 — ระบบจัดเวร',
     items: Object.freeze([
-      { icon: 'stethoscope', title: 'ลาหาหมอแบบระบุเวลา', text: 'เลือก "ลาหาหมอตอนเช้า" หรือ "ลาหาหมอตอนบ่าย" แล้วเลือกช่วงเวลา (หรือกำหนดเอง ระหว่าง 08:00–16:00 น.) — คนที่ลาหาหมอยังจัดเข้า Station ได้ตามปกติ' },
-      { icon: 'clock', title: 'ลาพักร้อนเกินจำนวนต้องรออนุมัติ', text: 'ถ้าวันนั้นมีผู้ลาพักร้อนครบจำนวนแล้ว คำขอใหม่จะส่งให้ Supervisor อนุมัติก่อน ระหว่างรอยังไม่นับเป็นวันลา' },
-      { icon: 'inbox', title: 'คำขอของฉัน', text: 'หน้าการลารวมคำขอที่รออนุมัติหรือไม่อนุมัติ แตะเพื่อดูผลและเหตุผล ส่งคำขอใหม่ หรือลบคำขอ' },
-      { icon: 'check-circle', title: 'อนุมัติการลา (Supervisor)', text: 'เมื่อมีคำขอรออนุมัติจะมีข้อความแจ้งที่หน้าวันนี้และการลา — อนุมัติหรือไม่อนุมัติ (พร้อมเหตุผล) ได้จากแผ่นบันทึกการลา หรือที่ เมนู → งานหัวหน้า → อนุมัติการลา' },
-      { icon: 'user', title: 'โปรไฟล์ของฉัน', text: 'แตะชื่อของคุณด้านบนของเมนูเพื่อเปิดโปรไฟล์ — ใส่รูปโปรไฟล์ (ทุกคนในทีมจะเห็นข้างชื่อของคุณ) และดูหรือเปลี่ยนรหัสผ่านของตัวเอง (การกดดูรหัสผ่านถูกบันทึกไว้ และดูได้ไม่เกิน 5 ครั้งต่อชั่วโมง)' }
+      { icon: 'table', title: 'ตารางเวร', text: 'แถบล่างมีปุ่มใหม่: ดูสาย Portable เวรกลางวัน ER/IPD และภารกิจพิเศษทั้งเดือน พร้อมเบอร์โทร (แตะเบอร์เพื่อโทร)' },
+      { icon: 'calendar-check', title: 'ของฉันวันนี้', text: 'บอกสาย Portable เวรกลางวัน และภารกิจพิเศษของคุณในวันนั้นด้วย' },
+      { icon: 'phone', title: 'เบอร์โทรของฉัน', text: 'ใส่เบอร์ของตัวเองได้ที่ เมนู → แตะชื่อของคุณ (โปรไฟล์) — ทุกคนในทีมเห็นเบอร์นี้ในตารางภารกิจพิเศษ' },
+      { icon: 'users', title: 'ทีมแทนเวรวันนี้', text: 'หน้าวันนี้บอกว่าใครมาช่วยหน่วยเรา — Supervisor วางข้อความจาก LINE ระบบอ่านชื่อให้ตรวจก่อนบันทึก' },
+      { icon: 'wand', title: 'ข้อเสนอจัดคนรายวัน (Supervisor)', text: 'วันที่ยังไม่ได้จัด ระบบเสนอคนลง Station พร้อมเหตุผล ตรวจแก้แล้วกดบันทึก' },
+      { icon: 'sliders', title: 'ตั้งค่าการจัดเวร (Supervisor)', text: 'เมนู → งานหัวหน้า: Station ที่แต่ละคนอยู่ได้ (เลือก Station เดียว = ประจำ) ผู้ช่วย วันหยุด ภารกิจพิเศษและเบอร์ ชื่อเรียกอื่น ลำดับการเติมคน และคนที่ห้ามอยู่ Station เดียวกัน' }
     ])
   });
   const WHATS_NEW_SEEN = 'whatsNewSeen';   // core.store.prefs key: the version whose notes were shown on this device
@@ -5707,6 +6048,20 @@
     selectedDate: () => state.selectedDate,
     setSelectedDate: date => track(setSelectedDate(date)),
     ensureRange, dayView, leavesOn, leaveList, leaveLines, isAbsent: U.isAbsent, saveFile,
+    shareImage: (node, filename) => track(shareImage(node, filename)),
+    // R2 (I2): the station-counts sheet (Supervisor; the same routine as วันนี้'s button) and a heartbeat now (the window of
+    // the selected date is read again: versions → domains such as 'plan' refetch) → Promise<bool>, never rejects
+    // R2 FIX I-8: the one wording of the 3.0-server notice (เมนู's note; the settings empty state uses the same text)
+    messages: Object.freeze({ serverV31: MSG.serverV31 }),
+    openStationCounts: () => openStationCountsModal(),
+    refresh: () => refresh({ silent: true }),
+    // R2: setPlanSettings' answer ({planPriority, planSlotOrder}) → state.rules (and the offline copy); → changed?
+    applyRules: rules => {
+      if (!rules || typeof rules !== 'object' || !applyRules(rules)) return false;
+      persistCache();
+      render();
+      return true;
+    },
     applyLeaveResult: (res, at) => applyLeaveWrite(res, at), openLeave: (date, staff) => track(openLeaveFor(date, staff)),
     openPasswordChange,
     domain, store, media: mediaApi,
