@@ -31,7 +31,7 @@
    *    ipd_boot_retry with the inline guard: after 2 only the "โหลดใหม่" button remains. init() clears the counter.
    * APP_BUILD = sw.js VERSION = the ?v= of index.html's scripts = js/api.js CLIENT_VERSION (tests/sw.test.js).
    */
-  const APP_BUILD = '3.1.0';
+  const APP_BUILD = '3.1.1';
   const BOOT_RETRY_KEY = 'ipd_boot_retry';
   // R1b: also a page of another release (its inline guard names its own build, e.g. a v2.9 index.html served from the HTTP cache
   // whose ?v=2.9.0 URLs now answer with these files): its markup is not this release's — the guard of that page takes over
@@ -3444,8 +3444,9 @@
 
   /**
    * The capture area (#captureArea, the picture staff post in LINE) for the selected date — reflects the draft if present.
-   * Inline styles only (html2canvas); colours are the theme tokens. Each station row: label (the pastel station chip +
-   * "(ขาด N)") | the names. Text stays at least 12 px with AA contrast (Minor 2).
+   * Inline styles only (html2canvas); colours are the theme tokens. Each station row: label (the pastel station chip;
+   * no "(ขาด N)" since 3.1.1 — the owner's call: the shortage is shown in the app, not in the posted picture) | the names.
+   * Text stays at least 12 px with AA contrast (Minor 2).
    */
   const IMG_FONT = "font-family:'Mitr','Sarabun','Noto Sans Thai','Leelawadee UI','Thonburi',sans-serif;";
   function renderPreview() {
@@ -3454,18 +3455,13 @@
     // R2: the shared picture never shows an unsaved proposal (only a draft the Supervisor made)
     const slots = state.user && !proposalActive(date) ? viewSlots(date) : storedSlots(date);
     const act = activeSet();
-    const planned = isPlannedDay(date);
     setHtml($('resultStations'), U.STATIONS.map(st => {
       const arr = (slots[st.id] || []).filter(Boolean);
-      const need = required(st.id);
-      const warn = arr.length < need
-        ? ` <span style="display:inline-block; padding:0 8px; border-radius:999px; font-size:12px; font-weight:600; line-height:20px; white-space:nowrap; ` +
-          `${planned ? 'background:#FFF1F2; color:#B32A45; border:1px solid #FFC2C6;' : 'background:#F1F4FB; color:#2A3F86; border:1px solid #E3E8F6;'}">(ขาด ${need - arr.length})</span>`
-        : '';
-      // label | names on one line at the exported width; in a narrow preview the names wrap under the label
+      // label | names on one line at the exported width; in a narrow preview the names wrap under the label.
+      // 3.1.1 (owner, style C): every station chip fills the label column, so all chips have the same length, name centred
       return `<div style="display:flex; flex-wrap:wrap; align-items:flex-start; gap:4px 10px; padding:8px 10px; border-radius:16px; background:#FFFFFF; border:1.5px solid #FFE3EF;">` +
         `<div style="flex:0 0 auto; width:38%; min-width:134px; max-width:142px; display:flex; flex-wrap:wrap; align-items:center; gap:4px; padding-top:1px;">` +
-          `<span style="display:inline-block; max-width:100%; padding:2px 10px; border-radius:12px; background:${st.bg}; color:${st.text}; ${IMG_FONT} font-size:13px; font-weight:500; line-height:20px;">${esc(st.name).replace('/', '/<wbr>')}</span>${warn}</div>` +
+          `<span style="display:block; width:100%; box-sizing:border-box; text-align:center; padding:2px 10px; border-radius:12px; background:${st.bg}; color:${st.text}; ${IMG_FONT} font-size:13px; font-weight:500; line-height:20px;">${esc(st.name).replace('/', '/<wbr>')}</span></div>` +
         `<div style="flex:1 1 150px; min-width:0; display:flex; flex-wrap:wrap; gap:2px 12px; padding-top:1px;">` +
         (arr.length ? arr.map(a => `<span style="font-size:15px; font-weight:600; line-height:22px; color:#1A2C63;">${esc(nameLabel(a, act))}</span>`).join(' ')
           : '<span style="font-size:13px; line-height:22px; color:#64748b;">ยังไม่ได้จัดสรร</span>') +
@@ -3476,15 +3472,14 @@
     // is posted outside the app — a neutral "ลาบางช่วง", never the health-related type; pending requests are not leave days
     // and are not listed at all)
     const lines = leaveLines(date);
-    // wrapping: in a narrow preview a long pill moves under the name instead of squeezing it (the exported 420 px fits one line)
-    const imgLine = (l, dot, look, text, kind) => `<div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:2px 10px;"${kind ? ` data-img-leave="${kind}"` : ''}>` +
-      `<span style="min-width:0; font-weight:600; overflow-wrap:normal; word-break:keep-all;"><span style="color:${dot};">• </span>${esc(l.name)}</span>` +
-      `<span style="flex:none; padding:0 10px; border-radius:999px; ${look} font-size:13px; font-weight:600; line-height:22px; white-space:nowrap; margin-left:auto;">${esc(text)}</span></div>`;
+    // one table row per person (owner, 3.1.1): the status stands right after the names, in one aligned column, as plain
+    // coloured text (no pill); #resultLeaves is display:table. In a narrow preview the status wraps inside its cell.
+    const imgLine = (l, color, text, kind) => `<div style="display:table-row;"${kind ? ` data-img-leave="${kind}"` : ''}>` +
+      `<span style="display:table-cell; vertical-align:top; padding:2px 16px 2px 0; font-weight:600; white-space:nowrap;"><span style="color:${color};">• </span>${esc(l.name)}</span>` +
+      `<span style="display:table-cell; vertical-align:top; padding:2px 0; font-weight:600; color:${color};">${esc(text)}</span></div>`;
     setHtml($('resultLeaves'), lines.absent.length + lines.partial.length
-      ? lines.absent.map(l => imgLine(l, '#B32A45', 'background:#FFFFFF; border:1px solid #FFC2C6; color:#B32A45;',
-        l.type + (l.rank ? ` (คนที่ ${l.rank})` : ''), '')).join('') +
-        lines.partial.map(l => imgLine(l, '#116C99', 'background:#F0FAFF; border:1px solid #BCE8FB; color:#116C99;',
-          'ลาบางช่วง' + (l.info.timeText ? ' ' + l.info.timeText : ''), 'partial')).join('')
+      ? lines.absent.map(l => imgLine(l, '#B32A45', l.type + (l.rank ? ` (คนที่ ${l.rank})` : ''), '')).join('') +
+        lines.partial.map(l => imgLine(l, '#116C99', 'ลาบางช่วง' + (l.info.timeText ? ' ' + l.info.timeText : ''), 'partial')).join('')
       : `<span style="color:#475569;">${esc(withDay('ไม่มีรายการลา', date))}</span>`);
 
     const rv = (state.user ? viewRemark(date) : '').trim();
@@ -6267,9 +6262,6 @@
     ui.usedBefore = !!(lsGet(LS.session) || lsGet(LS.cache));   // the app was used on this device before this start
     applyKit();
     watchWebFonts();
-    // the picture's logo as an absolute URL: html2canvas loads background images itself and must find the file
-    const logo = $('captureLogo');
-    if (logo) { try { logo.style.backgroundImage = 'url("' + new URL('icons/icon-192.png', document.baseURI).href + '")'; } catch (e) { /* keep the relative one */ } }
     ui.summaryPlaceholder = $('leaveSummaryContent').innerHTML;
     registerModals();
     bindEvents();
