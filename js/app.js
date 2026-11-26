@@ -31,7 +31,7 @@
    *    ipd_boot_retry with the inline guard: after 2 only the "โหลดใหม่" button remains. init() clears the counter.
    * APP_BUILD = sw.js VERSION = the ?v= of index.html's scripts = js/api.js CLIENT_VERSION (tests/sw.test.js).
    */
-  const APP_BUILD = '2.9.0';
+  const APP_BUILD = '2.9.1';
   const BOOT_RETRY_KEY = 'ipd_boot_retry';
   if (!window.UiKit || !window.Utils || !window.Api || !document.getElementById('appShell') || !document.getElementById('navDock')) {
     try { bootRescue(); } catch (e) { /* never throw from the guard */ }
@@ -4515,6 +4515,9 @@
   /**
    * "มีอะไรใหม่" — edit this one structure for every release. Shown from เมนู at any time, and once per version after
    * an update (never on a first-ever login on a device) unless APP_CONFIG.WHATS_NEW === false.
+   * `version` is the version of THESE NOTES, not APP_BUILD: the device remembers it (prefs 'whatsNewSeen') and the sheet
+   * opens again only when it changes. A patch release without new notes (2.9.1) keeps it, so nobody sees the same notes
+   * twice; give it the new number only together with new items.
    */
   const WHATS_NEW = Object.freeze({
     version: '2.9.0',
