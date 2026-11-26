@@ -19,8 +19,19 @@
     { id: 'cancer',     name: 'CANCER CENTER',        count: 1, bg: '#FFE8DA', border: '#FF9A5C', text: '#93400F' },
     { id: 'supervisor', name: 'Prereview/Supervisor', count: 1, bg: '#E5EAF8', border: '#7186C4', text: '#2A3F86' }
   ].map(Object.freeze));
-  const LEAVE_TYPES = Object.freeze(['พักร้อน', 'Off เวร', 'Off In charge', 'ลาป่วย', 'ลากิจ', 'ลาประชุม']);
+  /** R1b: the two partial-day (doctor-visit) types are appended at the END, so the order of the others never changes. */
+  const LEAVE_TYPES = Object.freeze(['พักร้อน', 'Off เวร', 'Off In charge', 'ลาป่วย', 'ลากิจ', 'ลาประชุม', 'ลาหาหมอตอนเช้า', 'ลาหาหมอตอนบ่าย']);
+  const PARTIAL_LEAVE_TYPES = Object.freeze(['ลาหาหมอตอนเช้า', 'ลาหาหมอตอนบ่าย']);
   const QUEUE_TYPES = Object.freeze(['พักร้อน', 'Off เวร']);
+  const LEAVE_STATUSES = Object.freeze(['approved', 'pending', 'rejected']);
+  /** Time ranges offered as one-tap chips in the leave sheet (the custom range takes any HH:MM-HH:MM). */
+  const PARTIAL_TIME_PRESETS = Object.freeze({
+    'ลาหาหมอตอนเช้า': Object.freeze(['08:00-10:00', '08:00-12:00', '09:00-11:00', '10:00-12:00']),
+    'ลาหาหมอตอนบ่าย': Object.freeze(['13:00-15:00', '13:00-16:00', '14:00-16:00'])
+  });
+  /** Same pattern as the server's requireLeaveDetail_ (after removing spaces). */
+  const TIME_RANGE_RE = /^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$/;
+  const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
   const STATION_COUNT_MIN = 1;
   const STATION_COUNT_MAX = 10;
 
@@ -232,6 +243,8 @@
 
   /* ---------- validation (same rules as the backend) ---------- */
   const NAME_FORBIDDEN = /[,<>"'\\|;\n\r\t]/;
+  /** The names Code.gs 3.0 keeps for selfTest's temporary accounts (SELFTEST_NAME_PATTERN_): "ทดสอบระบบ 3", "ทดสอบระบบ-2 1". */
+  const RESERVED_TEST_NAME = /^ทดสอบระบบ(?:-\d+)? \d+$/;
 
   /** trim + collapse internal whitespace runs to a single space. */
   function normalizeName(s) {
@@ -252,6 +265,7 @@
     if (n.length > 40) return 'ชื่อยาวได้ไม่เกิน 40 ตัวอักษร';
     if (/^[=+\-@]/.test(n)) return 'ชื่อห้ามขึ้นต้นด้วย = + - หรือ @';
     if (n.indexOf('__') === 0 || n in Object.prototype) return 'ชื่อนี้เป็นคำสงวนของระบบ กรุณาใช้ชื่ออื่น';
+    if (RESERVED_TEST_NAME.test(n)) return 'ชื่อนี้เป็นคำสงวนของระบบ กรุณาใช้ชื่ออื่น';   // Code.gs 3.0: selfTest's accounts
     return null;
   }
 
@@ -263,13 +277,120 @@
     return null;
   }
 
+  /* ---------- leave model (R1b) — the ONE rule for "absent", shared with Code.gs and the engine ---------- */
+  /**
+   * 'pending' | 'rejected' when the row says so (trimmed, any case); 'approved' for anything else, including a legacy
+   * row without a status (the server's leaveStatusOf_). '' when there is no leave (null or no type).
+   */
+  function leaveStatus(leave) {
+    if (!leave || typeof leave !== 'object' || !leave.type) return '';
+    const s = String(leave.status == null ? '' : leave.status).trim().toLowerCase();
+    return s === 'pending' || s === 'rejected' ? s : 'approved';
+  }
+
+  function isPartialType(type) { return PARTIAL_LEAVE_TYPES.indexOf(type) >= 0; }
+
+  /** 'partial' for the doctor-visit types, 'full' for any other non-empty type (an unknown type fails safe), '' else. */
+  function leaveKind(type) {
+    if (typeof type !== 'string' || !type) return '';
+    return isPartialType(type) ? 'partial' : 'full';
+  }
+
+  /**
+   * THE predicate for "this person is absent (cannot be assigned)": status approved AND a full-day type — exactly the
+   * server's isBlockingLeave_ and the engine's rule. Pending, rejected and partial-day leaves never make anyone absent.
+   */
+  function isAbsent(leave) {
+    return leaveStatus(leave) === 'approved' && leaveKind(leave.type) === 'full';
+  }
+
+  /** "HH:MM-HH:MM" (spaces ignored) → {start, end, value} when valid and start < end, else null (the server's rule). */
+  function parseTimeRange(s) {
+    if (typeof s !== 'string') return null;
+    const m = TIME_RANGE_RE.exec(s.replace(/\s+/g, ''));
+    if (!m || m[1] + m[2] >= m[3] + m[4]) return null;
+    return { start: m[1] + ':' + m[2], end: m[3] + ':' + m[4], value: m[1] + ':' + m[2] + '-' + m[3] + ':' + m[4] };
+  }
+
+  /** R1b FIX-CL CL-21: the working-day window of a doctor visit, and the morning / afternoon split. */
+  /**
+   * R1b FIX-CL (architect's ruling after the second review, replaces the first CL-21 rule): the working-day window of a
+   * doctor visit, the morning / afternoon split by the START time, and the longest visit (minutes).
+   */
+  const PARTIAL_WINDOW = Object.freeze({ from: '06:00', to: '20:00', noon: '12:00', maxMinutes: 360 });
+  function minutesOf_(hhmm) { return Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5)); }
+
+  /**
+   * The custom range of the leave sheet: Thai error message, or null when start (HH:MM) is before end (HH:MM).
+   * type (a doctor-visit type, optional): both times within 06:00–20:00; at most 6 hours (longer → record a full-day leave);
+   * ลาหาหมอตอนเช้า STARTS before 12:00 (it may end after noon, e.g. 11:30–13:30), ลาหาหมอตอนบ่าย starts at 12:00 or later.
+   * The checks run in that order, so a message that names the other type only does so when that type accepts the range
+   * (the user is never sent back and forth). Every preset complies. Client-side rule (the server takes any valid range).
+   */
+  function validateTimeRange(start, end, type) {
+    const a = String(start == null ? '' : start).trim(), b = String(end == null ? '' : end).trim();
+    if (!a || !b) return 'กรุณาเลือกเวลาเริ่มและเวลาสิ้นสุด';
+    if (!TIME_RE.test(a) || !TIME_RE.test(b)) return 'รูปแบบเวลาไม่ถูกต้อง (เช่น 09:00)';
+    if (a >= b) return 'เวลาเริ่มต้องก่อนเวลาสิ้นสุด';
+    if (!isPartialType(type)) return null;
+    const w = PARTIAL_WINDOW;
+    if (a < w.from || b > w.to) return 'เลือกเวลาได้ระหว่าง ' + w.from + '–' + w.to + ' น.';
+    if (minutesOf_(b) - minutesOf_(a) > w.maxMinutes) {
+      return 'ลาหาหมอได้ไม่เกิน ' + (w.maxMinutes / 60) + ' ชั่วโมง — ถ้าลานานกว่านั้น บันทึกเป็นการลาทั้งวันแทน';
+    }
+    if (type === 'ลาหาหมอตอนเช้า' && a >= w.noon) {
+      return 'ลาหาหมอตอนเช้าต้องเริ่มก่อน ' + w.noon + ' น. — เวลาที่เลือกเริ่มช่วงบ่าย ให้เลือก "หาหมอ (บ่าย)"';
+    }
+    if (type === 'ลาหาหมอตอนบ่าย' && a < w.noon) {
+      return 'ลาหาหมอตอนบ่ายต้องเริ่มตั้งแต่ ' + w.noon + ' น. — เวลาที่เลือกเริ่มช่วงเช้า ให้เลือก "หาหมอ (เช้า)"';
+    }
+    return null;
+  }
+
+  /** start + end → the `detail` value "HH:MM-HH:MM" ('' when the range is not valid). */
+  function joinTimeRange(start, end) {
+    const r = parseTimeRange(String(start == null ? '' : start) + '-' + String(end == null ? '' : end));
+    return r ? r.value : '';
+  }
+
+  /** "09:00-11:00" → "09:00–11:00 น." (opts.unit === false → "09:00–11:00"); '' when not a valid range. */
+  function formatTimeRange(detail, opts) {
+    const r = parseTimeRange(detail);
+    if (!r) return '';
+    return r.start + '–' + r.end + (opts && opts.unit === false ? '' : ' น.');
+  }
+
+  /**
+   * Everything the UI needs to know about one leave row: {type, kind 'full'|'partial'|'', status, blocking (= isAbsent),
+   * partial (approved partial-day), pending, rejected, start, end, timeLabel "09:00–11:00", timeText "09:00–11:00 น.",
+   * label (short: the type, or "หาหมอ 09:00–11:00" for a doctor visit)}. Null-safe (no leave → kind/status '').
+   */
+  function leaveInfo(leave) {
+    const type = leave && typeof leave === 'object' && typeof leave.type === 'string' ? leave.type : '';
+    const status = leaveStatus(leave);
+    const kind = leaveKind(type);
+    const r = kind === 'partial' ? parseTimeRange(leave.detail) : null;
+    const timeLabel = r ? r.start + '–' + r.end : '';
+    return {
+      type, kind, status,
+      blocking: status === 'approved' && kind === 'full',
+      partial: status === 'approved' && kind === 'partial',
+      pending: status === 'pending',
+      rejected: status === 'rejected',
+      start: r ? r.start : '', end: r ? r.end : '',
+      timeLabel, timeText: timeLabel ? timeLabel + ' น.' : '',
+      label: kind === 'partial' ? (timeLabel ? 'หาหมอ ' + timeLabel : type.replace(/^ลา/, '')) : type
+    };
+  }
+
   /* ---------- leave queue ---------- */
   function stampKey_(v) { const t = Date.parse(v); return isNaN(t) ? Infinity : t; }
 
   /**
    * Fair queue ("คนที่ N") for one leave type on one date.
    * leavesForDate: {[name]: Leave} (insertion order = server row order) or Leave[].
-   * Returns staff names sorted by (recordedAt, original index); undated entries last.
+   * Returns staff names sorted by (recordedAt, original index); undated entries last. A rejected row holds no place
+   * (R1b); a pending one keeps its place (it holds a vacation slot on the server too).
    */
   function queueOrder(leavesForDate, type) {
     let list = [];
@@ -282,7 +403,7 @@
     }
     return list
       .map((l, i) => ({ l, i, t: l ? stampKey_(l.recordedAt) : Infinity }))
-      .filter(x => x.l && x.l.type === type)
+      .filter(x => x.l && x.l.type === type && leaveStatus(x.l) !== 'rejected')
       .sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : a.i - b.i))
       .map(x => x.l.staff);
   }
@@ -310,10 +431,12 @@
   }
 
   global.Utils = {
-    STATIONS, LEAVE_TYPES, QUEUE_TYPES, STATION_COUNT_MIN, STATION_COUNT_MAX, THAI_WEEKDAYS_SHORT, THAI_WEEKDAYS_ABBR,
+    STATIONS, LEAVE_TYPES, PARTIAL_LEAVE_TYPES, QUEUE_TYPES, LEAVE_STATUSES, PARTIAL_TIME_PRESETS, PARTIAL_WINDOW, STATION_COUNT_MIN, STATION_COUNT_MAX, THAI_WEEKDAYS_SHORT, THAI_WEEKDAYS_ABBR,
     pad2, ymd, todayStr, parseYmd, addDays, compareYmd, eachDate, monthRange, daysBetweenInclusive,
     monthKey, addMonths, thaiMonthYear, monthGrid,
     thaiDate, thaiDateShort, thaiStamp, thaiStampShort, formatStamp, formatStampShort, escapeHtml, csvCell, buildCsv,
-    normalizeName, validateName, validatePassword, isValidYmd, queueOrder, stationById, normalizeStationCounts, onReady
+    normalizeName, validateName, validatePassword, isValidYmd, queueOrder, stationById, normalizeStationCounts, onReady,
+    leaveStatus, leaveKind, isPartialType, isAbsent, leaveInfo, parseTimeRange, validateTimeRange, joinTimeRange,
+    formatTimeRange
   };
 })(window);

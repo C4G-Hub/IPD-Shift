@@ -31,9 +31,12 @@
    *    ipd_boot_retry with the inline guard: after 2 only the "โหลดใหม่" button remains. init() clears the counter.
    * APP_BUILD = sw.js VERSION = the ?v= of index.html's scripts = js/api.js CLIENT_VERSION (tests/sw.test.js).
    */
-  const APP_BUILD = '2.9.1';
+  const APP_BUILD = '3.0.0';
   const BOOT_RETRY_KEY = 'ipd_boot_retry';
-  if (!window.UiKit || !window.Utils || !window.Api || !document.getElementById('appShell') || !document.getElementById('navDock')) {
+  // R1b: also a page of another release (its inline guard names its own build, e.g. a v2.9 index.html served from the HTTP cache
+  // whose ?v=2.9.0 URLs now answer with these files): its markup is not this release's — the guard of that page takes over
+  const otherPage = !!(window.__ipdBoot && window.__ipdBoot.build && window.__ipdBoot.build !== APP_BUILD);
+  if (otherPage || !window.UiKit || !window.Utils || !window.Api || !document.getElementById('appShell') || !document.getElementById('navDock')) {
     try { bootRescue(); } catch (e) { /* never throw from the guard */ }
     return;
   }
@@ -118,7 +121,12 @@
   /* ------------------------------------------------------------------ */
   /* constants                                                           */
   /* ------------------------------------------------------------------ */
-  const LS = { apiUrl: 'ipd_api_url', session: 'ipd_session', cache: 'ipd_cache_v2' };
+  /**
+   * FIX-CL CL-7: the offline copy of v3 has its own key — a v2.9 page (after a rollback of the web app) reads `ipd_cache_v2`
+   * and would treat pending and doctor-visit rows as absences. The v2 copy is read once at the first v3 start (moved to the
+   * new key) and removed; logout and an expired session remove both.
+   */
+  const LS = { apiUrl: 'ipd_api_url', session: 'ipd_session', cache: 'ipd_cache_v3', cacheV2: 'ipd_cache_v2' };
   const LEGACY_KEYS = ['rad_schedules', 'rad_staff', 'rad_passwords', 'rad_supervisor_single', 'rad_current_user'];
   const LEGACY_SECRET_KEYS = ['rad_passwords', 'rad_current_user'];   // plaintext passwords; the import never needs them
   const ALL = '__ALL__';               // "everyone" in the summary/export pickers (reserved: never a staff name)
@@ -146,6 +154,13 @@
     retrying: 'เซิร์ฟเวอร์ตอบช้า กำลังลองใหม่…',
     oldServer: 'เซิร์ฟเวอร์ (Code.gs) ยังเป็นเวอร์ชันเก่า กรุณาอัปเดตตามคู่มือ',
     updateCodeGs: 'ต้องอัปเดต Code.gs เป็นเวอร์ชันล่าสุดก่อน',
+    serverV3: 'เซิร์ฟเวอร์ (Code.gs) ยังเป็นรุ่นก่อน 3.0 — อัปเดต Code.gs ตามคู่มือเพื่อเปิดใช้การลาหาหมอแบบระบุเวลา การอนุมัติลาพักร้อน และรูปโปรไฟล์',
+    leaveRequested: '📨 ส่งคำขอแล้ว — รอ Supervisor อนุมัติ',
+    requestDeleted: '🗑️ ลบคำขอแล้ว',
+    requestCancelled: '🗑️ ยกเลิกคำขอแล้ว',
+    // FIX-CL CL-24: one sentence each, wherever they appear
+    partialNote: 'ลาเฉพาะช่วงเวลา — นอกช่วงนี้ยังปฏิบัติงานตามตาราง',
+    pendingNote: 'ยังไม่ใช่วันลาจนกว่า Supervisor จะอนุมัติ',
     countsSaved: '✅ บันทึกจำนวนคนแล้ว',
     imageToolFailed: '⚠️ โหลดเครื่องมือสร้างภาพไม่สำเร็จ — ตรวจสอบอินเทอร์เน็ตแล้วลองใหม่',
     imageFailed: '⚠️ สร้างภาพไม่สำเร็จ กรุณาลองใหม่',
@@ -176,6 +191,7 @@
   const REMARK_VIEW_BASE = 'whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-sm leading-6 rounded-2xl border-2 px-3.5 py-2.5 ';
   /** Leave sheet option tiles (UiKit.cls.tile + on/off): ปกติ spans both columns. */
   const LV_TILE = 'lv-chip ' + Kit.cls.tile + ' ';
+  const LV_TILE_TIGHT = 'lv-chip ' + Kit.cls.tileTight + ' ';   // the doctor-visit tiles (CL-20)
   const VERDICT_BASE = 'text-xs font-medium leading-relaxed p-2.5 rounded-xl border ';
   const VERDICT_TONE = {
     ok: 'bg-emerald-50 border-emerald-200 text-emerald-800',
@@ -204,11 +220,20 @@
     supervisor: '',
     staff: [],                // active staff [{name, group}] regular first, then backup
     days: {},                 // {[date]: Day}
-    leaves: {},               // {[date]: {[name]: Leave}} — name maps have no prototype (see nameMap)
+    // {[date]: {[name]: Leave}} — name maps have no prototype (see nameMap). R1b: a v3 server sends LeaveV3 rows
+    // {date, staff, type, recordedBy, recordedAt, detail, status, decidedBy, decidedAt, note} — approved, partial-day
+    // and pending rows of everyone, rejected rows only to their owner and the Supervisor; an older server only the
+    // blocking rows without status (= approved). Whether a row makes someone absent: Utils.isAbsent, nothing else.
+    leaves: {},
+    // R1b: the server's `requests` (frozen LeaveV3[], sorted by date then recordedAt; rows of the last 30 days and later):
+    // the Supervisor gets every pending row, anyone else their own pending and rejected rows. [] on an older server.
+    requests: [],
+    rules: { vacationAutoSlots: null },   // R1b `rules` of the heartbeat (null = not announced, e.g. an older server)
     loaded: [],               // merged [{from, to}] ranges fetched from the server this session
     selectedDate: U.todayStr(),
     stationCounts: U.normalizeStationCounts(null),   // {[stationId]: people required} (supervisor setting)
-    draft: null,              // {date, baseVersion, assignments:{[stationId]: string[]}, remark} ('' = empty slot)
+    draft: null,              // {date, baseVersion, assignments:{[stationId]: string[]}, remark, base} ('' = empty slot;
+                              // base = the saved day the draft was started from: draftSnapshot)
     filter: 'all',
     clipboard: null,          // {fromDate, assignments, remark}
     conn: 'online',           // 'online' | 'reconnecting' | 'offline'
@@ -229,6 +254,9 @@
     refreshing: null,
     writeSeq: 0,              // increments on every local write merge
     touched: {},              // {[date]: writeSeq} — protects fresh writes from stale getData responses
+    // FIX-CL CL-2: own leave writes on a date that was NOT loaded (the approval inbox, an offline copy):
+    // {[date]: {[staff]: {seq, leave|null, day|null}}} — replayed over every getData answer that started before them
+    unloadedWrites: {},
     staffSeq: 0,              // increments on every own staff/role/user/station-count write — same protection for those
     windowVersions: {},       // {"from|to": dataVersion} of the refreshed window — lets the next poll ask "changed?"
     failStreak: 0,            // calls in a row that finally failed transiently
@@ -263,7 +291,12 @@
     summaryPlaceholder: '',
     toastTimer: null,
     usedBefore: false,        // a session or offline copy existed when the app started (an update, not a new device)
-    serverVersion: ''         // Code.gs version from the last ping (connection check / setup); '' = not known
+    serverVersion: '',        // Code.gs version from the last ping (connection check / setup); '' = not known
+    serverMode: '',           // R1b: '' not known yet · 'v3' the server announces `features` · 'old' it answered without
+    requestsSeq: 0,           // increments on every local change of state.requests (older getData answers keep away)
+    leaveTime: null,          // the leave sheet's custom time range while typed: {start, end} ('' = empty field)
+    leaveTimeError: '',       // the error line of the leave sheet's time step
+    leaveBusy: ''              // the leave sheet's action in flight: 'save' | 'rerequest' | 'delete' | 'approved' | 'rejected'
   };
 
   let resolveReady;
@@ -272,6 +305,7 @@
   /** Test/debug handle (SPEC §6.9). Defined before init so harnesses can find it early; the registry section adds
    *  App.core and App.register (the API of feature files). */
   window.App = {
+    build: APP_BUILD,         // R1b: the inline guard of index.html checks it (a js/app.js of another release → the update message)
     state,
     ready,
     idle,
@@ -306,12 +340,25 @@
   function hideModal(id) { if ($(id)) Kit.sheet.close(id); }
   function isShown(id) { const m = $(id); return !!m && !m.classList.contains('hidden'); }
 
-  /** Replace innerHTML only when the markup actually changed (no DOM churn on no-op renders). */
+  /**
+   * Replace innerHTML only when the markup actually changed (no DOM churn on no-op renders). FIX-CL CL-5: markup that differs
+   * only in avatar pictures (UiKit.avatar's <img>) counts as unchanged — the pictures on the page are patched in place by
+   * onAvatarChange (UiKit.avatars.refresh), so a picture arriving never replaces a focused picker, a scrolled list or an
+   * open control.
+   */
   function setHtml(el, html) {
     if (!el) return;
     if (el._html === html) return;
+    if (typeof el._html === 'string' && el._html && withoutAvatarImgs(el._html) === withoutAvatarImgs(html)) {
+      el._html = html;
+      return;
+    }
     el.innerHTML = html;
     el._html = html;
+  }
+  const AVATAR_IMG_RE = /<img src="[^"]*" alt="" data-uk-avatar-img="1" draggable="false">/g;
+  function withoutAvatarImgs(html) {
+    return typeof html === 'string' && html.indexOf('data-uk-avatar-img') >= 0 ? html.replace(AVATAR_IMG_RE, '') : html;
   }
 
   /** textContent only when it changed (no DOM churn on no-op renders). */
@@ -548,8 +595,20 @@
 
   function ensureDraft(date) {
     if (hasDraftFor(date)) return state.draft;
-    state.draft = { date, baseVersion: currentVersion(date), assignments: storedSlots(date), remark: storedRemark(date) };
+    state.draft = { date, baseVersion: currentVersion(date), assignments: storedSlots(date), remark: storedRemark(date), base: draftSnapshot(date) };
     return state.draft;
+  }
+
+  /**
+   * FIX-CL CL-1: a frozen copy of the saved day of `date` as it is now ({date, version, remark, assignments}). The draft keeps
+   * the one it started from (draft.base), so an own write can always be compared with the version the draft is based on —
+   * also when the local copy of that day was replaced meanwhile (a heartbeat that already carried the write).
+   */
+  function draftSnapshot(date) {
+    const d = state.days[date];
+    const assignments = {};
+    U.STATIONS.forEach(st => { assignments[st.id] = d && Array.isArray(d.assignments[st.id]) ? d.assignments[st.id].slice() : []; });
+    return Object.freeze({ date, version: d ? (d.version | 0) : 0, remark: d ? d.remark : '', assignments: Object.freeze(assignments) });
   }
 
   function removeFromDraft(name) {
@@ -560,26 +619,40 @@
     if (!isDraftDirty()) state.draft = null;
   }
 
-  /** The saved day the draft was started from, while the local copy still is that version (for rebaseDraft). */
+  /**
+   * The saved day the draft was started from (draft.base, CL-1), or — for a draft without one — the local copy while it is
+   * still that version (for rebaseDraft).
+   */
   function draftBase() {
-    const day = state.draft && state.days[state.draft.date];
-    return day && day.version === state.draft.baseVersion ? day : null;
+    const d = state.draft;
+    if (!d) return null;
+    if (d.base && d.base.date === d.date && d.base.version === d.baseVersion) return d.base;
+    const day = state.days[d.date];
+    return day && day.version === d.baseVersion ? day : null;
   }
 
   /**
-   * Our own write (auto-unassign by setLeave, deleteStaff) removed `name` from the draft's day on the server.
+   * Our own write (auto-unassign by setLeave / decideLeave, deleteStaff) removed `name` from the draft's day on the server.
    * When the stored day is now exactly `base` minus that name, the draft already contains that change: move
    * it onto the new version so the next save is not a false "edited on another device" CONFLICT.
+   * base: the draft's own base when omitted (CL-1: every caller — the leave sheet, the inbox, a CONFLICT answer — gets it).
    */
   function rebaseDraft(name, base) {
-    const now = base && hasDraftFor(base.date) ? state.days[base.date] : null;
-    if (!now || now.version !== base.version + 1 || now.remark !== base.remark) return;
+    const b = base || draftBase();
+    const now = b && hasDraftFor(b.date) ? state.days[b.date] : null;
+    if (!now || now.version !== b.version + 1 || now.remark !== b.remark) return;
     const same = U.STATIONS.every(st =>
-      JSON.stringify(base.assignments[st.id].filter(n => n !== name)) === JSON.stringify(now.assignments[st.id]));
-    if (same) state.draft.baseVersion = now.version;
+      JSON.stringify((b.assignments[st.id] || []).filter(n => n !== name)) === JSON.stringify(now.assignments[st.id]));
+    if (same) {
+      state.draft.baseVersion = now.version;
+      state.draft.base = draftSnapshot(b.date);
+    }
   }
 
-  /** Leaves of ACTIVE staff on a date, in server order: {[name]: Leave}. */
+  /**
+   * Leave ROWS of ACTIVE staff on a date, in server order: {[name]: Leave} — every status (R1b: approved, partial-day,
+   * pending, and the rejected rows this user may see). "Absent" is a separate question: absentLeaves / Utils.isAbsent.
+   */
   function activeLeaves(date) {
     const map = leavesOn(date);
     const act = activeSet();
@@ -588,15 +661,48 @@
     return out;
   }
 
-  /** The date's leaves in staff display order: [{name, type, rank}] — rank = "คนที่ N" of a queue type, else 0. */
-  function leaveList(date) {
-    const leaves = activeLeaves(date);
+  /** The people who are ABSENT on a date (Utils.isAbsent: approved + full-day): {[name]: Leave}. */
+  function absentLeaves(date) {
+    const rows = activeLeaves(date);
+    const out = nameMap();
+    Object.keys(rows).forEach(n => { if (U.isAbsent(rows[n])) out[n] = rows[n]; });
+    return out;
+  }
+
+  /** "คนที่ N" queues of the QUEUE_TYPES among a date's rows (Utils.queueOrder: rejected rows hold no place). */
+  function queuesOf(rows) {
     const queues = {};
-    U.QUEUE_TYPES.forEach(t => { queues[t] = U.queueOrder(leaves, t); });
-    return state.staff.filter(s => leaves[s.name]).map(s => {
-      const type = leaves[s.name].type;
-      return { name: s.name, type, rank: queues[type] ? queues[type].indexOf(s.name) + 1 : 0 };
+    U.QUEUE_TYPES.forEach(t => { queues[t] = U.queueOrder(rows, t); });
+    return queues;
+  }
+  function rankIn(queues, type, name) { return queues[type] ? queues[type].indexOf(name) + 1 : 0; }
+
+  /**
+   * The date's ABSENT people in staff display order: [{name, type, rank}] — rank = "คนที่ N" of a queue type, else 0.
+   * (core.leaveList; partial-day and pending rows are not in it — see leaveLines.)
+   */
+  function leaveList(date) {
+    return leaveLines(date).absent.map(l => ({ name: l.name, type: l.type, rank: l.rank }));
+  }
+
+  /**
+   * Everything a screen shows about a date's leaves, in staff display order (rejected rows are ignored everywhere):
+   * {absent: [{name, type, rank, leave, info}], partial: [...], pending: [...]} — info = Utils.leaveInfo(leave).
+   */
+  function leaveLines(date) {
+    const rows = activeLeaves(date);
+    const queues = queuesOf(rows);
+    const out = { absent: [], partial: [], pending: [] };
+    state.staff.forEach(s => {
+      const leave = rows[s.name];
+      if (!leave) return;
+      const info = U.leaveInfo(leave);
+      const line = { name: s.name, type: leave.type, rank: rankIn(queues, leave.type, s.name), leave, info };
+      if (info.blocking) out.absent.push(line);
+      else if (info.partial) out.partial.push(line);
+      else if (info.pending) out.pending.push(line);
     });
+    return out;
   }
 
   /** Active staff, then people who appear in [from, to] but are no longer active (their history is kept). */
@@ -607,7 +713,8 @@
     U.eachDate(from, to).forEach(date => {
       const day = state.days[date];
       if (day) U.STATIONS.forEach(st => day.assignments[st.id].forEach(note));
-      Object.keys(leavesOn(date)).forEach(note);
+      const lv = leavesOn(date);
+      Object.keys(lv).forEach(n => { if (U.leaveStatus(lv[n]) !== 'rejected') note(n); });   // a rejected row is ignored
     });
     return state.staff.concat(gone.map(name => ({ name, group: GONE })));
   }
@@ -716,8 +823,9 @@
       // expired on this device (R1a fix B-4): the offline copy goes with it, exactly as on a logout
       lsRemove(LS.session);
       lsRemove(LS.cache);
+      lsRemove(LS.cacheV2);
       clearUserStorage();   // ipd_dom:* and ipd_draft:*
-      wipeChatMedia();
+      wipeUserMedia();
       return null;
     }
     return { token: s.token, name: s.name, expiresAt: s.expiresAt };
@@ -729,7 +837,9 @@
     lsSet(LS.cache, JSON.stringify({
       savedAt: new Date().toISOString(),
       user: state.user, supervisor: state.supervisor, staff: state.staff, stationCounts: state.stationCounts,
-      days: state.days, leaves: state.leaves, loaded: state.loaded
+      days: state.days, leaves: state.leaves, loaded: state.loaded,
+      // R1b: what the server announced (an offline start shows the same screens), and this user's requests
+      requests: state.requests, rules: state.rules, serverMode: ui.serverMode, features: Object.keys(serverFeatures)
     }));
   }
 
@@ -752,6 +862,10 @@
     state.loaded.length = 0;   // cache is not authoritative: everything is refetched on demand
     ui.cacheLoaded = Array.isArray(c.loaded) ? c.loaded : [];
     ui.cacheSavedAt = c.savedAt || null;
+    // R1b (absent in a v2.9 copy: nothing changes, the first answer decides)
+    if (c.serverMode === 'v3' && Array.isArray(c.features)) setServerFeatures(c.features);
+    if (c.rules && typeof c.rules === 'object') applyRules(c.rules);
+    if (c.serverMode === 'v3' && Array.isArray(c.requests)) setRequests(c.requests);   // CL-4: only what a v3 server listed
     return true;
   }
 
@@ -767,9 +881,17 @@
     state.clipboard = null;
     state.audit = {};
     state.lastSync = null;
+    state.requests = [];
+    state.rules = { vacationAutoSlots: null };
+    ui.requestsSeq++;
+    clearServerFeatures();   // the next answer announces them again (the server may have changed meanwhile)
+    ui.leaveTime = null;
+    ui.leaveTimeError = '';
+    ui.leaveBusy = '';
     ui.cacheLoaded = [];
     ui.cacheSavedAt = null;
     ui.touched = {};
+    ui.unloadedWrites = {};
     ui.rangeReqs = {};
     ui.windowVersions = {};
     ui.oldServerWarned = false;
@@ -822,11 +944,13 @@
     // R1a fix B-3: the leave sheet (person, date, status, "บันทึกโดย …", data-staff on the tiles), the day's leave
     // list, the my-day / my-leave cards and the leave rows also name people; render() skips them while nobody is
     // logged in, so they are emptied here
-    ['confirmLeaveText', 'leaveOptions', 'leaveSheetNote', 'stationLeaves', 'myDayCard', 'myLeaveRow', 'leaveContainer']
-      .forEach(id => setHtml($(id), ''));
-    ['stationLeaveCount', 'leaveCountBadge'].forEach(id => { if ($(id)) $(id).textContent = ''; });
+    ['confirmLeaveText', 'leaveOptions', 'leaveSheetNote', 'stationLeaves', 'myDayCard', 'myLeaveRow', 'leaveContainer',
+      'myRequestsList', 'leaveTimePresets', 'menuServerNote'].forEach(id => setHtml($(id), ''));
+    ['stationLeaveCount', 'leaveCountBadge', 'myRequestsCount', 'leaveTimeError'].forEach(id => { if ($(id)) $(id).textContent = ''; });
+    ['leaveTimeStart', 'leaveTimeEnd'].forEach(id => { if ($(id)) $(id).value = ''; });
+    ['myRequestsCard', 'leaveTimeStep', 'menuServerNote'].forEach(id => setVisible($(id), false));
     const myDay = $('myDayCard');
-    if (myDay) { delete myDay.dataset.myStations; delete myDay.dataset.myDay; }
+    if (myDay) { delete myDay.dataset.myStations; delete myDay.dataset.myDay; delete myDay.dataset.myLeave; }
   }
 
   /* ------------------------------------------------------------------ */
@@ -870,6 +994,87 @@
     applyServerInfo(data.user, data.supervisor, data.staff);
   }
 
+  /* ---------- R1b heartbeat fields: versions, features, rules, requests ---------- */
+  /**
+   * The fields a v3 server adds to getData (both the full and the `unchanged` answer) and to ping. A field that is
+   * missing changes nothing — except `features`: an answer without it comes from a server older than 3.0, so nothing
+   * new may be shown or sent (serverHas() → false for everything) and the Supervisor is told to update Code.gs.
+   * opts.requests: also take `requests` (full getData answers only); opts.reqSeq: ui.requestsSeq when the fetch started.
+   * → true when something the screens show changed.
+   */
+  function applyServerExtras(data, opts) {
+    if (!data || typeof data !== 'object') return false;
+    const o = opts || {};
+    // CL-25: an answer that carries the server version (ping always; any other answer that may carry it later)
+    if (typeof data.version === 'string' && /^\d+\.\d+/.test(data.version) && data.version !== ui.serverVersion) ui.serverVersion = data.version;
+    let changed = setServerFeatures(Array.isArray(data.features) ? data.features : null);
+    if (ui.serverMode === 'old' && state.requests.length) {
+      // CL-4: a server rolled back to 2.x never sends `requests` — what the v3 server listed is stale now (memory, banners,
+      // badges, "คำขอของฉัน", and with the next persistCache the offline copy too)
+      ui.requestsSeq++;
+      changed = setRequests([]) || changed;
+    }
+    if (data.rules && typeof data.rules === 'object') changed = applyRules(data.rules) || changed;
+    if (data.versions && typeof data.versions === 'object') {
+      Object.keys(data.versions).forEach(name => { if (name !== 'core') setRemoteVersion(name, data.versions[name]); });
+    }
+    if (o.requests && Array.isArray(data.requests) && o.reqSeq === ui.requestsSeq) changed = setRequests(data.requests) || changed;
+    return changed;
+  }
+
+  /** list: the server's `features` (null = the server announced none, i.e. it is older than 3.0). → changed? */
+  function setServerFeatures(list) {
+    const mode = Array.isArray(list) ? 'v3' : 'old';
+    const next = (list || []).filter(f => typeof f === 'string' && f).sort().join('\n');
+    const before = Object.keys(serverFeatures).sort().join('\n');
+    if (next === before && ui.serverMode === mode) return false;
+    clearServerFeatures();
+    if (next) next.split('\n').forEach(f => { serverFeatures[f] = true; });
+    ui.serverMode = mode;
+    return true;
+  }
+  function clearServerFeatures() {
+    Object.keys(serverFeatures).forEach(k => { delete serverFeatures[k]; });
+    ui.serverMode = '';
+  }
+
+  function applyRules(rules) {
+    const n = rules.vacationAutoSlots;
+    if (!Number.isInteger(n) || n < 0 || n === state.rules.vacationAutoSlots) return false;
+    state.rules = { vacationAutoSlots: n };
+    return true;
+  }
+
+  /** A leave row as the server sends it (LeaveV3, or the v2 shape): a valid date, a staff name and a type. */
+  function validLeaveRow(l) {
+    return !!l && typeof l === 'object' && U.isValidYmd(l.date) && typeof l.staff === 'string' && !!l.staff &&
+      typeof l.type === 'string' && !!l.type;
+  }
+
+  /** Replaces state.requests (sorted by date, then recordedAt); emits 'data' {requests: true} when it changed. */
+  function setRequests(list) {
+    const next = (Array.isArray(list) ? list : []).filter(validLeaveRow).map(l => Object.freeze(Object.assign({}, l)))
+      .sort((a, b) => U.compareYmd(a.date, b.date) || (String(a.recordedAt) < String(b.recordedAt) ? -1 : String(a.recordedAt) > String(b.recordedAt) ? 1 : 0));
+    if (JSON.stringify(next) === JSON.stringify(state.requests)) return false;
+    state.requests = Object.freeze(next);
+    emit('data', { requests: true });
+    return true;
+  }
+
+  /**
+   * An own leave write (setLeave / decideLeave answer) changes state.requests at once: the row belongs there when it is
+   * pending (the Supervisor sees everyone's, anyone else their own) or — for anyone but the Supervisor — their own
+   * rejected row. `leave` null: the row of (date, staff) is gone.
+   */
+  function updateRequestFor(date, staff, leave) {
+    const me = myName();
+    const st = U.leaveStatus(leave);
+    const belongs = !!leave && (st === 'pending' ? (isSup() || leave.staff === me) : st === 'rejected' && !isSup() && leave.staff === me);
+    const rest = state.requests.filter(r => !(r.date === date && r.staff === staff));
+    ui.requestsSeq++;   // a getData answer that was read before this write must not bring the old list back
+    setRequests(belongs ? rest.concat([leave]) : rest);
+  }
+
   /** seq / staffSeq: ui.writeSeq / ui.staffSeq when the fetch started (older answers must not undo our writes). */
   function mergeData(data, from, to, seq, staffSeq) {
     applyDataInfo(data, staffSeq);
@@ -886,8 +1091,56 @@
       if (!l || !U.isValidYmd(l.date) || !l.staff || keep(l.date)) return;
       (state.leaves[l.date] = state.leaves[l.date] || nameMap())[l.staff] = l;
     });
+    replayUnloadedWrites(rf, rt, seq, keep);
     addLoaded(rf, rt);
     if (state.draft && !isDraftDirty()) state.draft = null;   // clean draft → follow the server
+  }
+
+  /**
+   * CL-2: own leave writes made while their date was not loaded ("parked" in ui.unloadedWrites). The ordering rules, by
+   * REQUEST sequence (ui.writeSeq when a getData was sent, compared with the write's seq) and by DAY version:
+   *  1. An answer requested BEFORE a parked write may not contain it: the written row is laid over it (set or removed) and
+   *     the write's day (an auto-unassign) replaces the answer's day when its version is the same or newer. The write stays
+   *     parked — every further older answer gets the same overlay, in write order.
+   *  2. An answer requested AFTER a parked write contains it: that answer is merged as it is, the write leaves the parking
+   *     and the date becomes protected exactly like a date written while loaded (ui.touched[date] = the write's seq): from
+   *     then on every answer requested before that write keeps the local copy of the date (mergeData keep()), so an older
+   *     answer that arrives last can never take the write back, move the person back onto a station or lower the day's
+   *     version. (Before the second rule existed, such an answer won — reviewer 2 finding 1.)
+   *  3. Two writes for the same person while parked: the later row wins; the later day wins when it has one, else the earlier
+   *     write's day is kept (the server took the person off the day with the first write — reviewer 2 finding 3).
+   *  4. A day is never replaced by an older version (here and in applyLeaveWrite's loaded path).
+   */
+  function replayUnloadedWrites(rf, rt, seq, keep) {
+    const replay = [];
+    const protect = {};
+    Object.keys(ui.unloadedWrites).forEach(date => {
+      if (date < rf || date > rt) return;
+      const rows = ui.unloadedWrites[date];
+      Object.keys(rows).forEach(staff => {
+        if (rows[staff].seq > seq) replay.push(Object.assign({ date, staff }, rows[staff]));
+        else {
+          protect[date] = Math.max(protect[date] || 0, rows[staff].seq);
+          delete rows[staff];
+        }
+      });
+      if (!Object.keys(rows).length) delete ui.unloadedWrites[date];
+    });
+    replay.sort((a, b) => a.seq - b.seq).forEach(w => {
+      if (keep(w.date)) return;   // a write of the loaded date came later: the local copy already holds everything
+      putLeaveRow(w.date, w.staff, w.leave);
+      if (w.day && (w.day.version | 0) >= currentVersion(w.date)) adoptDay(w.date, w.day);
+    });
+    // rule 2 (after this answer was merged, so it applies to the answers that come after it)
+    Object.keys(protect).forEach(date => { ui.touched[date] = Math.max(ui.touched[date] || 0, protect[date]); });
+  }
+
+  /** Sets (leave) or removes (null) the row of (date, staff) in state.leaves. */
+  function putLeaveRow(date, staff, leave) {
+    const map = state.leaves[date] = state.leaves[date] || nameMap();
+    if (leave) map[staff] = leave;
+    else delete map[staff];
+    if (!Object.keys(map).length) delete state.leaves[date];
   }
 
   /**
@@ -896,13 +1149,14 @@
    * "unchanged" answer carries no days/leaves, just user/staff/counts. Resolves false for "unchanged".
    */
   async function fetchChunk(from, to, poll) {
-    const alive = sessionAlive(), seq = ui.writeSeq, staffSeq = ui.staffSeq;
+    const alive = sessionAlive(), seq = ui.writeSeq, staffSeq = ui.staffSeq, reqSeq = ui.requestsSeq;
     const key = from + '|' + to;
     const params = { from, to };
     if (poll && ui.windowVersions[key] && !missingRanges(from, to).length) params.knownVersion = ui.windowVersions[key];
     const data = (await Api.call('getData', params)) || {};
     if (!alive()) return false;
     const unchanged = data.unchanged === true;
+    applyServerExtras(data, { requests: !unchanged, reqSeq });
     if (unchanged) applyDataInfo(data, staffSeq);
     else {
       mergeData(data, from, to, seq, staffSeq);
@@ -1066,6 +1320,18 @@
       default:
         toast(e.message || 'เกิดข้อผิดพลาด', 0, { error: true });
     }
+  }
+
+  /** The non-forced password sheet — เมนู's "เปลี่ยนรหัสผ่าน" and the profile screen's (core.openPasswordChange) are this one routine. */
+  function openPasswordChange() { if (state.session && !ui.pwForced) openPasswordModal(false); }
+
+  /**
+   * "<recorded by> · 18 พ.ย. 08:30 น." of a leave row (escaped HTML); the time never breaks — a lone "น." on its own line looked
+   * broken (I1). Same text as [recordedBy, thaiStampShort(recordedAt)].join(' · ').
+   */
+  function metaHtml(leave) {
+    return [leave.recordedBy ? esc(leave.recordedBy) : '',
+      leave.recordedAt ? `<span class="whitespace-nowrap">${esc(U.thaiStampShort(leave.recordedAt))}</span>` : ''].filter(Boolean).join(' · ');
   }
 
   /** Api.onAuthError: the current session is no longer valid, or must set a new password first (A1). */
@@ -1241,6 +1507,7 @@
   function doLogout() {
     lsRemove(LS.session);
     lsRemove(LS.cache);
+    lsRemove(LS.cacheV2);
     Api.setToken(null);
     ui.epoch++;
     state.session = null;
@@ -1562,13 +1829,15 @@
   /**
    * Keeps the content clear of the fixed chrome whatever its height: below the header (+ week strip / offline
    * banner), above the bottom bar and the save bar (phones; from md: up the bar is a left rail). The toast and
-   * the update notice sit just under the header, never over the save bar or a sheet's buttons.
+   * the update notice sit just under the header, never over the save bar or a sheet's buttons. While the update
+   * notice is shown the content starts below it too (I1: it covered the first banner and its button).
    */
   function syncLayout() {
-    const h = $('appHeader'), m = $('appMain');
+    const h = $('appHeader'), m = $('appMain'), ub = $('updateBanner');
     if (!h || !m) return;
     const ht = h.offsetHeight;
-    if (ht > 0) m.style.paddingTop = (ht + 16) + 'px';
+    const notice = ub && !ub.classList.contains('hidden') && ub.offsetHeight > 0 ? ub.offsetHeight + 8 : 0;
+    if (ht > 0) m.style.paddingTop = (ht + 16 + notice) + 'px';
     placeFloaters();
     fitHeader();
     const dock = $('navDock'), bar = $('saveBar');
@@ -1659,9 +1928,10 @@
   }
 
   /**
-   * Left: the user's avatar (→ เมนู), or ← on a child screen. Middle: "เวร IPD" + the selected date (tap = native
-   * date picker #currentDate) on screens about a date (def.chrome.date), else the screen title (#headerDate stays
-   * in the DOM). Right: #syncStatus and #refreshBtn.
+   * Left: the user's avatar (→ เมนู), or ← on a child screen. Middle: on screens about a date (def.chrome.date) the
+   * caption (the wordmark "X-RAY IPD" on วันนี้, else the screen title) above the selected date (tap = native date
+   * picker #currentDate); on other screens the screen title (#headerDate stays in the DOM). Right: #syncStatus and
+   * #refreshBtn.
    */
   function renderHeader() {
     const f = featById[ui.tab];
@@ -1802,12 +2072,59 @@
     setHtml($('menuRole'), !name ? '' : isSup() ? Kit.pill('Supervisor', 'pending', 'crown') : Kit.pill('เจ้าหน้าที่', 'neutral', 'user'));
     setHtml($('menuVersion'), `<span class="block">แอป ${esc(Api.clientVersion)}</span>` +
       `<span class="block whitespace-nowrap">เซิร์ฟเวอร์ ${esc(serverVersionLabel())}</span>`);
+    renderMenuProfile(!!name);
     renderMenuSections();
   }
 
-  /** The server version is only known after a ping (connection check, setup); no extra request is sent for it. */
+  /**
+   * R1b: the profile card opens the "profile" screen while that feature is registered and visible (a v3 server; a
+   * chevron shows it); otherwise (an older server) the card is plain. "เปลี่ยนรหัสผ่าน" stays in the card either way. The
+   * Supervisor of an older server gets one line (#menuServerNote) saying Code.gs must be updated.
+   */
+  function renderMenuProfile(named) {
+    const head = $('menuProfileHead');
+    const profile = featById.profile;
+    const open = named && !!profile && featureVisible(profile);
+    if (head) {
+      head.classList.toggle('cursor-pointer', open);
+      head.classList.toggle('active:bg-brand-50', open);
+      if (open) {
+        head.setAttribute('role', 'button');
+        head.setAttribute('tabindex', '0');
+        head.setAttribute('aria-label', 'โปรไฟล์ของฉัน — ' + (myName() || (state.session ? state.session.name : '')));
+      } else {
+        ['role', 'tabindex', 'aria-label'].forEach(a => head.removeAttribute(a));
+      }
+      head.dataset.profile = open ? '1' : '';
+    }
+    setVisible($('menuProfileChevron'), open);
+    // "เปลี่ยนรหัสผ่าน" stays in เมนู either way (the profile screen may offer it too, via core.openPasswordChange)
+    const note = $('menuServerNote');
+    if (note) {
+      const old = !!state.user && isSup() && ui.serverMode === 'old';
+      setHtml(note, old ? `${Kit.icon('alert-triangle', 'w-5 h-5 shrink-0 mt-0.5 text-amber-700')}<span class="min-w-0">${esc(MSG.serverV3)}</span>` : '');
+      setVisible(note, old);
+    }
+  }
+
+  function onMenuProfileOpen(e) {
+    if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
+    const head = $('menuProfileHead');
+    if (!head || head.dataset.profile !== '1') return;
+    if (e.type === 'keydown') e.preventDefault();
+    spawn(() => go('profile'));
+  }
+
+  /**
+   * The exact server version comes with a ping (connection check, setup) or any answer that carries `version`; no extra
+   * request is sent for it. FIX-CL CL-25: until then the heartbeat already tells the generation — a server that announces
+   * `features` is 3.x, one that answers without them is older than 3.0 — so the row never says "not checked" while the app
+   * is online with v3 data.
+   */
   function serverVersionLabel() {
     if (ui.serverVersion) return ui.serverVersion;
+    if (ui.serverMode === 'v3') return '3.x';
+    if (ui.serverMode === 'old') return Api.serverVersionOk === false ? 'เก่ากว่า 2.1.0' : 'เก่ากว่า 3.0';
     return Api.serverVersionOk === false ? 'เก่ากว่า 2.1.0' : '— ยังไม่ได้ตรวจ';   // Minor 13: not a bare dash
   }
 
@@ -1829,8 +2146,8 @@
     else if (view === 'loading') setHtml(container, LOADING_HTML);
     else if (view === 'missing') setHtml(container, missingHtml(date));
     else {
-      const card = { sup: isSup(), locked: !canEditDay(date), onLeave: activeLeaves(date), act: activeSet(), me: myName(),
-        planned: isPlannedDay(date) };
+      const card = { sup: isSup(), locked: !canEditDay(date), onLeave: absentLeaves(date), rows: activeLeaves(date),
+        act: activeSet(), me: myName(), planned: isPlannedDay(date) };
       const slots = viewSlots(date);
       setHtml(container, U.STATIONS.map(st => stationCardHtml(st, slots, card)).join(''));
     }
@@ -1871,10 +2188,18 @@
   /**
    * One station: a white card with the station's colour as a left edge and a tinted title chip, the line
    * "ต้องการ N คน" + "(ขาด N)" (or "ครบ"), then the people (chips) or, for the Supervisor, one native picker per slot.
-   * card: {sup, locked (pickers disabled), onLeave, act (active names), me}.
+   * card: {sup, locked (pickers disabled), onLeave (ABSENT people: never offered), rows (every leave row: a doctor visit
+   * or a pending request is shown as a tag but never blocks), act (active names), me}.
    */
   function stationCardHtml(st, slots, card) {
-    const { sup, locked, onLeave, act, me, planned } = card;
+    const { sup, locked, onLeave, rows, act, me, planned } = card;
+    const soft = n => {   // a non-blocking leave of n: {text (option / tag), tone 'partial'|'pending'} or null
+      const info = rows && rows[n] ? U.leaveInfo(rows[n]) : null;
+      if (!info || info.blocking) return null;
+      if (info.partial) return { text: info.timeText ? 'หาหมอ ' + info.timeText : info.label, long: info.type + (info.timeText ? ' ' + info.timeText : ''), tone: 'partial' };
+      if (info.pending) return { text: 'รออนุมัติ', long: 'ขอ' + info.type + ' · รออนุมัติ', tone: 'pending' };
+      return null;
+    };
     const k = Kit.cls;
     const list = slots[st.id] || [];
     const filled = list.filter(Boolean);
@@ -1900,12 +2225,21 @@
         const gone = cur && !act.has(cur) ? `<option value="${esc(cur)}" selected>${esc(cur + GONE_LABEL)}</option>` : '';
         const opts = state.staff
           .filter(s => s.name === cur || (!onLeave[s.name] && (!pos.has(s.name) || pos.get(s.name) === here)))
-          .map(s => `<option value="${esc(s.name)}"${s.name === cur ? ' selected' : ''}>${esc(s.name)}${onLeave[s.name] ? ' (ลา: ' + esc(onLeave[s.name].type) + ')' : ''}</option>`)
+          .map(s => {
+            const sf = !onLeave[s.name] && soft(s.name);
+            // the picked person's doctor visit / request is the line under the picker (the closed picker would cut it off)
+            const tag = onLeave[s.name] ? ' (ลา: ' + esc(onLeave[s.name].type) + ')' : sf && s.name !== cur ? ' (' + esc(sf.tone === 'pending' ? sf.long : sf.text) + ')' : '';
+            return `<option value="${esc(s.name)}"${s.name === cur ? ' selected' : ''}>${esc(s.name)}${tag}</option>`;
+          })
           .join('');
         const lead = cur ? Kit.avatar(cur, 'sm') : `<span class="${k.slotEmpty}" aria-hidden="true">${i + 1}</span>`;
+        const curSoft = cur && !onLeave[cur] ? soft(cur) : null;
         const warn = cur && onLeave[cur]
           ? `<p class="flex items-center gap-1.5 pl-[42px] text-xs font-medium leading-4 text-coral-700">${Kit.icon('alert-triangle', 'w-3.5 h-3.5')}ลา: ${esc(onLeave[cur].type)} — แต่ยังอยู่ใน Station นี้</p>`
-          : '';
+          : curSoft   // R1b: a doctor visit / a pending request is only a note — the person stays assignable
+            ? `<p class="${k.slotNote} ${curSoft.tone === 'partial' ? k.slotNotePartial : k.slotNotePending}" data-slot-note="${curSoft.tone}">` +
+              `${Kit.icon(curSoft.tone === 'partial' ? 'stethoscope' : 'clock', 'w-3.5 h-3.5')}${esc(curSoft.long)}</p>`
+            : '';
         return `<div class="${k.slotRow}">${lead}` +
           `<select class="station-select ${k.select}" data-station="${st.id}" data-index="${i}" aria-label="${esc(st.name)} คนที่ ${i + 1}"${locked ? ' disabled' : ''}>` +
           `<option value=""${cur ? '' : ' selected'}>-- เลือกคนที่ ${i + 1} --</option>${gone}${opts}</select></div>${warn}`;
@@ -1915,9 +2249,12 @@
         (filled.length
           ? filled.map(n => {
             const look = onLeave[n] ? k.personChipLeave : n === me ? k.personChipMe : k.personChip;
-            const tip = onLeave[n] ? ` title="${esc('ลา: ' + onLeave[n].type)}"` : '';
+            const sf = onLeave[n] ? null : soft(n);
+            const tip = onLeave[n] ? ` title="${esc('ลา: ' + onLeave[n].type)}"` : sf ? ` title="${esc(sf.long)}"` : '';
             return `<span class="station-name ${look}"${tip}>${Kit.avatar(n, 'xs')}<span class="min-w-0 break-words">${esc(nameLabel(n, act))}</span>` +
-              (onLeave[n] ? Kit.icon('calendar-off', 'w-4 h-4 shrink-0') : '') + '</span>';
+              (onLeave[n] ? Kit.icon('calendar-off', 'w-4 h-4 shrink-0') : '') +
+              (sf ? `<span class="${k.inlineTag} ${sf.tone === 'partial' ? k.inlineTagPartial : k.inlineTagPending}" data-leave-tag="${sf.tone}">${esc(sf.text)}</span>` : '') +
+              '</span>';
           }).join('')
           : `<span class="${k.personEmpty}">ยังไม่ได้จัดสรร</span>`) +
         '</div>';
@@ -1955,7 +2292,7 @@
       `<div class="flex items-start gap-3"><span class="${k.listIcon} ${tone}">${Kit.icon(iconName, 'w-5 h-5')}</span>` +
       `<div class="min-w-0 flex-1 pt-1.5"><p class="text-sm font-medium leading-6 text-ink-900">${main}</p>` +
       (sub ? `<p class="${k.textMeta} mt-0.5">${sub}</p>` : '') + '</div></div>';
-    let state1, body;
+    let state1, body, myLeave = '';
     if (view === 'loading') {
       state1 = 'loading';
       body = Kit.skeleton(2);
@@ -1966,7 +2303,9 @@
       const slots = viewSlots(date);
       const mine = U.STATIONS.filter(st => (slots[st.id] || []).indexOf(me) >= 0);
       const planned = U.STATIONS.some(st => (slots[st.id] || []).some(Boolean));
-      const leave = activeLeaves(date)[me];
+      const row = activeLeaves(date)[me];
+      const info = U.leaveInfo(row);
+      const leave = info.blocking ? row : null;   // only an approved full-day leave makes me absent (Utils.isAbsent)
       const draft = isSup() && hasDraftFor(date) && isDraftDirty();
       const chips = mine.map(st => stationChipHtml(st)).join('');
       const mates = mine.length ? U.STATIONS.filter(st => mine.indexOf(st) >= 0)
@@ -1999,11 +2338,25 @@
         body = line('clock', k.listIconSun, esc(withDay('ยังไม่ได้จัดเวรของ', date)),
           isSup() ? 'เลือกคนในแต่ละ Station แล้วกดบันทึก' : esc(withDay('Supervisor ยังไม่ได้บันทึกตารางของ', date, '', { year: false })));
       }
+      // R1b: a doctor visit or a pending request does not change where I work — it is one more line under the answer
+      if (info.partial) {
+        myLeave = 'partial';
+        body += `<div class="mt-3">` + line('stethoscope', k.listIconInfo,
+          `${esc(info.type)} <span class="whitespace-nowrap text-accent-800">${esc(info.timeText)}</span>`,
+          esc(MSG.partialNote)) + '</div>';
+      } else if (info.pending) {
+        myLeave = 'pending';
+        const ranked = leaveLines(date).pending.filter(l => l.name === me)[0];
+        body += `<div class="mt-3">` + line('clock', k.listIconSun,
+          `ขอ${esc(info.type)}${ranked && ranked.rank ? ` (คนที่ ${ranked.rank})` : ''} · <span class="text-amber-800">รออนุมัติ</span>`,
+          esc(MSG.pendingNote)) + '</div>';
+      } else if (leave) myLeave = 'leave';
       if (view === 'cached') body += `<p class="${k.textCaption} mt-2">ข้อมูลที่บันทึกไว้ในเครื่อง (ยังไม่ได้อัปเดต)</p>`;
       box.dataset.myStations = mine.map(st => st.id).join(',');
     }
     if (view === 'loading' || view === 'missing') box.dataset.myStations = '';
     box.dataset.myDay = state1;
+    box.dataset.myLeave = myLeave;   // R1b: '' | 'leave' (absent) | 'partial' | 'pending'
     setHtml(box, head + `<div class="mt-3 pt-3 border-t-2 border-brand-50">${body}</div>`);
   }
 
@@ -2017,21 +2370,52 @@
       $('stationLeaveCount').textContent = '';
       return;
     }
-    const list = leaveList(date);
-    $('stationLeaveCount').textContent = list.length + ' คน';
-    setHtml($('stationLeaves'), list.length
-      ? list.map(leaveItemHtml).join('')
+    const lines = leaveLines(date);
+    // CL-16: the count says what it counts — "N คน" while the list holds only absences, else every non-zero kind
+    $('stationLeaveCount').textContent = leaveCountsText(lines);
+    setHtml($('stationLeaves'), lines.absent.length + lines.partial.length + lines.pending.length
+      ? linesHtml(lines)
       : `<p class="${Kit.cls.textMeta}">${esc(withDay('ไม่มีรายการลา', date))}</p>`);
   }
 
   /**
+   * CL-16: what a list of leaveLines holds — "3 คน" when it holds only absences (the long-standing wording), else
+   * "ลาทั้งวัน 3 · ลาบางช่วง 1 · รออนุมัติ 1" with only the non-zero parts.
+   */
+  function leaveCountsText(lines) {
+    const a = lines.absent.length, p = lines.partial.length, q = lines.pending.length;
+    if (!p && !q) return a + ' คน';
+    return [a ? 'ลาทั้งวัน ' + a : '', p ? 'ลาบางช่วง ' + p : '', q ? 'รออนุมัติ ' + q : ''].filter(Boolean).join(' · ');
+  }
+
+  /** Absent people, then doctor visits, then pending requests (leaveLines) as leaveItemHtml entries. */
+  function linesHtml(lines) {
+    return lines.absent.map(leaveItemHtml).join('') + lines.partial.map(leaveItemHtml).join('') + lines.pending.map(leaveItemHtml).join('');
+  }
+
+  /**
    * "• ชื่อ: ประเภท (คนที่ N)" as text (the station card's and the calendar day list's entry, a test contract): drawn
-   * as avatar + name + a status pill; the bullet and the colon stay in the text for screen readers only.
+   * as avatar + name + a status pill; the bullet and the colon stay in the text for screen readers only. R1b: a doctor
+   * visit reads "• ชื่อ: ลาหาหมอตอนเช้า 09:00–11:00 น." (sky pill), a pending request "• ชื่อ: พักร้อน (คนที่ 3) · รออนุมัติ"
+   * (yellow pill) — l.info = Utils.leaveInfo of the row (absent entries may omit it).
    */
   function leaveItemHtml(l) {
+    const info = l.info || null;
+    const k = Kit.cls;
+    let pill;
+    if (info && info.partial) {
+      pill = `<span class="${k.pill} ${k.pillPartial}" data-leave-line="partial">${Kit.icon('stethoscope', 'w-3.5 h-3.5')}${esc(l.type)}${info.timeText ? ' ' + esc(info.timeText) : ''}</span>`;
+    } else if (info && info.pending) {
+      pill = `<span class="${k.pill} ${k.pillPending}" data-leave-line="pending">${Kit.icon('clock', 'w-3.5 h-3.5')}${esc(l.type)}${l.rank ? ` (คนที่ ${l.rank})` : ''} · รออนุมัติ</span>`;
+    } else {
+      pill = `<span class="${k.pill} ${k.pillDanger}">${esc(l.type)}${l.rank ? ` (คนที่ ${l.rank})` : ''}</span>`;
+    }
+    // name and pill share a wrapping line: a long pill (a doctor visit with its time) moves under the name instead of
+    // squeezing it
     return `<div class="flex items-center gap-2.5 min-w-0"><span class="sr-only">• </span>${Kit.avatar(l.name, 'sm')}` +
-      `<span class="min-w-0 flex-1 text-sm font-medium leading-6 text-ink-900 break-words">${esc(l.name)}<span class="sr-only">: </span></span>` +
-      `<span class="${Kit.cls.pill} ${Kit.cls.pillDanger}">${esc(l.type)}${l.rank ? ` (คนที่ ${l.rank})` : ''}</span></div>`;
+      `<span class="min-w-0 flex-1 flex flex-wrap items-center gap-x-2 gap-y-1">` +
+      `<span class="min-w-0 text-sm font-medium leading-6 text-ink-900 break-words">${esc(l.name)}<span class="sr-only">: </span></span>` +
+      `<span class="ml-auto">${pill}</span></span></div>`;
   }
 
   /** Supervisors edit the remark in the textarea; everyone else reads it in #remarkView. */
@@ -2103,7 +2487,7 @@
       count = entries.length + ' รายการ';
       setHtml(box, entries.length
         ? entries.map(a => `<div class="flex gap-2.5"><span class="mt-1.5 w-2 h-2 shrink-0 rounded-full bg-lilac-300" aria-hidden="true"></span>` +
-          `<p class="min-w-0 break-words">${keepNames(esc(a.detail), entries.map(x => x.actor))} — <strong class="font-semibold text-ink-900 whitespace-nowrap">${esc(a.actor)}</strong>` +
+          `<p class="min-w-0 break-words">${keepNames(esc(auditText(a)), entries.map(x => x.actor))} — <strong class="font-semibold text-ink-900 whitespace-nowrap">${esc(a.actor)}</strong>` +
           ` เมื่อ <span class="whitespace-nowrap">${esc(U.thaiStamp(a.timestamp))}</span></p></div>`).join('')
         : note(esc(withDay('ยังไม่มีประวัติการแก้ไขใน', date))));
     } else if (ui.auditLoading[date] || inRanges(ui.fetchingRanges, date)) {
@@ -2117,6 +2501,37 @@
     }
     const c = $('auditCount');
     if (c) c.textContent = count;
+  }
+
+  /**
+   * FIX-CL CL-11: one readable Thai line per audit entry, whatever the server version wrote. The server's Thai detail is used
+   * when there is one (the technical "(image/jpeg, N ตัวอักษร)" of a picture change is dropped); an entry without a Thai
+   * detail — an action this app version does not know yet, or VIEW_PASSWORD — gets a label, never a blank or an English code.
+   */
+  const AUDIT_LABEL = {
+    VIEW_PASSWORD: 'ดูรหัสผ่านของตนเองในแอป',
+    ADMIN: 'งานดูแลระบบจาก Apps Script editor',
+    STORE_PASSWORD: 'บันทึกรหัสผ่านลงชีต',
+    APPROVE_LEAVE: 'อนุมัติลาพักร้อน',
+    REJECT_LEAVE: 'ไม่อนุมัติลาพักร้อน',
+    SET_AVATAR: 'เปลี่ยนรูปโปรไฟล์',
+    RESET_PASSWORD: 'รีเซ็ตรหัสผ่าน',
+    CHANGE_PASSWORD: 'เปลี่ยนรหัสผ่าน',
+    SET_LEAVE: 'บันทึกการลา',
+    CLEAR_LEAVE: 'ยกเลิกการลา',
+    SAVE_DAY: 'บันทึกตารางเวร',
+    CLEAR_DAY: 'ล้างข้อมูลทั้งวัน',
+    AUTO_UNASSIGN: 'นำออกจาก Station อัตโนมัติ'
+  };
+  function auditText(a) {
+    const detail = String(a && a.detail != null ? a.detail : '').trim();
+    const action = String(a && a.action || '');
+    if (/[฀-๿]/.test(detail)) {
+      // no technical leftovers: the picture's type and size, the word "hash" (Code.gs 3.0 STORE_PASSWORD after an owner's edit)
+      return detail.replace(/\s*\(image\/[a-z]+,[^)]*\)\s*$/i, '').replace(/สร้าง hash จากรหัสผ่าน/g, 'ตั้งรหัสผ่านตามที่');
+    }
+    if (AUDIT_LABEL[action]) return AUDIT_LABEL[action];
+    return detail || 'มีการแก้ไขข้อมูล';
   }
 
   function loadAudit(date) {
@@ -2155,11 +2570,13 @@
       setHtml(own, '');
       setVisible(hint, false);
       $('leaveCountBadge').textContent = '0 คน';
+      renderMyRequests();
       renderLeaveSheet();
       return;
     }
     const leaves = activeLeaves(date);
-    $('leaveCountBadge').textContent = 'ลา ' + Object.keys(leaves).length + ' คน';
+    $('leaveCountBadge').textContent = 'ลา ' + Object.keys(absentLeaves(date)).length + ' คน';   // absent people only (R1b)
+    renderMyRequests();
     const view = dayView(date);
     const me = myName();
     const sup = isSup();
@@ -2172,8 +2589,7 @@
       renderLeaveSheet();
       return;
     }
-    const queues = {};
-    U.QUEUE_TYPES.forEach(t => { queues[t] = U.queueOrder(leaves, t); });
+    const queues = queuesOf(leaves);
     setHtml(own, mine ? leaveRowHtml(mine, leaves[me], me, sup, queues, true) : '');
     const others = state.staff.filter(s => s.name !== me);
     setHtml(container, `<div class="${Kit.cls.list}">` + others.map(s => leaveRowHtml(s, leaves[s.name], me, sup, queues, false)).join('') + '</div>');
@@ -2182,42 +2598,106 @@
     renderLeaveSheet();
   }
 
-  /** The status of a leave as a pill (word + icon, never colour alone): "ปกติ", or the type with its queue rank. */
-  function leaveStatusPill(type, rank, quietNormal) {
-    if (!type) return quietNormal ? '' : Kit.pill('ปกติ', 'neutral');
-    return Kit.pill(type + (rank ? ` · คนที่ ${rank}` : ''), 'danger', 'calendar-off');
+  /**
+   * The status of a leave row as a pill (word + icon, never colour alone): "ปกติ" (no row), the type with its queue rank
+   * (absent: coral), a doctor visit with its time (sky, "ลาหาหมอตอนเช้า 09:00–11:00"), a pending request (yellow,
+   * "พักร้อน · รออนุมัติ") or a rejected one (neutral, "พักร้อน · ไม่อนุมัติ"). The pill carries data-leave-status.
+   */
+  function leaveStatusPill(leave, rank, quietNormal) {
+    const info = U.leaveInfo(leave);
+    const k = Kit.cls;
+    const TONE = { neutral: k.pillNeutral, pending: k.pillPending, partial: k.pillPartial, danger: k.pillDanger, rejected: k.pillRejected };
+    const p = (text, tone, icon) => `<span class="${k.pill} ${TONE[tone]}" data-tone="${tone}" data-leave-status="${info.status || 'none'}">` +
+      `${icon ? Kit.icon(icon, 'w-3.5 h-3.5') : ''}${esc(text)}</span>`;
+    if (!info.type) return quietNormal ? '' : p('ปกติ', 'neutral', '');
+    const r = rank ? ` · คนที่ ${rank}` : '';
+    // CL-22: one tone per status everywhere — rejected soft coral, pending sun, partial-day accent; CL-24: a time range
+    // always ends with "น."
+    if (info.rejected) return p(info.type + ' · ไม่อนุมัติ', 'rejected', 'x');
+    if (info.pending) return p(info.type + r + ' · รออนุมัติ', 'pending', 'clock');
+    if (info.partial) return p(info.type + (info.timeText ? ' ' + info.timeText : ''), 'partial', 'stethoscope');
+    return p(info.type + r, 'danger', 'calendar-off');
   }
 
   /**
-   * One person's row: a button (data-staff, data-group, data-status = the leave type or '' for ปกติ, data-locked when
-   * this user may not change it). own: the prominent own row in "สถานะของฉัน" (never hidden by the group filter).
+   * One person's row: a button (data-staff, data-group, data-status = the leave type or '' for ปกติ — a rejected request
+   * counts as ปกติ —, data-leave-status = approved | pending | rejected | '' (R1b), data-locked when this user may not
+   * change it). own: the prominent own row in "สถานะของฉัน" (never hidden by the group filter).
    */
   function leaveRowHtml(s, leave, me, sup, queues, own) {
     const k = Kit.cls;
     const isOwner = s.name === me;
     const canEdit = sup || isOwner;
-    const cur = leave ? leave.type : '';
-    const rank = cur && queues[cur] ? queues[cur].indexOf(s.name) + 1 : 0;
+    const info = U.leaveInfo(leave);
+    const cur = leave && !info.rejected ? leave.type : '';
+    const rank = cur ? rankIn(queues, cur, s.name) : 0;
     const meta = leave ? [leave.recordedBy || '', U.thaiStampShort(leave.recordedAt)].filter(Boolean).join(' · ') : '';
     const hide = !own && state.filter !== 'all' && s.group !== state.filter;
     const tags = (isOwner ? `<span class="${k.tagBrand}">คุณ (ของฉัน)</span>` : '') +
       (s.group === 'backup' ? `<span class="${k.tag}">แทนเวร</span>` : '');
     // Minor 15: someone else's row shows a pill only for a leave, and no lock (the hint line above the list says why)
     const trail = canEdit ? Kit.icon('chevron-right', 'w-5 h-5 shrink-0 text-ink-300') : '';
-    const label = s.name + (isOwner ? ' (คุณ)' : '') + ' — ' + (cur ? cur + (rank ? ' คนที่ ' + rank : '') : 'ปกติ') + (canEdit ? '' : ' (แก้ไขไม่ได้)');
+    const said = info.rejected ? info.type + ' ไม่อนุมัติ' : info.pending ? info.type + (rank ? ' คนที่ ' + rank : '') + ' รออนุมัติ'
+      : info.partial ? info.type + (info.timeText ? ' ' + info.timeText : '') : cur ? cur + (rank ? ' คนที่ ' + rank : '') : 'ปกติ';
+    const label = s.name + (isOwner ? ' (คุณ)' : '') + ' — ' + said + (canEdit ? '' : ' (แก้ไขไม่ได้)');
     return `<button type="button" class="leave-row ${k.leaveRow}${own ? ' rounded-2xl border-2 border-brand-100 bg-brand-50/40' : ''}" ` +
-        `data-staff="${esc(s.name)}" data-group="${esc(s.group)}" data-status="${esc(cur)}"${canEdit ? '' : ' data-locked="1"'} ` +
+        `data-staff="${esc(s.name)}" data-group="${esc(s.group)}" data-status="${esc(cur)}" data-leave-status="${info.status}"${canEdit ? '' : ' data-locked="1"'} ` +
         `aria-label="${esc(label)}"${hide ? ' hidden style="display:none"' : ''}>` +
       Kit.avatar(s.name, own ? 'md' : 'sm') +
       `<span class="min-w-0 flex-1">` +
-        `<span class="flex items-center gap-2">` +
-          `<span class="min-w-0 flex-1 flex flex-wrap items-center gap-x-2 gap-y-1"><span class="leave-name font-medium text-ink-900 break-words">${esc(s.name)}</span>${tags}</span>` +
-          (own || cur ? `<span class="shrink-0">${leaveStatusPill(cur, rank)}</span>` : '') +
+        // name (+ tags) and the status pill share a wrapping line: a long pill moves under the name instead of squeezing it
+        `<span class="flex flex-wrap items-center gap-x-2 gap-y-1">` +
+          `<span class="min-w-0 flex flex-wrap items-center gap-x-2 gap-y-1"><span class="leave-name font-medium text-ink-900 break-words">${esc(s.name)}</span>${tags}</span>` +
+          (own || leave ? `<span class="shrink-0 ml-auto">${leaveStatusPill(leave, rank)}</span>` : '') +
         `</span>` +
-        `<span class="meta-badge block ${k.textMeta} mt-0.5${meta ? '' : ' hidden'}" data-staff-meta="${esc(s.name)}">${meta ? 'บันทึกโดย ' + esc(meta) : ''}</span>` +
+        `<span class="meta-badge block ${k.textMeta} mt-0.5${meta ? '' : ' hidden'}" data-staff-meta="${esc(s.name)}">${meta ? 'บันทึกโดย ' + metaHtml(leave) : ''}</span>` +
         (own && !meta && canEdit ? `<span class="block ${k.textMeta} mt-0.5">แตะเพื่อบันทึกหรือเปลี่ยนสถานะ</span>` : '') +
       `</span>${trail}` +
     `</button>`;
+  }
+
+  /**
+   * R1b "คำขอของฉัน": my own pending and rejected requests on any date the server lists (state.requests — the last 30 days
+   * and later), newest date last. Each row opens that date's leave sheet. Hidden while there is none (always on an older
+   * server; for the Supervisor the list holds other people's requests, which the approval inbox shows instead).
+   */
+  function renderMyRequests() {
+    const card = $('myRequestsCard');
+    if (!card) return;
+    const me = myName();
+    // CL-4: never on a server older than 3.0 (its answers carry no requests: whatever is still in memory is stale)
+    const mine = state.user && ui.serverMode !== 'old' ? state.requests.filter(r => r.staff === me && U.leaveStatus(r) !== 'approved') : [];
+    setVisible(card, mine.length > 0);
+    if (!mine.length) { setHtml($('myRequestsList'), ''); setText($('myRequestsCount'), ''); return; }
+    const k = Kit.cls;
+    const pending = mine.filter(r => U.leaveStatus(r) === 'pending').length;
+    // CL-22 / CL-24: the badge in the tone of what it counts (pending = sun, only rejections = soft coral), counted in "คำขอ"
+    const countEl = $('myRequestsCount');
+    setText(countEl, pending ? 'รออนุมัติ ' + pending : 'ไม่อนุมัติ ' + mine.length + ' คำขอ');
+    const countCls = k.pill + ' ' + (pending ? k.pillPending : k.pillRejected);
+    if (countEl && countEl.className !== countCls) countEl.className = countCls;
+    setHtml($('myRequestsList'), mine.map(r => {
+      const info = U.leaveInfo(r);
+      const when = U.thaiDateShort(r.date, { weekday: true });
+      const sub = info.rejected
+        ? ['ไม่อนุมัติ' + (r.decidedBy ? ' โดย ' + r.decidedBy : ''), r.note ? 'เหตุผล: ' + r.note : ''].filter(Boolean).join(' · ')
+        : (r.recordedAt ? 'ส่งคำขอเมื่อ ' + U.thaiStampShort(r.recordedAt) : 'รอ Supervisor อนุมัติ');
+      // CL-24: the rejected row's accessible name includes the reason shown on screen
+      const said = info.type + ' ' + U.thaiDate(r.date) + ' — ' + (info.rejected ? 'ไม่อนุมัติ' + (r.note ? ' เหตุผล: ' + r.note : '') : 'รออนุมัติ');
+      return `<button type="button" class="request-row ${k.leaveRow}" data-date="${esc(r.date)}" data-staff="${esc(r.staff)}" data-request-status="${info.status}" ` +
+          `aria-label="${esc(said)}">` +
+        `<span class="${k.listIcon} ${info.rejected ? k.listIconDanger : k.listIconSun}">${Kit.icon(info.rejected ? 'x' : 'clock', 'w-5 h-5')}</span>` +
+        `<span class="min-w-0 flex-1">` +
+          `<span class="flex flex-wrap items-center gap-x-2 gap-y-1"><span class="font-medium text-ink-900 whitespace-nowrap">${esc(when)}</span>` +
+          `${leaveStatusPill(r, 0)}</span>` +
+          `<span class="block ${k.textMeta} mt-0.5 whitespace-pre-line break-words [overflow-wrap:anywhere]">${esc(sub)}</span>` +
+        `</span>${Kit.icon('chevron-right', 'w-5 h-5 shrink-0 text-ink-300')}</button>`;
+    }).join(''));
+  }
+
+  function onMyRequestClick(e) {
+    const row = e.target && e.target.closest ? e.target.closest('.request-row[data-date]') : null;
+    if (row) spawn(() => openLeaveFor(row.dataset.date, row.dataset.staff));
   }
 
   function setFilter(f) {
@@ -2237,36 +2717,144 @@
     if (!dayKnown(date)) return;
     ui.leaveSheet = { staff, date, locked: !(isSup() || staff === myName()) };
     ui.pendingLeave = null;
+    ui.leaveTime = null;
+    ui.leaveTimeError = '';
+    ui.leaveBusy = '';
     showModal('confirmLeaveModal');
     renderLeaveSheet();
+  }
+
+  /**
+   * R1b: opens the leave sheet of (date, staff) from anywhere (คำขอของฉัน, the approval inbox via core.openLeave): selects
+   * the date, makes sure its data is loaded, then opens the sheet. → Promise<boolean> (false when it could not open).
+   */
+  async function openLeaveFor(date, staff) {
+    if (!state.user || !U.isValidYmd(date) || !activeSet().has(staff)) return false;
+    const alive = sessionAlive();
+    if (!(await setSelectedDate(date)) || !alive()) return false;
+    if (!dayKnown(date)) {
+      const w = windowFor(date);
+      try { await ensureRange(w.from, w.to); } catch (e) { if (!alive()) return false; handleError(e, { quiet: true }); }
+      if (!alive() || state.selectedDate !== date) return false;
+    }
+    if (!dayKnown(date)) { toast(msgNotLoaded(date)); return false; }
+    if (isShown('confirmLeaveModal')) closeConfirmLeave();
+    openLeaveSheet(staff);
+    return isShown('confirmLeaveModal');
+  }
+
+  /** The leave types the sheet offers: the doctor-visit types only when the server has them (serverHas('leave2')). */
+  function sheetTypes(curType) {
+    const list = serverHas('leave2') ? U.LEAVE_TYPES.slice() : U.LEAVE_TYPES.filter(t => !U.isPartialType(t));
+    if (curType && list.indexOf(curType) < 0) list.push(curType);   // never hide the person's current type
+    return list;
+  }
+
+  /** What the person has now, for picking: {type, detail} — a rejected request counts as ปกติ ({type: ''}). */
+  function sheetCurrent(leave) {
+    const info = U.leaveInfo(leave);
+    if (!info.type || info.rejected) return { type: '', detail: '' };
+    return { type: info.type, detail: info.kind === 'partial' ? (U.parseTimeRange(leave.detail) || {}).value || '' : '' };
+  }
+
+  /** The picked option: ui.pendingLeave, else the current one. */
+  function sheetPick(sh, cur) {
+    const p = ui.pendingLeave;
+    return p && p.staff === sh.staff ? { type: p.type, detail: p.detail || '' } : cur;
+  }
+
+  /**
+   * Other people's vacations that hold one of the date's automatic slots: every non-rejected พักร้อน row of someone else
+   * (the server's rule, DESIGN-backend-data §B.3 — all rows, also of people no longer active).
+   */
+  function vacationsTaken(date, staff) {
+    const map = leavesOn(date);
+    return Object.keys(map).filter(n => n !== staff && map[n] && map[n].type === 'พักร้อน' && U.leaveStatus(map[n]) !== 'rejected').length;
+  }
+
+  /** The pick will become a pending request (staff member, vacation, the automatic slots of that date are taken). */
+  function willBePending(sh, pick, cur) {
+    if (!pick || pick.type !== 'พักร้อน' || cur.type === 'พักร้อน' || isSup() || !serverHas('approval')) return false;
+    const slots = state.rules.vacationAutoSlots;
+    return Number.isInteger(slots) && vacationsTaken(sh.date, sh.staff) >= slots;
+  }
+
+  /** CL-20: the doctor-visit tiles carry a short label (never wraps at 360 px or 130 % text); the full type stays their
+   *  accessible name and the wording of every pill. */
+  const TILE_LABEL = { 'ลาหาหมอตอนเช้า': 'หาหมอ (เช้า)', 'ลาหาหมอตอนบ่าย': 'หาหมอ (บ่าย)' };
+
+  /**
+   * CL-15: the leave sheet re-renders its tiles, presets and status box on every pick — focus stays on "the same" control
+   * (found again by its data-val / data-time / data-leave-act), else on the sheet's title, never on <body>.
+   */
+  const SHEET_FOCUS_ATTRS = ['data-val', 'data-time', 'data-leave-act'];
+  function sheetFocusKey() {
+    const a = document.activeElement;
+    const modal = $('confirmLeaveModal');
+    if (!a || !modal || !modal.contains(a) || a.id) return null;
+    for (const attr of SHEET_FOCUS_ATTRS) {
+      if (a.hasAttribute(attr)) return { node: a, sel: '#confirmLeaveModal [' + attr + '="' + String(a.getAttribute(attr)).replace(/["\\]/g, '\\$&') + '"]' };
+    }
+    return null;
+  }
+  function restoreSheetFocus(key) {
+    if (!key || key.node.isConnected || !isShown('confirmLeaveModal')) return;
+    const el = document.querySelector(key.sel);
+    const target = el && !el.disabled ? el : $('confirmLeaveTitle');
+    if (target) { try { target.focus({ preventScroll: true }); } catch (e) { target.focus(); } }
+  }
+
+  /** The pick is a pending request that the Supervisor decides in this sheet (อนุมัติ / ไม่อนุมัติ in the status box). */
+  function sheetIsDecision(sh, leave) {
+    return !!leave && !sh.locked && isSup() && U.leaveStatus(leave) === 'pending' && leave.type === 'พักร้อน' &&
+      typeof use('leave.decide') === 'function';
   }
 
   function renderLeaveSheet() {
     const sh = ui.leaveSheet;
     if (!sh || !isShown('confirmLeaveModal')) return;
     if (!state.user || !activeSet().has(sh.staff)) { closeConfirmLeave(); return; }
+    const focusKey = sheetFocusKey();
     const k = Kit.cls;
     const leaves = activeLeaves(sh.date);
-    const leave = leaves[sh.staff];
-    const cur = leave ? leave.type : '';
+    const leave = leaves[sh.staff] || null;
+    const info = U.leaveInfo(leave);
+    const cur = sheetCurrent(leave);
     const p = ui.pendingLeave;
-    const pick = p ? p.type : cur;
-    const queues = {};
-    U.QUEUE_TYPES.forEach(t => { queues[t] = U.queueOrder(leaves, t); });
-    const rankOf = t => (queues[t] ? queues[t].indexOf(sh.staff) + 1 : 0);
-    const curRank = cur ? rankOf(cur) : 0;
+    const pick = sheetPick(sh, cur);
+    const queues = queuesOf(leaves);
+    const curRank = info.type && !info.rejected ? rankIn(queues, info.type, sh.staff) : 0;
     const meta = leave ? [leave.recordedBy || '', U.thaiStampShort(leave.recordedAt)].filter(Boolean).join(' · ') : '';
+    const busy = ui.leaveSaving;
+    const pendingSoon = !!p && willBePending(sh, pick, cur);
+    const deciding = sheetIsDecision(sh, leave);
     $('confirmLeaveTitle').textContent = sh.locked ? 'สถานะการลา' : 'บันทึกการลา';
-    let html = `<div class="flex items-center gap-3 min-w-0">${Kit.avatar(sh.staff, 'md')}<div class="min-w-0 flex-1">` +
+    // the status pill wraps under the name and date when it is long (a request, a doctor visit with its time)
+    let html = `<div class="flex items-center gap-3 min-w-0">${Kit.avatar(sh.staff, 'md')}` +
+      `<div class="min-w-0 flex-1 flex flex-wrap items-center gap-x-3 gap-y-1"><div class="min-w-0">` +
       `<p class="font-display text-base font-medium leading-6 text-ink-900 break-words">${esc(sh.staff)}</p>` +
-      `<p class="${k.textMeta}">${esc(U.thaiDate(sh.date))}</p></div>${leaveStatusPill(cur, curRank)}</div>` +
-      (meta ? `<p class="${k.textCaption}">บันทึกโดย ${esc(meta)}</p>` : '');
+      `<p class="${k.textMeta}">${esc(U.thaiDate(sh.date))}</p></div><span class="ml-auto">${leaveStatusPill(leave, curRank)}</span></div></div>` +
+      (meta ? `<p class="${k.textCaption}">บันทึกโดย ${metaHtml(leave)}</p>` : '');
+    html += leaveStatusBoxHtml(sh, leave, info, busy);
     if (p) {
       const queue = queues[p.type] ? queues[p.type].filter(n => n !== sh.staff).length : 0;
-      html += `<div class="${k.banner} ${k.bannerInfo}">${Kit.icon('info', 'w-5 h-5 shrink-0 mt-0.5')}<p class="min-w-0">` +
-        `เปลี่ยนเป็น <strong class="font-semibold">${esc(p.type === '' ? 'ปกติ (ยกเลิกวันลา)' : p.type)}</strong>` +
-        (queues[p.type] ? ` — จะเป็นคนที่ ${queue + 1} ของ${esc(p.type)}${esc(dayRef(sh.date, { year: false }))}` : '') +
-        ` · กด "บันทึก" เพื่อยืนยัน</p></div>`;
+      const partialPick = U.isPartialType(p.type);
+      const what = p.type === '' ? (info.pending ? 'ปกติ (ยกเลิกคำขอ)' : 'ปกติ (ยกเลิกวันลา)') : p.type + (partialPick && p.detail ? ' ' + U.formatTimeRange(p.detail) : '');
+      if (pendingSoon) {
+        // CL-18: the third (or later) vacation — ONE notice that says what happens, not an info line plus a warning
+        const slots = state.rules.vacationAutoSlots;
+        const why = slots === 0 ? 'ทุกคำขอพักร้อนต้องให้ Supervisor อนุมัติ'   // CL-6
+          : withDay('', sh.date, 'มีผู้ลาพักร้อนแล้ว ' + vacationsTaken(sh.date, sh.staff) + ' คน') + ' คำขอนี้จะส่งให้ Supervisor อนุมัติ';
+        html += `<div class="${k.banner} ${k.bannerWarn}" data-leave-pick data-vacation-notice role="status">${Kit.icon('alert-triangle', 'w-5 h-5 shrink-0 mt-0.5')}` +
+          `<p class="min-w-0">เปลี่ยนเป็น <strong class="font-semibold">${esc(what)}</strong> — <span data-vacation-why>${esc(why)}</span>` +
+          ` · กด "ส่งคำขอ" เพื่อยืนยัน</p></div>`;
+      } else {
+        html += `<div class="${k.banner} ${k.bannerInfo}" data-leave-pick>${Kit.icon('info', 'w-5 h-5 shrink-0 mt-0.5')}<p class="min-w-0">` +
+          `เปลี่ยนเป็น <strong class="font-semibold">${esc(what)}</strong>` +
+          (queues[p.type] ? ` — จะเป็นคนที่ ${queue + 1} ของ${esc(p.type)}${esc(dayRef(sh.date, { year: false }))}` : '') +
+          (partialPick && !p.detail ? ' — เลือกช่วงเวลาด้านล่าง' : ' · กด "บันทึก" เพื่อยืนยัน') +
+          `</p></div>`;
+      }
     }
     setHtml($('confirmLeaveText'), html);
     const note = $('leaveSheetNote');
@@ -2274,18 +2862,131 @@
       ? `<div class="${k.note}">${Kit.icon('lock', 'w-5 h-5 shrink-0 mt-0.5 text-ink-500')}<p class="min-w-0">แก้ไขได้เฉพาะสถานะของตนเอง — หากข้อมูลไม่ถูกต้อง แจ้ง Supervisor</p></div>`
       : '');
     setVisible(note, sh.locked);
-    setHtml($('leaveOptions'), [''].concat(U.LEAVE_TYPES).map(val => {
-      const on = val === pick;
-      const rank = val && val === cur ? curRank : 0;
-      return `<button type="button" class="${LV_TILE}${on ? k.tileOn : k.tileOff}${val === '' ? ' col-span-2' : ''}" ` +
-        `data-staff="${esc(sh.staff)}" data-val="${esc(val)}" aria-pressed="${on ? 'true' : 'false'}"${sh.locked ? ' disabled' : ''}>` +
-        (on ? Kit.icon('check', 'w-4 h-4 shrink-0') : '') + `<span>${esc(val === '' ? 'ปกติ' : val)}</span>` +
+    // CL-18: a rejected request is not "ปกติ was chosen": no tile is on until the owner picks one
+    const onType = p ? pick.type : info.rejected ? null : pick.type;
+    setHtml($('leaveOptions'), [''].concat(sheetTypes(cur.type)).map(val => {
+      const on = val === onType;
+      const rank = val && val === cur.type ? curRank : 0;
+      const partialTile = U.isPartialType(val);
+      const label = val === '' ? 'ปกติ' : TILE_LABEL[val] || val;
+      return `<button type="button" class="${partialTile ? LV_TILE_TIGHT : LV_TILE}${on ? k.tileOn : k.tileOff}${val === '' ? ' col-span-2' : ''}" ` +
+        `data-staff="${esc(sh.staff)}" data-val="${esc(val)}" aria-pressed="${on ? 'true' : 'false'}"` +
+        `${label !== (val || 'ปกติ') ? ` aria-label="${esc(val + (rank ? ' (คนที่ ' + rank + ')' : ''))}"` : ''}${sh.locked || busy ? ' disabled' : ''}>` +
+        (on ? Kit.icon('check', 'w-4 h-4 shrink-0') : partialTile ? Kit.icon('stethoscope', 'w-4 h-4 shrink-0 text-accent-700') : '') +
+        `<span>${esc(label)}</span>` +
         (rank ? `<span class="text-xs font-medium">(คนที่ ${rank})</span>` : '') + '</button>';
     }).join(''));
+    renderLeaveTime(sh, pick);
     const save = $('confirmLeaveBtn');
-    setVisible(save, !sh.locked);
-    if (!ui.leaveSaving) save.disabled = !p;
-    $('confirmLeaveCancelBtn').textContent = sh.locked ? 'ปิด' : 'ยกเลิก';
+    // CL-18: while the sheet is the Supervisor's decision (and nothing else is picked) the footer is a single "ปิด"
+    const onlyClose = sh.locked || (deciding && !p);
+    setVisible(save, !onlyClose);
+    if (!ui.leaveSaving) {
+      save.disabled = !p || (U.isPartialType(p.type) && !p.detail);
+      save.textContent = pendingSoon ? 'ส่งคำขอ' : 'บันทึก';
+    }
+    $('confirmLeaveCancelBtn').textContent = onlyClose ? 'ปิด' : 'ยกเลิก';
+    restoreSheetFocus(focusKey);
+  }
+
+  /**
+   * R1b: the current row's status, under the person — pending (when it was asked; for the Supervisor "รอคุณอนุมัติ" with the
+   * decide buttons of core.use('leave.decide'), for its owner "ยกเลิกคำขอ"), rejected (by whom, when, the reason; for its owner
+   * "ขอใหม่" / "ลบคำขอ"), approved by the Supervisor past the automatic slots (by whom, the note), a doctor visit (its time).
+   * '' for an ordinary approved row.
+   */
+  function leaveStatusBoxHtml(sh, leave, info, busy) {
+    if (!leave || !info.type) return '';
+    const k = Kit.cls;
+    const box = (tone, icon, iconTone, main, sub, extra, key) =>
+      `<div class="${k.statusBox} ${tone}" data-leave-box="${key}"><span class="${k.listIcon} ${iconTone}">${Kit.icon(icon, 'w-5 h-5')}</span>` +
+      `<div class="min-w-0 flex-1 space-y-0.5"><p class="font-medium">${main}</p>${sub ? `<p class="${k.textMeta} break-words">${sub}</p>` : ''}${extra || ''}</div></div>`;
+    const by = (who, at) => [who ? 'โดย ' + esc(who) : '', at ? esc(U.thaiStamp(at)) : ''].filter(Boolean).join(' · ');
+    const reason = leave.note ? `<p class="text-sm leading-6 text-ink-800 whitespace-pre-line break-words [overflow-wrap:anywhere]">เหตุผล: ${esc(leave.note)}</p>` : '';
+    const btn = (key, look, icon, label) => {
+      const on = ui.leaveBusy === key;
+      return `<button type="button" class="${k.btn} ${look} flex-1 min-w-0" data-leave-act="${key}"${busy ? ' disabled' : ''}${on ? ' aria-busy="true"' : ''}>` +
+        (on ? 'กำลังบันทึก…' : Kit.icon(icon, 'w-5 h-5') + `<span class="truncate">${label}</span>`) + '</button>';
+    };
+    if (info.pending) {
+      const decide = sheetIsDecision(sh, leave);
+      const own = !decide && sh.staff === myName() && !sh.locked;
+      const acts = decide ? `<div class="flex gap-2 pt-2">${btn('rejected', k.btnSecondary, 'x', 'ไม่อนุมัติ')}${btn('approved', k.btnPrimary, 'check', 'อนุมัติ')}</div>`
+        : own ? `<div class="flex gap-2 pt-2">${btn('cancel', k.btnSecondary, 'x', 'ยกเลิกคำขอ')}</div>` : '';
+      return box(k.statusBoxPending, 'clock', k.listIconSun, isSup() ? 'รอคุณอนุมัติ' : 'รอ Supervisor อนุมัติ',
+        (leave.recordedAt ? 'ส่งคำขอเมื่อ ' + `<span class="whitespace-nowrap">${esc(U.thaiStamp(leave.recordedAt))}</span>` + ' · ' : '') + esc(MSG.pendingNote), acts, 'pending');
+    }
+    if (info.rejected) {
+      const own = sh.staff === myName() && !sh.locked;
+      const acts = own ? `<div class="flex gap-2 pt-2">${btn('delete', k.btnSecondary, 'trash', 'ลบคำขอ')}${btn('rerequest', k.btnPrimary, 'refresh', 'ขอใหม่')}</div>` : '';
+      return box(k.statusBoxRejected, 'x', k.listIconDanger, 'ไม่อนุมัติ', by(leave.decidedBy, leave.decidedAt), reason + acts, 'rejected');
+    }
+    if (info.partial) {
+      return box(k.statusBoxPartial, 'stethoscope', k.listIconInfo, esc(info.type) + (info.timeText ? ` <span class="whitespace-nowrap">${esc(info.timeText)}</span>` : ''),
+        esc(MSG.partialNote), '', 'partial');
+    }
+    if (leave.decidedBy) {   // the Supervisor approved a request past the automatic slots
+      return box(k.statusBoxOk, 'check-circle', 'bg-emerald-100 text-emerald-800', 'อนุมัติแล้ว', by(leave.decidedBy, leave.decidedAt), reason, 'approved');
+    }
+    return '';
+  }
+
+  /**
+   * The time step under the tiles while a doctor-visit type is picked: preset chips of that type, then the two time inputs
+   * (showing the picked range; left alone while the user is typing a custom one: ui.leaveTime) and the error line.
+   * CL-12: an empty field shows the hint "เลือกเวลา" (iOS draws nothing in an empty time field): data-empty on the input.
+   */
+  function renderLeaveTime(sh, pick) {
+    const step = $('leaveTimeStep');
+    if (!step) return;
+    const on = !!sh && !sh.locked && U.isPartialType(pick.type);
+    setVisible(step, on);
+    if (!on) {
+      setHtml($('leaveTimePresets'), '');
+      ui.leaveTime = null;
+      return;
+    }
+    const k = Kit.cls;
+    const busy = ui.leaveSaving;
+    const presets = U.PARTIAL_TIME_PRESETS[pick.type] || [];
+    setText($('leaveTimeLabel'), pick.type === 'ลาหาหมอตอนบ่าย' ? 'ช่วงเวลาที่ลา (บ่าย)' : 'ช่วงเวลาที่ลา (เช้า)');
+    setHtml($('leaveTimePresets'), presets.map(v => {
+      const sel = v === pick.detail;
+      return `<button type="button" class="${k.timeChip} ${sel ? k.chipOn : k.chipOff}" data-time="${esc(v)}" aria-pressed="${sel ? 'true' : 'false'}"` +
+        `${busy ? ' disabled' : ''}>${esc(U.formatTimeRange(v, { unit: false }))}</button>`;
+    }).join(''));
+    const start = $('leaveTimeStart'), end = $('leaveTimeEnd');
+    if (!ui.leaveTime) {   // not typing: the inputs show the picked range
+      const r = U.parseTimeRange(pick.detail);
+      if (start.value !== (r ? r.start : '')) start.value = r ? r.start : '';
+      if (end.value !== (r ? r.end : '')) end.value = r ? r.end : '';
+    }
+    markEmptyTimes();
+    start.disabled = busy;
+    end.disabled = busy;
+    const err = ui.leaveTimeError || '';
+    setText($('leaveTimeError'), err);
+    setVisible($('leaveTimeError'), !!err);
+    [start, end].forEach(el => el.setAttribute('aria-invalid', err ? 'true' : 'false'));
+  }
+
+  /** CL-12: data-empty="1" on an empty time field — its hint "เลือกเวลา" shows and the native "--:--" is hidden (index.html). */
+  function markEmptyTimes() {
+    ['leaveTimeStart', 'leaveTimeEnd'].forEach(id => {
+      const el = $(id);
+      // a half-typed field on a desktop (hours only) still has value '' but validity.badInput: it is not empty (reviewer 2)
+      if (el) el.setAttribute('data-empty', el.value || (el.validity && el.validity.badInput) ? '0' : '1');
+    });
+  }
+
+  /**
+   * CL-12: after a doctor-visit tile is picked the time step comes into view inside the sheet (it starts below the fold at
+   * 360×640 and in landscape). An instant scroll: a smooth one can be cut short by the re-render that follows a pick.
+   */
+  function revealTimeStep() {
+    const step = $('leaveTimeStep');
+    if (!step || step.classList.contains('hidden') || typeof step.scrollIntoView !== 'function') return;
+    try { step.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) { step.scrollIntoView(false); }
   }
 
   /* ---------- leave calendar: how many people are on leave on each day of a month ---------- */
@@ -2298,10 +2999,16 @@
 
   /** leaveList(date) limited to the group filter of the leave tab (queue ranks stay those of everyone). */
   function filteredLeaveList(date) {
-    const list = leaveList(date);
-    if (state.filter === 'all') return list;
+    return filteredLines(date).absent;
+  }
+
+  /** leaveLines(date) limited to the group filter of the leave tab (R1b: absent, partial and pending lines). */
+  function filteredLines(date) {
+    const lines = leaveLines(date);
+    if (state.filter === 'all') return lines;
     const groups = new Map(state.staff.map(s => [s.name, s.group]));
-    return list.filter(l => groups.get(l.name) === state.filter);
+    const keep = l => groups.get(l.name) === state.filter;
+    return { absent: lines.absent.filter(keep), partial: lines.partial.filter(keep), pending: lines.pending.filter(keep) };
   }
 
   function renderLeaveCalendar() {
@@ -2311,19 +3018,23 @@
     const today = U.todayStr();
     $('calMonthLabel').textContent = U.thaiMonthYear(month);
 
-    let loading = false, missing = false, knownDays = 0, total = 0;
+    let loading = false, missing = false, knownDays = 0, total = 0, partials = 0, pendings = 0;
     const byType = nameMap();
     const cells = U.monthGrid(month).flat().map((date, i) => {
-      if (!date) return '<div class="h-12" aria-hidden="true"></div>';
+      if (!date) return '<div class="h-14" aria-hidden="true"></div>';
       const view = dayView(date);
       const known = view === 'ready' || view === 'cached';
       if (view === 'loading') loading = true;
       else if (!known) missing = true;
       else knownDays++;
-      const list = known ? filteredLeaveList(date) : [];
+      const lines = known ? filteredLines(date) : { absent: [], partial: [], pending: [] };
+      const list = lines.absent;   // only ABSENT people count (R1b); doctor visits and pending requests are markers
       list.forEach(l => { byType[l.type] = (byType[l.type] || 0) + 1; });
       total += list.length;
-      return calDayHtml(date, known ? list.length : null, i % 7 === 0, date === today, date === state.selectedDate);
+      partials += lines.partial.length;
+      pendings += lines.pending.length;
+      return calDayHtml(date, known ? list.length : null, i % 7 === 0, date === today, date === state.selectedDate,
+        { partial: lines.partial.length, pending: lines.pending.length });
     });
     const head = U.THAI_WEEKDAYS_SHORT.map((d, i) =>
       `<div class="text-xs font-medium leading-6 ${i === 0 ? 'text-coral-600' : 'text-slate-500'}">${d}</div>`).join('');
@@ -2346,7 +3057,12 @@
       ? `รวมทั้งเดือน${scope}: ${loading ? 'กำลังโหลดข้อมูล…' : 'ยังไม่มีข้อมูลของเดือนนี้ในเครื่อง'}`
       : total ? `${totalHead}: ลา ${total} ครั้ง · `
         : partial ? `${totalHead}: ยังไม่พบการลา (ข้อมูลยังไม่ครบทั้งเดือน)` : `${totalHead}: ไม่มีการลา`) +
-      (knownDays && total ? types.map(t => `<span class="whitespace-nowrap">${esc(t)}</span>`).join(' · ') : ''));
+      (knownDays && total ? types.map(t => `<span class="whitespace-nowrap">${esc(t)}</span>`).join(' · ') : '') +
+      // R1b: doctor visits (still at work) and pending requests are not leave days: their own line, never in the total
+      (knownDays && (partials || pendings) ? '<span class="block mt-0.5 font-normal" data-cal-extra>' +
+        [partials ? `<span class="whitespace-nowrap">ลาบางช่วง (ยังทำงาน) ${partials} ครั้ง</span>` : '',
+          pendings ? `<span class="whitespace-nowrap">รออนุมัติ ${pendings} คำขอ</span>` : ''].filter(Boolean).join(' · ') + '</span>' : ''));
+    setVisible($('calMarkLegend'), ui.serverMode === 'v3' && serverHas('leave2'));
     renderCalDayDetail(month);
   }
 
@@ -2356,20 +3072,29 @@
    * with a white number (an inner fill, so the heat colour of the cell stays in its class), today when not selected has
    * an accent ring and an accent-700 number, keyboard focus is an offset ink ring.
    */
-  function calDayHtml(date, count, sunday, isToday, selected) {
+  function calDayHtml(date, count, sunday, isToday, selected, extra) {
     const k = Kit.cls;
+    const ex = extra || {};
+    // CL-13: a doctor visit is a circle, a pending request a diamond (shape and colour), in their own row under the number;
+    // white on the selected (brand-600) day
+    const marks = (ex.partial ? `<span class="${selected ? k.calMarkPartialSel : k.calMarkPartial}" data-mark="partial"></span>` : '') +
+      (ex.pending ? `<span class="${selected ? k.calMarkPendingSel : k.calMarkPending}" data-mark="pending"></span>` : '');
+    const said = [ex.partial ? `ลาบางช่วง ${ex.partial} คน` : '', ex.pending ? `รออนุมัติ ${ex.pending} คำขอ` : ''].filter(Boolean).join(' · ');
     const i = count === null ? -1 : Math.min(count, CAL_HEAT_BG.length - 1);
     const bg = i < 0 ? 'bg-cream-50 border-dashed' : CAL_HEAT_BG[i];
     const border = isToday && !selected ? k.calCellToday : i < 0 ? 'border-ink-200' : CAL_HEAT_BORDER[i];
-    const num = k.calNum + ' ' + (selected ? k.calNumSel : isToday ? k.calNumToday : sunday ? k.calNumSunday : 'text-ink-700');
+    // CL-13: a Sunday number on a strongly tinted day (3+ people) sits on a white chip (AA for 12 px text)
+    const num = k.calNum + ' ' + (selected ? k.calNumSel : isToday ? k.calNumToday : sunday ? (i >= 3 ? k.calNumSundayTint : k.calNumSunday) : 'text-ink-700');
     const label = U.thaiDate(date) + (isToday ? ' (วันนี้)' : '') +
-      (count === null ? ' — ยังไม่มีข้อมูล' : count ? ` — ลา ${count} คน` : ' — ไม่มีผู้ลา');
+      (count === null ? ' — ยังไม่มีข้อมูล' : count ? ` — ลา ${count} คน` : ' — ไม่มีผู้ลา') + (said ? ' · ' + said : '');
     return `<button type="button" class="${k.calCell} ${bg} ${border}" ` +
         `data-date="${date}" data-count="${count === null ? '' : count}" aria-pressed="${selected ? 'true' : 'false'}"` +
         `${isToday ? ' aria-current="date" data-today="1"' : ''} aria-label="${esc(label)}" title="${esc(label)}">` +
       (selected ? `<span class="${k.calSelFill}" data-cal-selected aria-hidden="true"></span>` : '') +
       `<span class="${num}">${Number(date.slice(8))}</span>` +
-      (count ? `<span class="${selected ? k.calCountSel : k.calCount}">${count} คน</span>` : '') +
+      // CL-13: below 360 px the cell shows only the number of people ("คน" is in the cell's label)
+      (count ? `<span class="${selected ? k.calCountSel : k.calCount}">${count}<span class="max-[359px]:hidden"> คน</span></span>` : '') +
+      (marks ? `<span class="${k.calMarks}" data-cal-marks aria-hidden="true">${marks}</span>` : '') +
     `</button>`;
   }
 
@@ -2387,9 +3112,15 @@
       setHtml(el, title + '</p>' + muted('ยังไม่มีข้อมูลในเครื่อง'));
       return;
     }
-    const list = filteredLeaveList(date);
-    setHtml(el, title + ` — ลา ${list.length} คน</p>` +
-      (list.length ? list.map(leaveItemHtml).join('') : muted('ไม่มีผู้ลา')));
+    const lines = filteredLines(date);
+    // CL-16: the day header says what the list below counts — mixed kinds on a line of their own, each part unbroken
+    const mixed = lines.partial.length || lines.pending.length;
+    const counts = mixed
+      ? '</p><p class="text-[0.8125rem] font-medium leading-5 text-slate-600" data-cal-counts>' +
+        leaveCountsText(lines).split(' · ').map(t => `<span class="whitespace-nowrap">${esc(t)}</span>`).join(' · ') + '</p>'
+      : ` — <span data-cal-counts>ลา ${lines.absent.length} คน</span></p>`;
+    setHtml(el, title + counts +
+      (lines.absent.length + lines.partial.length + lines.pending.length ? linesHtml(lines) : muted('ไม่มีผู้ลา')));
   }
 
   /** Shows `month` at once (whatever is loaded) and fetches its missing days. */
@@ -2563,12 +3294,19 @@
         `</div></div>`;
     }).join(''));
 
-    const leaves = leaveList(date);
-    setHtml($('resultLeaves'), leaves.length
-      ? leaves.map(l => `<div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">` +
-        `<span style="min-width:0; font-weight:600;"><span style="color:#B32A45;">• </span>${esc(l.name)}</span>` +
-        `<span style="flex:none; padding:0 10px; border-radius:999px; background:#FFFFFF; border:1px solid #FFC2C6; color:#B32A45; font-size:13px; font-weight:600; line-height:22px;">` +
-        `${esc(l.type)}${l.rank ? ` (คนที่ ${l.rank})` : ''}</span></div>`).join('')
+    // absent people first (the count of the day), then partial-day absences with their time only (FIX-CL CL-10: the picture
+    // is posted outside the app — a neutral "ลาบางช่วง", never the health-related type; pending requests are not leave days
+    // and are not listed at all)
+    const lines = leaveLines(date);
+    // wrapping: in a narrow preview a long pill moves under the name instead of squeezing it (the exported 420 px fits one line)
+    const imgLine = (l, dot, look, text, kind) => `<div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:2px 10px;"${kind ? ` data-img-leave="${kind}"` : ''}>` +
+      `<span style="min-width:0; font-weight:600; overflow-wrap:normal; word-break:keep-all;"><span style="color:${dot};">• </span>${esc(l.name)}</span>` +
+      `<span style="flex:none; padding:0 10px; border-radius:999px; ${look} font-size:13px; font-weight:600; line-height:22px; white-space:nowrap; margin-left:auto;">${esc(text)}</span></div>`;
+    setHtml($('resultLeaves'), lines.absent.length + lines.partial.length
+      ? lines.absent.map(l => imgLine(l, '#B32A45', 'background:#FFFFFF; border:1px solid #FFC2C6; color:#B32A45;',
+        l.type + (l.rank ? ` (คนที่ ${l.rank})` : ''), '')).join('') +
+        lines.partial.map(l => imgLine(l, '#116C99', 'background:#F0FAFF; border:1px solid #BCE8FB; color:#116C99;',
+          'ลาบางช่วง' + (l.info.timeText ? ' ' + l.info.timeText : ''), 'partial')).join('')
       : `<span style="color:#475569;">${esc(withDay('ไม่มีรายการลา', date))}</span>`);
 
     const rv = (state.user ? viewRemark(date) : '').trim();
@@ -2755,7 +3493,8 @@
 
   /**
    * A tap on an option tile of the leave sheet: picks it (บันทึก saves). Someone else's row (a forced click on a
-   * locked sheet) is refused with the reason; without a network nothing can be saved, so the sheet closes.
+   * locked sheet) is refused with the reason; without a network nothing can be saved, so the sheet closes. A doctor-visit
+   * type (R1b) also needs a time range: the time step appears and keeps the current range when the type is unchanged.
    */
   function onLeaveOptionClick(e) {
     const t = e.target && e.target.closest ? e.target.closest('.lv-chip') : null;
@@ -2767,10 +3506,53 @@
     if (staff !== sh.staff) return;
     if (sh.locked || !(isSup() || staff === myName())) { toast(MSG.ownLeaveOnly); closeConfirmLeave(); return; }
     if (!activeSet().has(staff)) return;
-    if (val !== '' && U.LEAVE_TYPES.indexOf(val) < 0) return;
+    const row = activeLeaves(sh.date)[staff];
+    const cur = sheetCurrent(row);
+    if (val !== '' && sheetTypes(cur.type).indexOf(val) < 0) return;
     if (!requireInternet()) { closeConfirmLeave(); return; }
-    const cur = (activeLeaves(sh.date)[staff] || {}).type || '';
-    ui.pendingLeave = val === cur ? null : { staff, date: sh.date, type: val };
+    ui.leaveTime = null;
+    ui.leaveTimeError = '';
+    // back to what is saved (a doctor visit keeps its range) — for a rejected request ปกติ is a real pick (it removes the row)
+    if (val === cur.type && !(val === '' && U.leaveStatus(row) === 'rejected')) ui.pendingLeave = null;
+    else ui.pendingLeave = { staff, date: sh.date, type: val, detail: '' };
+    renderLeaveSheet();
+    if (U.isPartialType(val)) revealTimeStep();   // CL-12
+  }
+
+  /** R1b: the picked doctor-visit range changed to `detail` ('' = not valid yet). Equal to what is saved → nothing to save. */
+  function setLeaveDetail(detail) {
+    const sh = ui.leaveSheet;
+    if (!sh || sh.locked || ui.leaveSaving) return;
+    const cur = sheetCurrent(activeLeaves(sh.date)[sh.staff]);
+    const pick = sheetPick(sh, cur);
+    if (!U.isPartialType(pick.type)) return;
+    ui.pendingLeave = pick.type === cur.type && detail && detail === cur.detail
+      ? null : { staff: sh.staff, date: sh.date, type: pick.type, detail };
+  }
+
+  /** A preset chip of the time step. */
+  function onLeaveTimePreset(e) {
+    const b = e.target && e.target.closest ? e.target.closest('[data-time]') : null;
+    if (!b || b.disabled || !U.parseTimeRange(b.dataset.time)) return;
+    ui.leaveTime = null;   // the inputs follow the preset
+    ui.leaveTimeError = '';
+    setLeaveDetail(U.parseTimeRange(b.dataset.time).value);
+    renderLeaveSheet();
+  }
+
+  /**
+   * The two time inputs (custom range). While typing the inputs are left alone (ui.leaveTime); the range counts once both
+   * times are valid and start < end. The error shows when both are filled and they do not fit (or on a forced save).
+   */
+  function onLeaveTimeInput(e) {
+    const sh = ui.leaveSheet;
+    if (!sh || sh.locked || ui.leaveSaving) return;
+    const start = $('leaveTimeStart').value, end = $('leaveTimeEnd').value;
+    ui.leaveTime = { start, end };
+    const pickType = sheetPick(sh, sheetCurrent(activeLeaves(sh.date)[sh.staff])).type;
+    const err = U.validateTimeRange(start, end, pickType);   // CL-21: within 06:00–20:00 and the morning / afternoon rule
+    setLeaveDetail(err ? '' : U.joinTimeRange(start, end));
+    ui.leaveTimeError = err && start && end ? err : '';   // a half-filled range only blocks บันทึก (asked again on a forced save)
     renderLeaveSheet();
   }
 
@@ -2778,52 +3560,185 @@
     if (ui.leaveSaving) return;
     ui.pendingLeave = null;
     ui.leaveSheet = null;
+    ui.leaveTime = null;
+    ui.leaveTimeError = '';
     hideModal('confirmLeaveModal');
   }
 
   async function onConfirmLeave() {
     const p = ui.pendingLeave;
     if (!p || ui.leaveSaving) return;
+    if (U.isPartialType(p.type) && !U.parseTimeRange(p.detail)) {   // the button is disabled then; a forced click explains
+      ui.leaveTimeError = U.validateTimeRange(($('leaveTimeStart') || {}).value, ($('leaveTimeEnd') || {}).value, p.type) || 'กรุณาเลือกช่วงเวลาที่ลา';
+      renderLeaveSheet();
+      return;
+    }
+    await submitLeave(p, 'save');
+  }
+
+  /**
+   * The leave sheet's writes: บันทึก (the pick), and for the owner of a rejected request "ขอใหม่" (the same type again —
+   * a new queue position) and "ลบคำขอ" (type ''). setLeave carries `detail` only for a doctor-visit type (only offered by
+   * a server with 'leave2'). A VALIDATION refusal of a time range keeps the sheet open with the message under the times.
+   */
+  async function submitLeave(p, busyKey) {
+    if (!p || ui.leaveSaving) return;
     if (!requireInternet()) { closeConfirmLeave(); return; }
     const btn = $('confirmLeaveBtn');
     const label = btn.textContent;
     const alive = sessionAlive();
     const base = draftBase();
+    const params = { date: p.date, staff: p.staff, type: p.type };
+    if (U.isPartialType(p.type)) params.detail = p.detail;
     ui.leaveSaving = true;
+    ui.leaveBusy = busyKey;
     btn.disabled = true;
-    btn.textContent = 'กำลังบันทึก…';
+    if (busyKey === 'save') btn.textContent = 'กำลังบันทึก…';
+    renderLeaveSheet();
     let res = null, err = null;
-    try { res = await userCall('setLeave', { date: p.date, staff: p.staff, type: p.type }); }
+    try { res = await userCall('setLeave', params); }
     catch (e) { err = e; }
     finally {
       if (alive() || !ui.leaveSaving) {   // never end a save that the next session started meanwhile
         ui.leaveSaving = false;
+        ui.leaveBusy = '';
         btn.disabled = false;
         btn.textContent = label;
       }
     }
     if (!alive()) { renderLeaveSheet(); return; }   // the next user's sheet (if open) decides its own button state
+    if (err && err.code === 'VALIDATION' && params.detail !== undefined && isShown('confirmLeaveModal')) {
+      ui.leaveTimeError = err.message;
+      renderLeaveSheet();
+      return;
+    }
     closeConfirmLeave();
     if (err) throw err;
-    applyLeaveResult(p, res || {}, base);
-    toast(MSG.leaveSaved);
+    applyLeaveWrite(res || {}, p, base);
+    const st = U.leaveStatus(res && res.leave);
+    toast(busyKey === 'delete' ? MSG.requestDeleted : busyKey === 'cancel' ? MSG.requestCancelled
+      : st === 'pending' ? MSG.leaveRequested : MSG.leaveSaved, st === 'pending' ? 3500 : 2200);
   }
 
-  /** base: draftBase() from before the call — the auto-unassign day in `res` may rebase the draft (CON-1). */
-  function applyLeaveResult(p, res, base) {
-    const map = state.leaves[p.date] = state.leaves[p.date] || nameMap();
-    if (res.leave && res.leave.type) map[res.leave.staff || p.staff] = res.leave;
-    else delete map[p.staff];
-    if (!Object.keys(map).length) delete state.leaves[p.date];
-    if (res.day) adoptDay(p.date, res.day);
-    if (p.type && hasDraftFor(p.date)) {
-      removeFromDraft(p.staff);
-      rebaseDraft(p.staff, base);
+  /** R1b: the buttons of the status line (rejected: ขอใหม่ / ลบคำขอ; pending, Supervisor: อนุมัติ / ไม่อนุมัติ). */
+  function onLeaveSheetAction(e) {
+    const b = e.target && e.target.closest ? e.target.closest('[data-leave-act]') : null;
+    const sh = ui.leaveSheet;
+    if (!b || b.disabled || !sh || ui.leaveSaving || !state.user) return;
+    const leave = activeLeaves(sh.date)[sh.staff];
+    const act = b.dataset.leaveAct;
+    if (act === 'approved' || act === 'rejected') { spawn(() => decideFromSheet(act), WRITE); return; }
+    // CL-18: the owner of a pending request cancels it from its status box
+    if (act === 'cancel') {
+      if (!leave || U.leaveStatus(leave) !== 'pending' || sh.staff !== myName() || sh.locked) return;
+      spawn(() => submitLeave({ staff: sh.staff, date: sh.date, type: '', detail: '' }, 'cancel'), WRITE);
+      return;
     }
-    delete state.audit[p.date];
-    markTouched(p.date);
+    if (!leave || U.leaveStatus(leave) !== 'rejected' || sh.staff !== myName() || sh.locked) return;
+    const p = act === 'rerequest' ? { staff: sh.staff, date: sh.date, type: leave.type, detail: leave.detail || '' }
+      : act === 'delete' ? { staff: sh.staff, date: sh.date, type: '', detail: '' } : null;
+    if (p) spawn(() => submitLeave(p, act), WRITE);
+  }
+
+  /**
+   * The Supervisor's อนุมัติ / ไม่อนุมัติ on a pending vacation: calls the provider of 'leave.decide' (feature "approval")
+   * with {date, staff, decision, leave}. The provider sends decideLeave (asking for the optional reason first), shows the
+   * result toast and resolves the server's answer {leave, day} — applied here — or a falsy value when the user cancelled.
+   * A rejection is shown by the usual error handling; the sheet stays open then.
+   * While the provider asks its own question the sheet is only locked (buttons disabled); the pressed button says
+   * "กำลังบันทึก…" once the provider calls req.onSending() — right before its request goes out.
+   */
+  async function decideFromSheet(decision) {
+    const sh = ui.leaveSheet;
+    const fn = use('leave.decide');
+    if (!sh || ui.leaveSaving || typeof fn !== 'function' || !isSup()) return;
+    const leave = activeLeaves(sh.date)[sh.staff];
+    if (!leave || U.leaveStatus(leave) !== 'pending') return;
+    if (!requireInternet()) return;
+    const alive = sessionAlive();
+    const base = draftBase();
+    const at = { date: sh.date, staff: sh.staff };
+    ui.leaveSaving = true;
+    ui.leaveBusy = '';
+    renderLeaveSheet();
+    const onSending = () => {
+      if (!alive() || !ui.leaveSaving || ui.leaveSheet !== sh) return;
+      ui.leaveBusy = decision;
+      renderLeaveSheet();
+    };
+    let res = null, err = null;
+    try { res = await fn({ date: at.date, staff: at.staff, decision, leave: cloneJson(leave), onSending }, core); }
+    catch (e) { err = e; }
+    finally {
+      if (alive()) { ui.leaveSaving = false; ui.leaveBusy = ''; }
+    }
+    if (!alive()) return;
+    if (err) { renderLeaveSheet(); refocusSheetAction(decision); throw err; }
+    if (!res) { renderLeaveSheet(); refocusSheetAction(decision); return; }   // cancelled (e.g. the reason prompt)
+    if (typeof res === 'object' && Object.prototype.hasOwnProperty.call(res, 'leave')) applyLeaveWrite(res, at, base);
+    if (ui.leaveSheet && ui.leaveSheet.staff === at.staff && ui.leaveSheet.date === at.date) closeConfirmLeave();
+  }
+
+  /** CL-15: a cancelled / failed decision returns the focus to its button (the dialog closed while the sheet was locked). */
+  function refocusSheetAction(key) {
+    const a = document.activeElement;
+    if (a && a !== document.body && a.isConnected && a !== $('confirmLeaveTitle')) return;
+    const b = document.querySelector('#confirmLeaveText [data-leave-act="' + key + '"]');
+    if (b && !b.disabled) { try { b.focus({ preventScroll: true }); } catch (e) { b.focus(); } }
+  }
+
+  /**
+   * Applies the answer of a leave write — setLeave or decideLeave: {leave: LeaveV3 | v2 leave | null, day} — to the state
+   * (also core.applyLeaveResult for feature files): the row of (date, staff) is replaced or removed, an auto-unassigned
+   * day is adopted, a person who is now ABSENT leaves the Supervisor's unsaved draft (base: draftBase() from before the
+   * call, so the draft can move onto the new version, CON-1), state.requests follows, the date counts as written locally.
+   * at: {date, staff} of the request (used when the answer has no leave). → true when applied.
+   */
+  function applyLeaveWrite(res, at, base) {
+    if (!state.session) return false;
+    const r = res && typeof res === 'object' ? res : {};
+    const leave = r.leave && typeof r.leave === 'object' && r.leave.type ? r.leave : null;
+    const date = leave && U.isValidYmd(leave.date) ? leave.date : at && at.date;
+    const staff = (leave && leave.staff) || (at && at.staff);
+    if (!U.isValidYmd(date) || typeof staff !== 'string' || !staff) return false;
+    const day = r.day && typeof r.day === 'object' ? r.day : null;
+    const view = dayView(date);
+    if (view !== 'ready') {
+      // CL-2: the date is not loaded (or only from the offline copy): it must not count as loaded with just this row. The
+      // write waits in ui.unloadedWrites and is laid over the next answer for that date; an offline copy shows it meanwhile.
+      ui.writeSeq++;
+      const parked = ui.unloadedWrites[date] = ui.unloadedWrites[date] || nameMap();
+      const prev = parked[staff];
+      // rule 3 of replayUnloadedWrites: a later write without a day keeps the day an earlier write brought
+      const keepDay = !day && prev && prev.day ? prev.day : day && prev && prev.day && (prev.day.version | 0) > (day.version | 0) ? prev.day : day;
+      parked[staff] = { seq: ui.writeSeq, leave, day: keepDay };
+      if (view === 'cached') {
+        putLeaveRow(date, staff, leave);
+        if (day && (day.version | 0) >= currentVersion(date)) adoptDay(date, day);
+      }
+      if (ui.serverMode === 'v3') updateRequestFor(date, staff, leave);
+      delete state.audit[date];
+      emit('data', { date, local: true });
+      persistCache();
+      render();
+      return true;
+    }
+    const b = base || draftBase();   // CL-1: before the day is replaced — the inbox and a CONFLICT answer pass no base
+    putLeaveRow(date, staff, leave);
+    // never an older day than the local one (two decisions whose answers arrive in reverse order — reviewer 2 finding 6)
+    if (day && (day.version | 0) >= currentVersion(date)) adoptDay(date, day);
+    // the server takes an absent person off the day (answering `day`) — except when approving a request dated before today
+    // (Code.gs 3.0 BK-7: history is kept, no `day`): then the draft keeps the person too
+    if (U.isAbsent(leave) && hasDraftFor(date) && (day || date >= U.todayStr())) {
+      removeFromDraft(staff);
+      rebaseDraft(staff, b);
+    }
+    if (ui.serverMode === 'v3') updateRequestFor(date, staff, leave);
+    delete state.audit[date];
+    markTouched(date);
     persistCache();
     render();
+    return true;
   }
 
   async function onSummary() {
@@ -2853,16 +3768,25 @@
     });
   }
 
-  /** people: [{name, group}] (reportStaff) — the summary lists their leave dates by type. */
+  /**
+   * people: [{name, group}] (reportStaff) — the summary lists their leave dates by type. Only ABSENT days count in "รวม N
+   * วัน" (R1b); doctor visits (with their times) and pending requests follow as their own lines; rejected rows are ignored.
+   */
   function leaveSummaryHtml(from, to, people, note) {
     const k = Kit.cls;
     const byName = new Map(people.map(s => [s.name, nameMap()]));
+    const extras = new Map(people.map(s => [s.name, { partial: nameMap(), pending: nameMap() }]));
     U.eachDate(from, to).forEach(date => {
       const day = leavesOn(date);
       Object.keys(day).forEach(name => {
         const l = day[name], types = byName.get(name);
         if (!types || !l || !l.type) return;
-        (types[l.type] = types[l.type] || []).push(date);
+        const info = U.leaveInfo(l);
+        if (info.blocking) (types[l.type] = types[l.type] || []).push(date);
+        else if (info.partial || info.pending) {
+          const bag = extras.get(name)[info.partial ? 'partial' : 'pending'];
+          (bag[l.type] = bag[l.type] || []).push(U.thaiDateShort(date) + (info.timeLabel ? ' ' + info.timeLabel : ''));
+        }
       });
     });
     const typeRank = t => { const i = U.LEAVE_TYPES.indexOf(t); return i < 0 ? 99 : i; };
@@ -2871,9 +3795,15 @@
     people.forEach(s => {
       const dates = byName.get(s.name);
       const types = Object.keys(dates).sort((a, b) => typeRank(a) - typeRank(b));
-      if (!types.length) return;
+      const ex = extras.get(s.name);
+      const partialTypes = Object.keys(ex.partial).sort((a, b) => typeRank(a) - typeRank(b));
+      const pendingTypes = Object.keys(ex.pending).sort((a, b) => typeRank(a) - typeRank(b));
+      if (!types.length && !partialTypes.length && !pendingTypes.length) return;
       any = true;
       const total = types.reduce((n, t) => n + dates[t].length, 0);
+      const extraLine = (t, list, tone, prefix, kind) => `<div class="text-[0.8125rem] leading-5" data-summary-extra="${kind}">` +
+        `<span class="font-semibold ${tone}">${esc(prefix + t)}</span>` +
+        ` <span class="text-slate-500">(${list.length} ครั้ง):</span> <span class="text-slate-600 break-words">${list.map(esc).join(', ')}</span></div>`;
       html += `<div class="rounded-2xl border-2 border-ink-100 bg-white p-3 space-y-2" data-summary-staff="${esc(s.name)}">` +
         `<div class="flex items-center gap-2.5 min-w-0">${Kit.avatar(s.name, 'sm')}` +
         `<span class="min-w-0 flex-1 font-medium text-ink-900 break-words">${esc(personLabel(s))}</span>` +
@@ -2881,6 +3811,8 @@
         '<div class="space-y-1.5">' +
         types.map(t => `<div class="text-[0.8125rem] leading-5"><span class="font-semibold text-coral-700">${esc(t)}</span>` +
           ` <span class="text-slate-500">(${dates[t].length} ครั้ง):</span> <span class="text-slate-600 break-words">${dates[t].map(d => esc(U.thaiDateShort(d))).join(', ')}</span></div>`).join('') +
+        partialTypes.map(t => extraLine(t, ex.partial[t], 'text-accent-800', '', 'partial')).join('') +
+        pendingTypes.map(t => extraLine(t, ex.pending[t], 'text-amber-800', 'รออนุมัติ: ', 'pending')).join('') +
         '</div></div>';
     });
     if (!any) html += `<p class="text-[0.8125rem] leading-5 text-slate-500 text-center py-2">ไม่มีประวัติการลาในช่วงเวลาดังกล่าว</p>`;
@@ -2953,9 +3885,11 @@
     if (name === myName()) { openPasswordModal(false); return; }
     if (!requireInternet()) return;
     const alive = sessionAlive();
-    const ans = await promptUser(`ตั้งรหัสผ่านใหม่ให้คุณ "${name}" (เว้นว่าง = 1234)`, undefined, { title: 'ตั้งรหัสผ่านใหม่', okLabel: 'ตั้งรหัสผ่าน', placeholder: '1234' });
+    const ans = await promptUser(`ตั้งรหัสผ่านใหม่ให้คุณ "${name}"`, undefined, {
+      title: 'ตั้งรหัสผ่านใหม่', okLabel: 'ตั้งรหัสผ่าน', hint: 'ถ้าเว้นว่างไว้ รหัสผ่านเริ่มต้นคือ 1234', nativeHint: 'เว้นว่าง = 1234'
+    });
     if (ans === null || ans === undefined || !alive()) return;
-    const np = String(ans).trim();   // (the prompt's own text says that empty = 1234)
+    const np = String(ans).trim();   // (the prompt's helper text says that empty = 1234)
     if (np) { const pe = U.validatePassword(np); if (pe) { toast('⚠️ ' + pe); return; } }
     await staffOp(async () => {
       await userCall('resetPassword', { name, newPassword: np });
@@ -3129,6 +4063,18 @@
     });
   }
 
+  /**
+   * The CSV's สถานะการลา (R1b): an absent day = the type; a doctor visit = "ลาหาหมอตอนเช้า 09:00-11:00"; a pending request
+   * = "พักร้อน (รออนุมัติ)"; no row or a rejected one = "ปกติ".
+   */
+  function csvLeave(l) {
+    const info = U.leaveInfo(l);
+    if (info.blocking) return info.type;
+    if (info.partial) return info.type + (info.start ? ' ' + info.start + '-' + info.end : '');
+    if (info.pending) return info.type + ' (รออนุมัติ)';
+    return 'ปกติ';
+  }
+
   /** list: [{name, group}] from reportStaff. '—' marks "no station" (a plain '-' would be read as a formula). */
   function buildExportRows(from, to, list) {
     const rows = [['วันที่', 'ชื่อ', 'กลุ่ม', 'สถานะการลา', 'Station ที่ปฏิบัติงาน', 'หมายเหตุประจำวัน']];
@@ -3139,7 +4085,7 @@
       list.forEach(s => {
         const l = leaves[s.name];
         const stations = day ? U.STATIONS.filter(st => day.assignments[st.id].indexOf(s.name) >= 0).map(st => st.name) : [];
-        rows.push([date, personLabel(s), groupLabel(s.group), l && l.type ? l.type : 'ปกติ', stations.length ? stations.join(' / ') : '—', remark]);
+        rows.push([date, personLabel(s), groupLabel(s.group), csvLeave(l), stations.length ? stations.join(' / ') : '—', remark]);
       });
     });
     return rows;
@@ -3216,7 +4162,7 @@
     // keep only people the target day may hold, not on leave that date, each person once, within capacity
     // (the server's rule: the required count, or the number already saved there when that is larger)
     const allowed = assignableSet(date);
-    const onLeave = activeLeaves(date);
+    const onLeave = absentLeaves(date);   // R1b: a doctor visit or a pending request does not stop a paste
     const used = new Set();
     const assignments = {};
     U.STATIONS.forEach(st => {
@@ -3563,6 +4509,8 @@
     try {
       const d = await Api.call('ping', {}, { attempts: 1, timeoutMs: DIAG_TIMEOUT_MS });
       if (d && d.version) ui.serverVersion = String(d.version);
+      // R1b: the ping also announces the server's features (a server older than 3.0 announces none)
+      if (state.session && d && typeof d === 'object' && setServerFeatures(Array.isArray(d.features) ? d.features : null)) render();
       return { status: 'ok', note: 'เซิร์ฟเวอร์ตอบกลับปกติ (เวอร์ชัน ' + (d.version || '-') + ')' };
     } catch (e) {
       const firstHopOk = rows.some(r => r.key === 'script' && (r.status === 'ok' || r.status === 'warn'));
@@ -3631,7 +4579,7 @@
   function watchForUpdate() {
     const sw = navigator.serviceWorker;
     if (!sw || !sw.controller) return;
-    sw.addEventListener('controllerchange', () => { setVisible($('updateBanner'), true); placeFloaters(); }, { once: true });
+    sw.addEventListener('controllerchange', () => { setVisible($('updateBanner'), true); syncLayout(); }, { once: true });
   }
 
   /* ------------------------------------------------------------------ */
@@ -3679,8 +4627,9 @@
    *
    * App.core (frozen):
    *   apiLevel 1 · U (Utils) · Api · Kit (UiKit) · state (App.state — READ ONLY for features)
-   *   isSup() · myName() · staff() (copy of the active staff [{name, group}]) · serverHas(name) (false in R1a: the
-   *     server announces features from R1b on)
+   *   isSup() · myName() · staff() (copy of the active staff [{name, group}]) · serverHas(name) (R1b: the `features` of
+   *     the last getData / ping answer: 'leave2', 'approval', 'avatar', 'password'; all false on a Code.gs older than 3.0)
+   *     · serverMode() → '' (not known yet) | 'v3' | 'old'
    *   spawn(fn, opts) (run + track + handleError) · track(promise) · alive() → () => bool (session still the same)
    *     — every async flow goes through these so App.idle() sees it
    *   call(action, params, opts) (Api.call) · userCall(…) (same, with the "server slow, retrying" toast) ·
@@ -3694,7 +4643,13 @@
    *     section, order, parent, legacy, visible, badge, error}] in nav order (for building nav/menu UIs)
    *   selectedDate() · setSelectedDate(ymd) → Promise<bool>
    *   ensureRange(from, to, opts) · dayView(date) → 'ready'|'cached'|'loading'|'missing' · leavesOn(date) ·
-   *     leaveList(date) → [{name, type, rank}] · isAbsent(leave) · saveFile(blob, filename) → Promise<bool>
+   *     leaveList(date) → [{name, type, rank}] of the ABSENT people · leaveLines(date) → {absent, partial, pending} lines
+   *     [{name, type, rank, leave, info}] · isAbsent(leave) (= Utils.isAbsent) · saveFile(blob, filename) → Promise<bool>
+   *   R1b: applyLeaveResult({leave, day}, {date, staff}) → bool — applies a setLeave / decideLeave answer to the state
+   *     (row, auto-unassigned day, draft, state.requests, render) · openLeave(date, staff) → Promise<bool> (selects the
+   *     date, loads it, opens the leave sheet) · openPasswordChange() (the non-forced password sheet)
+   *   state.requests (frozen LeaveV3[]: the Supervisor gets every pending row, anyone else their own pending + rejected,
+   *     last 30 days and later; on('data') fires with {requests: true} when it changes) · state.rules.vacationAutoSlots
    *   domain(name, {persist, empty}) → a per-feature data slice (same object for the same name):
    *     .data .version .remote .loading .error (read-only getters)
    *     .begin() → ticket; .commit(ticket, version, fn(data) → newData|undefined) → bool — applies nothing (false)
@@ -3703,7 +4658,8 @@
    *     .load(fetchFn(version) → Promise<{version, data}|null (unchanged)>) → Promise<bool>; never rejects (the
    *       error is in .error); one load at a time
    *     .onStale(fn) → unsubscribe; .setRemote(v) — the server's version (fn runs when it differs from .version);
-   *       R1a never calls setRemote (no heartbeat fields yet)
+   *       R1b: every getData answer (full or unchanged) calls setRemote(versions[name]) for each domain of that name (e.g.
+   *       'profile' ← versions.profile; '' while that domain is empty); a domain created later starts with that remote
    *     persist: true keeps {user, v, savedAt, data} in localStorage ipd_dom:<name> (restored for the same user
    *     after a reload). Logout resets every domain to `empty` and removes ipd_dom:*.
    *   store.draft.get/set/remove(key) — JSON in ipd_draft:<user>:<key> (unsent input; removed on logout)
@@ -3711,17 +4667,29 @@
    *   media — IndexedDB "ipd-media" (stores blobs, chat, outbox), opened lazily on first use; an in-memory map
    *     when IndexedDB is unavailable. get/put/del(store, key[, value]), keys(store), clear(store) → Promises,
    *     all tracked; ready() → Promise<'idb'|'memory'>; mode() → '' (not opened yet) | 'idb' | 'memory'.
-   *     The connection closes on versionchange (a deletion is never blocked). Logout clears the chat store when
+   *     The connection closes on versionchange (a deletion is never blocked). Logout (and an expired session) clears every store when
    *     it was used. IndexedDB runs on real time: tests must poll, never assume.
    *   poll.every(id, ms, fn(c)) → cancel(): fn runs every ms (≥ 1 s) while visible and logged in; same id replaces
    *   on(evt, fn(payload, c)) → unsubscribe; evt 'login' {name, restored} · 'logout' · 'role' {isSup} ·
    *     'date' {date} · 'data' {from, to, changed} | {date, local} | {domain} · 'visible' · 'online'
-   *   provide(name, fn) · use(name) → fn | null (cross-feature services, e.g. 'leave.decide')
+   *   provide(name, fn) · provide(name, null) withdraws it (only replacing a live provider warns) · use(name) → fn | null
+   *     (cross-feature services). 'leave.decide' (R1b): fn({date, staff, decision: 'approved'|'rejected', leave,
+   *     onSending}, core) → Promise of the decideLeave answer {leave, day} (the leave sheet applies it and closes) or a
+   *     falsy value (cancelled, or the request was decided / cancelled elsewhere and the provider showed the fresh state:
+   *     the sheet stays); it asks for the optional reason, calls onSending() right before its request goes out (the sheet
+   *     is only locked until then, "กำลังบันทึก…" from then on), sends decideLeave with expect = leave's status and shows
+   *     the result toast itself; a rejection is shown by handleError. Without a provider the sheet has no buttons.
    *   station.setProposer(fn(date) → {assignments, notes} | null) — stored only; the station editor uses it from
    *     R2 on · station.addPanel({id, order, render(el, c)}) — extra card on วันนี้ (in #stationPanels)
    *   banners.set(id, {text, tone: 'info'|'ok'|'warn'|'danger', icon, order, screens: [ids], actionLabel,
-   *     action(c)} | null) — shown in #bannerSlot above the screens · badges.set(id, n) · badges.get(id)
-   *   Logout (and a new login) clears banners, badges, domains, drafts and calls every feature's reset.
+   *     action(c), dismissLabel, onDismiss(c)} | null) — shown in #bannerSlot above the screens; with dismissLabel AND
+   *     onDismiss a ✕ (aria-label = dismissLabel, [data-banner-dismiss]) sits next to the action and calls onDismiss only
+   *     (remembering the dismissal is the feature's job) · badges.set(id, n) · badges.get(id)
+   *   confirm / prompt opts (UiKit 1.5): detail {title, text, avatar, tone} (framed block above the message), maxLength
+   *     (prompt: limit + live counter), data {key: value} (data-* on the dialog, e.g. to find and close it)
+   *   Logout (and a new login) clears banners, badges, domains, drafts and calls every feature's reset; R1b: also every
+   *   media store (blobs, outbox, chat) and the UiKit.avatars registry (after the resets). Avatars: UiKit.avatars.set(name,
+   *   url) — every avatar on the page is patched in place (UiKit.avatars.refresh), no render needed.
    *
    * Shell (R1a-B2): Android/browser back (APP_CONFIG.HISTORY_NAV !== false) closes the top sheet, then goes to the
    * current screen's parent (core.back()); App.shell.onPopState / App.shell.handleBack expose that logic to tests.
@@ -3737,6 +4705,8 @@
   const NAV_SLOT = { bar: 'bottomNav', menu: 'menuNav', header: 'headerNav' };
   const NAV_ORDER_DEFAULT = 100;
   const MENU_SECTIONS = ['mine', 'sup', 'system'];   // lists in เมนู (#menuNav); any other nav.section → 'other'
+  /** CL-14: nav entries that show a dot (no count) — id → spoken label (core.badges.dot). */
+  const dotLabels = Object.create(null);
   /** Nav entries of registered features (the legacy entries are in index.html with the same look). */
   const NAV_BTN = {
     bar: Kit.cls.navItem + ' ' + Kit.cls.navItemRail + ' ' + Kit.cls.navOff,
@@ -3745,7 +4715,10 @@
   };
   /** Where a nav entry's count badge sits: next to the bar icon, on the header icon's corner, inline in a menu row. */
   const NAV_BADGE_BOX = {
-    bar: 'absolute top-1 left-1/2 ml-2 pointer-events-none',
+    // CL-23: on the corner of the icon pill (inside .nav-ic), so it never sits on the label — also in the landscape bar,
+    // where icon and label stand side by side
+    bar: 'absolute -top-1.5 -right-1 pointer-events-none',
+    barDot: 'absolute -top-0.5 right-1 pointer-events-none',
     header: 'absolute top-0.5 right-0.5 pointer-events-none',
     menu: 'shrink-0 pointer-events-none'
   };
@@ -3762,6 +4735,7 @@
   const MEDIA_DB_VERSION = 1;
   const MEDIA_STORES = ['blobs', 'chat', 'outbox'];
   const MEDIA_CHAT_MARK = 'ipd_media:chat';   // set when the chat store got data, so a logout knows it must open and clear it
+  const MEDIA_USED_MARK = 'ipd_media:used';   // R1b: set when ANY store got data (avatars, photos, outbox, chat): cleared at logout
 
   const features = [];                       // registration order
   const featById = Object.create(null);
@@ -3772,13 +4746,13 @@
   const badgeCounts = Object.create(null);
   const panelDefs = [];                      // [{id, order, render, el, failed}]
   let proposer = null;                       // R2: the daily proposal (station.setProposer)
-  const serverFeatures = Object.create(null);   // R1b fills this from the poll answer; empty in R1a
+  const serverFeatures = Object.create(null);   // R1b: the `features` of the last getData / ping answer (see applyServerExtras)
   const domains = Object.create(null);       // name → {d (internal), api}
+  const remoteVersions = Object.create(null);   // R1b: name → the server's `versions[name]` (domains created later start with it)
   const polls = Object.create(null);         // id → cancel
-  const media = { db: null, opening: null, mode: '', mem: null };
+  const media = { db: null, opening: null, mode: '', mem: null, puts: 0 };   // puts: count of put() calls (see wipeUserMedia)
 
   function cloneJson(v) { return v === undefined || v === null ? v : JSON.parse(JSON.stringify(v)); }
-  function isAbsent(leave) { return !!(leave && leave.type); }   // R1b: Utils.isAbsent (pending / partial-day leave)
 
   /* ---------- registration ---------- */
   function register(def) { return addFeature(def, false); }
@@ -3794,6 +4768,7 @@
     if (!(needs <= API_LEVEL)) {
       console.warn('App.register: "' + id + '" needs core API level ' + def.needs + ', this app has ' + API_LEVEL);
       setVisible($('updateBanner'), true);   // a newer feature file than app.js: reloading fetches the matching app
+      if (coreStarted) syncLayout();
       return false;
     }
     const nav = def.nav && typeof def.nav === 'object' ? def.nav : {};
@@ -3981,25 +4956,35 @@
       const vis = featureVisible(f);
       setVisible(b, vis);
       if (vis && f.place === 'header') header++;
-      renderNavBadge(b, vis ? featureBadge(f) : 0, f.place);
+      renderNavBadge(b, vis ? featureBadge(f) : 0, f.place, vis ? dotLabels[f.id] || '' : '');
     });
     // the bar is a grid-flow-col grid (UiKit.cls.navInner): one equal column per visible entry, nothing to count
     setVisible($('headerNav'), header > 0);   // a class, not the hidden attribute: .flex would override [hidden]
     renderMenuSections();
   }
 
-  function renderNavBadge(btn, n, place) {
+  /** A count badge (n > 0), or a dot (dot = its spoken label) when there is no count; nothing otherwise. */
+  function renderNavBadge(btn, n, place, dot) {
     let el = btn.querySelector('[data-nav-badge]');
-    if (!n) { if (el) el.remove(); return; }
+    if (!n && !dot) { if (el) el.remove(); return; }
+    const kind = n ? 'count' : 'dot';
+    if (el && el.dataset.navBadge !== kind) { el.remove(); el = null; }
     if (!el) {
       el = document.createElement('span');
-      el.className = NAV_BADGE_BOX[place] || NAV_BADGE_BOX.header;
-      el.dataset.navBadge = '1';
+      el.dataset.navBadge = kind;
       btn.classList.add('relative');
-      const chevron = place === 'menu' ? btn.querySelector('svg[data-icon="chevron-right"]') : null;
-      btn.insertBefore(el, chevron);
+      const ic = place === 'bar' ? btn.querySelector('.nav-ic') : null;
+      if (ic) {
+        ic.classList.add('relative');
+        el.className = kind === 'dot' ? NAV_BADGE_BOX.barDot : NAV_BADGE_BOX.bar;
+        ic.appendChild(el);
+      } else {
+        el.className = NAV_BADGE_BOX[place] || NAV_BADGE_BOX.header;
+        const chevron = place === 'menu' ? btn.querySelector('svg[data-icon="chevron-right"]') : null;
+        btn.insertBefore(el, chevron);
+      }
     }
-    setHtml(el, Kit.badge(n));
+    setHtml(el, n ? Kit.badge(n) : `<span class="${Kit.cls.navDot}" role="status" aria-label="${esc(dot)}"></span>`);
   }
 
   /**
@@ -4068,7 +5053,9 @@
     });
   }
 
+  /** provide(name, fn) registers a service; provide(name, null) withdraws it (no warning; only replacing one warns). */
   function provide(name, fn) {
+    if (typeof fn !== 'function') { delete services[name]; return; }
     if (services[name] && services[name] !== fn) console.warn('core.provide: "' + name + '" replaced');
     services[name] = fn;
   }
@@ -4116,13 +5103,28 @@
       const icon = d.icon ? Kit.icon(d.icon, 'w-5 h-5 mt-0.5') : '';
       const act = d.actionLabel && typeof d.action === 'function'
         ? `<button type="button" class="${Kit.cls.btn} ${Kit.cls.btnTonal} shrink-0" data-banner-action="${esc(b.id)}">${esc(d.actionLabel)}</button>` : '';
-      return `<div class="${Kit.cls.banner} ${BANNER_TONE[d.tone] || BANNER_TONE.info}" data-banner="${esc(b.id)}" role="status">` +
-        `${icon}<div class="flex-1 min-w-0 whitespace-pre-line">${esc(d.text)}</div>${act}</div>`;
+      const tone = BANNER_TONE[d.tone] || BANNER_TONE.info;
+      if (!(d.dismissLabel && typeof d.onDismiss === 'function')) {
+        // CL-23: from 640 px the text and the action button line up (centred) instead of the button floating mid-height
+        return `<div class="${Kit.cls.banner} ${tone}${act ? ' sm:items-center' : ''}" data-banner="${esc(b.id)}" role="status">` +
+          `${icon}<div class="flex-1 min-w-0 whitespace-pre-line">${esc(d.text)}</div>${act}</div>`;
+      }
+      // R1b: with a ✕ the row wraps on a phone — the text keeps at least 9.5rem; the action and the ✕ stay together at the right
+      const x = `<button type="button" class="${Kit.cls.iconBtn} -mr-2" data-banner-dismiss="${esc(b.id)}" aria-label="${esc(d.dismissLabel)}" ` +
+        `title="${esc(d.dismissLabel)}">${Kit.icon('x', 'w-5 h-5')}</button>`;
+      return `<div class="${Kit.cls.banner} ${tone} flex-wrap" data-banner="${esc(b.id)}" role="status">` +
+        `${icon}<div class="flex-1 min-w-0 basis-[9.5rem] whitespace-pre-line">${esc(d.text)}</div>` +
+        `<div class="flex items-center gap-2 ml-auto shrink-0">${act}${x}</div></div>`;
     }).join(''));
   }
 
   function onBannerClick(e) {
-    const b = e.target && e.target.closest ? e.target.closest('[data-banner-action]') : null;
+    const t = e.target && e.target.closest ? e.target : null;
+    if (!t) return;
+    const x = t.closest('[data-banner-dismiss]');
+    const dx = x && bannerDefs[x.dataset.bannerDismiss];
+    if (dx && typeof dx.onDismiss === 'function') { spawn(() => dx.onDismiss(core)); return; }
+    const b = t.closest('[data-banner-action]');
     const d = b && bannerDefs[b.dataset.bannerAction];
     if (d && typeof d.action === 'function') spawn(() => d.action(core));
   }
@@ -4146,6 +5148,14 @@
     get(id) {
       const f = featById[String(id)];
       return f && f.started && typeof f.def.badge === 'function' ? featureBadge(f) : (badgeCounts[String(id)] || 0);
+    },
+    /** CL-14: a dot on a nav entry (e.g. การลา while an own rejection is not dismissed); label = what it means (spoken). */
+    dot(id, label) {
+      const k = String(id);
+      const v = label ? String(label) : '';
+      if ((dotLabels[k] || '') === v) return;
+      if (v) dotLabels[k] = v; else delete dotLabels[k];
+      if (coreStarted) renderNav();
     }
   });
 
@@ -4195,7 +5205,7 @@
     if (domains[name]) return domains[name].api;
     const o = opts || {};
     const d = { name, persist: !!o.persist, empty: o.empty === undefined ? null : cloneJson(o.empty), seq: 0,
-      data: null, version: '', remote: '', loading: false, error: null, loadingP: null, stale: [] };
+      data: null, version: '', remote: remoteVersions[name] || '', loading: false, error: null, loadingP: null, stale: [] };
     d.data = cloneJson(d.empty);
     const api = Object.freeze({
       get name() { return d.name; },
@@ -4215,7 +5225,7 @@
         d.error = null;
         persistDomain(d);
         emit('data', { domain: d.name });
-        render();
+        renderForDomain();
         return true;
       },
       touch(fn) {
@@ -4225,7 +5235,7 @@
           if (r !== undefined) d.data = r;
         }
         persistDomain(d);
-        render();
+        renderForDomain();
       },
       load(fetchFn) {
         if (d.loadingP) return d.loadingP;
@@ -4242,11 +5252,11 @@
           return false;
         }).then(ok => {
           if (d.loadingP === p) { d.loading = false; d.loadingP = null; }
-          render();
+          renderForDomain();
           return ok;
         }));
         d.loadingP = p;
-        render();
+        renderForDomain();
         return p;
       },
       onStale(fn) {
@@ -4265,6 +5275,18 @@
     domains[name] = { d, api };
     if (state.session) restoreDomain(d);
     return api;
+  }
+
+  /**
+   * CL-5: a feature's data slice changed (e.g. the profile's avatar map) — only what may show it is drawn again: nav entries
+   * and their badges, banners and the current registered screen. The four legacy screens never read a domain, and pictures
+   * reach every avatar through UiKit.avatars.refresh, so no full render() (no replaced pickers, no lost focus or scroll).
+   */
+  function renderForDomain() {
+    if (!coreStarted) return;
+    renderNav();
+    renderBanners();
+    renderCurrentFeature();
   }
 
   function persistDomain(d) {
@@ -4404,7 +5426,9 @@
     ready() { return track(mediaOpen()).then(() => media.mode); },
     get(storeName, key) { return mediaRun(storeName, false, s => s.get(key), m => m.get(key)); },
     put(storeName, key, value) {
+      media.puts++;
       if (storeName === 'chat') lsSet(MEDIA_CHAT_MARK, '1');
+      lsSet(MEDIA_USED_MARK, '1');
       return mediaRun(storeName, true, s => s.put(value, key), m => { m.set(key, value); }).then(() => undefined);
     },
     del(storeName, key) { return mediaRun(storeName, true, s => s.delete(key), m => { m.delete(key); }).then(() => undefined); },
@@ -4412,19 +5436,39 @@
     clear(storeName) { return mediaRun(storeName, true, s => s.clear(), m => { m.clear(); }).then(() => undefined); }
   });
 
-  /** Chat messages never outlive the session on a shared device (avatars, photos and the outbox stay). */
-  function wipeChatMedia() {
-    if (!media.db && media.mode !== 'memory' && !lsGet(MEDIA_CHAT_MARK)) return;   // never used: do not open IndexedDB
-    mediaApi.clear('chat').then(() => lsRemove(MEDIA_CHAT_MARK), e => console.error('[core] clearing chat media failed:', e));
+  /**
+   * Per-user media never outlive the session on a shared device (R1b, R1a Review B item 7): at logout and when the
+   * session expired, every store (avatars and photos in blobs, the outbox, chat) is emptied, so nothing a user uploaded
+   * or queued can be shown to — or sent under the token of — the next user. Avatars are downloaded again after a login.
+   */
+  function wipeUserMedia() {
+    if (!media.db && media.mode !== 'memory' && !lsGet(MEDIA_CHAT_MARK) && !lsGet(MEDIA_USED_MARK)) return;   // never used: do not open IndexedDB
+    const puts = media.puts;
+    Promise.all(MEDIA_STORES.map(st => mediaApi.clear(st))).then(() => {
+      // FIX-CL CL-8: the next user may have started writing while the stores were cleared (their put runs after the clear):
+      // then the marks are theirs now — erasing them would let a later expired-session start skip the wipe of their data
+      if (media.puts !== puts) return;
+      lsRemove(MEDIA_CHAT_MARK);
+      lsRemove(MEDIA_USED_MARK);
+    }, e => console.error('[core] clearing user media failed:', e));
+  }
+
+  /** R1b: the server's version of a domain (versions[name] of the heartbeat) → that domain's setRemote (its onStale fires). */
+  function setRemoteVersion(name, v) {
+    if (!FEATURE_ID.test(String(name))) return;
+    remoteVersions[name] = v === undefined || v === null ? '' : String(v);
+    if (domains[name]) domains[name].api.setRemote(remoteVersions[name]);
   }
 
   /* ---------- logout / new login ---------- */
   function resetCore() {
     Object.keys(domains).forEach(n => resetDomain(domains[n].d));
+    Object.keys(remoteVersions).forEach(k => { delete remoteVersions[k]; });
     clearUserStorage();
-    wipeChatMedia();
+    wipeUserMedia();
     Object.keys(bannerDefs).forEach(k => { delete bannerDefs[k]; });
     Object.keys(badgeCounts).forEach(k => { delete badgeCounts[k]; });
+    Object.keys(dotLabels).forEach(k => { delete dotLabels[k]; });
     features.forEach(f => {
       if (f.legacy || !f.started) return;
       if (typeof f.def.reset === 'function') callHook(f, 'reset', () => f.def.reset(core));
@@ -4434,6 +5478,27 @@
         f.mounted = false;
       }
     });
+    Kit.avatars.clear();   // after the features' reset (a feature may revoke its blob: URLs there); refreshed by the listener
+  }
+
+  /**
+   * R1b: UiKit.avatars is the one avatar registry. When it changes, every avatar on the page is patched in place
+   * (UiKit.avatars.refresh, once per microtask for all names that changed) — no full render() per picture.
+   */
+  let avatarPatch = null;
+  function onAvatarChange(name) {
+    if (!avatarPatch) {
+      avatarPatch = new Set();
+      Promise.resolve().then(() => {
+        const names = avatarPatch;
+        avatarPatch = null;
+        try {
+          if (names.has(null)) Kit.avatars.refresh(document);
+          else names.forEach(n => Kit.avatars.refresh(document, n));
+        } catch (e) { console.error('[core] avatar refresh failed:', e); }
+      });
+    }
+    avatarPatch.add(name === undefined ? null : name);
   }
 
   /** The app's modals join the UiKit sheet stack; Escape asks each modal's own close routine. */
@@ -4454,6 +5519,17 @@
       if ($(id)) Kit.sheet.register(id, Object.assign({ initialFocus: '[data-sheet-title]' }, opts[id]));
     });
     Kit.sheet.onChange(() => syncHistory());
+    // when a sheet closes and its opener is gone (re-rendered, or the row left the list) with no single element replacing it,
+    // focus goes to the current screen's first heading — never to another person's row (reviewer 2)
+    if (typeof Kit.sheet.setFallbackFocus === 'function') Kit.sheet.setFallbackFocus(screenHeading);
+  }
+
+  /** The current screen's first heading (made focusable), or the header title. */
+  function screenHeading() {
+    const f = featById[ui.tab];
+    const h = (f && f.root && f.root.querySelector('h1, h2, h3')) || $('headerTitle');
+    if (h && !h.hasAttribute('tabindex')) h.setAttribute('tabindex', '-1');
+    return h;
   }
 
   /** A sheet that Escape / Android back may close (the login, a forced password change and a first setup may not). */
@@ -4515,23 +5591,17 @@
   /**
    * "มีอะไรใหม่" — edit this one structure for every release. Shown from เมนู at any time, and once per version after
    * an update (never on a first-ever login on a device) unless APP_CONFIG.WHATS_NEW === false.
-   * `version` is the version of THESE NOTES, not APP_BUILD: the device remembers it (prefs 'whatsNewSeen') and the sheet
-   * opens again only when it changes. A patch release without new notes (2.9.1) keeps it, so nobody sees the same notes
-   * twice; give it the new number only together with new items.
    */
   const WHATS_NEW = Object.freeze({
-    version: '2.9.0',
+    version: '3.0.0',
     title: 'มีอะไรใหม่',
-    subtitle: 'เวอร์ชัน 2.9 — โฉมใหม่',
+    subtitle: 'เวอร์ชัน 3.0 — ส่วนบุคคล',
     items: Object.freeze([
-      { icon: 'eye', title: 'หน้าตาใหม่ทั้งแอป', text: 'โทนสีพาสเทลตามไอคอนใหม่ ตัวอักษรอ่านง่ายขึ้น ปุ่มใหญ่กดง่าย และใช้บนคอมพิวเตอร์ได้สะดวกขึ้น' },
-      { icon: 'user', title: 'การ์ด "ของฉันวันนี้"', text: 'เปิดแอปแล้วเห็นทันทีว่าวันนี้คุณอยู่ Station ไหน ทำงานกับใคร หรือลาอะไร' },
-      { icon: 'calendar-off', title: 'บันทึกการลาแบบใหม่', text: 'ในหน้าการลา แตะชื่อแล้วเลือกสถานะจากแผ่นตัวเลือก จากนั้นกด "บันทึก" — ปฏิทินอยู่บนสุด ตามด้วยสถานะของฉัน ส่วนสรุปประวัติการลาพับไว้ด้านล่าง' },
-      { icon: 'menu', title: 'เมนูใหม่', text: 'แถบด้านล่างเหลือ 3 ปุ่ม: วันนี้ · การลา · เมนู — เปลี่ยนรหัสผ่าน ตรวจสอบการเชื่อมต่อ ออกจากระบบ (และรายชื่อบุคลากร รายงานและส่งออก สำหรับ Supervisor) อยู่ในเมนู' },
-      { icon: 'calendar', title: 'แถบเลือกวันทั้งสัปดาห์', text: 'แตะวันในแถบใต้หัวแอปเพื่อดูเวรของวันนั้น หรือแตะวันที่ด้านบนเพื่อเลือกวันอื่น' },
-      { icon: 'more', title: 'ปุ่มบันทึกอยู่ด้านล่างเสมอ (Supervisor)', text: 'ปุ่มบันทึกตารางอยู่ติดด้านล่างของหน้าวันนี้ ส่วนคัดลอก วาง แชร์ภาพ และล้างข้อมูล อยู่ในปุ่ม ⋯ ข้างปุ่มบันทึก' },
-      { icon: 'check-circle', title: 'กล่องยืนยันในแอป', text: 'คำถามยืนยัน เช่น ออกจากระบบ หรือล้างข้อมูล แสดงในแอปแทนหน้าต่างของเบราว์เซอร์' },
-      { icon: 'image', title: 'ไอคอนใหม่', text: 'ไอคอนบนหน้าจอโทรศัพท์เป็นภาพ X-RAY IPD ลายน่ารัก (iPhone: ลบไอคอนเดิมแล้วเพิ่มลงหน้าจอโฮมใหม่จึงจะเปลี่ยน)' }
+      { icon: 'stethoscope', title: 'ลาหาหมอแบบระบุเวลา', text: 'เลือก "ลาหาหมอตอนเช้า" หรือ "ลาหาหมอตอนบ่าย" แล้วเลือกช่วงเวลา (หรือกำหนดเอง ระหว่าง 06:00–20:00 น. ไม่เกิน 6 ชั่วโมง) — นอกช่วงเวลานั้นยังจัดเข้า Station ได้ตามปกติ' },
+      { icon: 'clock', title: 'ลาพักร้อนเกินจำนวนต้องรออนุมัติ', text: 'ถ้าวันนั้นมีผู้ลาพักร้อนครบจำนวนแล้ว คำขอใหม่จะส่งให้ Supervisor อนุมัติก่อน ระหว่างรอยังไม่นับเป็นวันลา' },
+      { icon: 'inbox', title: 'คำขอของฉัน', text: 'หน้าการลารวมคำขอที่รออนุมัติหรือไม่อนุมัติ แตะเพื่อดูผลและเหตุผล ส่งคำขอใหม่ หรือลบคำขอ' },
+      { icon: 'check-circle', title: 'อนุมัติการลา (Supervisor)', text: 'เมื่อมีคำขอรออนุมัติจะมีข้อความแจ้งที่หน้าวันนี้และการลา — อนุมัติหรือไม่อนุมัติ (พร้อมเหตุผล) ได้จากแผ่นบันทึกการลา หรือที่ เมนู → งานหัวหน้า → อนุมัติการลา' },
+      { icon: 'user', title: 'โปรไฟล์ของฉัน', text: 'แตะชื่อของคุณด้านบนของเมนูเพื่อเปิดโปรไฟล์ — ใส่รูปโปรไฟล์ (ทุกคนในทีมจะเห็นข้างชื่อของคุณ) และดูหรือเปลี่ยนรหัสผ่านของตัวเอง (การกดดูรหัสผ่านถูกบันทึกไว้ และดูได้ไม่เกิน 5 ครั้งต่อชั่วโมง)' }
     ])
   });
   const WHATS_NEW_SEEN = 'whatsNewSeen';   // core.store.prefs key: the version whose notes were shown on this device
@@ -4628,7 +5698,7 @@
   const core = Object.freeze({
     apiLevel: API_LEVEL,
     U, Api, Kit, state,
-    isSup, myName, staff: () => state.staff.slice(), serverHas,
+    isSup, myName, staff: () => state.staff.slice(), serverHas, serverMode: () => ui.serverMode,
     spawn, track, alive: sessionAlive,
     call: (action, params, opts) => Api.call(action, params, opts), userCall, withBusy,
     requireInternet, handleError, toast, confirm: confirmUser, prompt: promptUser,
@@ -4636,7 +5706,9 @@
     go, back, current: () => ui.tab, features: featureList,
     selectedDate: () => state.selectedDate,
     setSelectedDate: date => track(setSelectedDate(date)),
-    ensureRange, dayView, leavesOn, leaveList, isAbsent, saveFile,
+    ensureRange, dayView, leavesOn, leaveList, leaveLines, isAbsent: U.isAbsent, saveFile,
+    applyLeaveResult: (res, at) => applyLeaveWrite(res, at), openLeave: (date, staff) => track(openLeaveFor(date, staff)),
+    openPasswordChange,
     domain, store, media: mediaApi,
     poll: Object.freeze({ every: pollEvery }),
     on: onEvent, provide, use,
@@ -4687,7 +5759,9 @@
     });
     on('dayToolsCloseBtn', 'click', () => hideModal('dayToolsModal'));
     on('toast', 'click', hideToast);
-    on('menuPasswordBtn', 'click', () => openPasswordModal(false));
+    on('menuPasswordBtn', 'click', openPasswordChange);   // the same routine as the profile screen's button
+    on('menuProfileHead', 'click', onMenuProfileOpen);
+    on('menuProfileHead', 'keydown', onMenuProfileOpen);
     on('menuDiagBtn', 'click', openDiag);
     on('menuWhatsNewBtn', 'click', openWhatsNew);
     on('whatsNewOkBtn', 'click', () => hideModal('whatsNewModal'));
@@ -4739,6 +5813,10 @@
     on('leaveOptions', 'click', onLeaveOptionClick);
     on('confirmLeaveCancelBtn', 'click', closeConfirmLeave);
     on('confirmLeaveBtn', 'click', () => spawn(onConfirmLeave, WRITE));
+    on('confirmLeaveText', 'click', onLeaveSheetAction);
+    on('leaveTimePresets', 'click', onLeaveTimePreset);
+    ['leaveTimeStart', 'leaveTimeEnd'].forEach(id => { on(id, 'input', onLeaveTimeInput); on(id, 'change', onLeaveTimeInput); on(id, 'blur', markEmptyTimes); });
+    on('myRequestsList', 'click', onMyRequestClick);
 
     // staff tab
     on('openTransferBtn', 'click', openTransferModal);
@@ -4816,8 +5894,21 @@
     else window.addEventListener('load', go, { once: true });
   }
 
+  /** CL-7: a v2 offline copy moves to the v3 key once (when it is the newer copy) and the old key goes. */
+  function migrateCacheKey() {
+    const old = lsGet(LS.cacheV2);
+    if (old === null) return;
+    // both exist after a web rollback (v2.9 wrote the v2 key) and a roll-forward: the newer copy by its savedAt wins — it is
+    // only a cache (reviewer 2 finding 8)
+    const cur = lsGet(LS.cache);
+    const savedAt = s => { try { const t = Date.parse(JSON.parse(s).savedAt); return isNaN(t) ? 0 : t; } catch (e) { return 0; } };
+    if (cur === null || savedAt(old) > savedAt(cur)) lsSet(LS.cache, old);
+    lsRemove(LS.cacheV2);
+  }
+
   function init() {
     LEGACY_SECRET_KEYS.forEach(lsRemove);
+    migrateCacheKey();
     ui.usedBefore = !!(lsGet(LS.session) || lsGet(LS.cache));   // the app was used on this device before this start
     applyKit();
     watchWebFonts();
@@ -4831,6 +5922,7 @@
     Api.onActivity(() => renderSyncStatus());
     Api.onStatus(onApiStatus);
     Api.onAuthError = onSessionError;
+    Kit.avatars.onChange(onAvatarChange);
     if (deviceOffline()) setConn('offline', 'device');
     startCore();   // attaches the registered screens (legacy four + feature files loaded before init)
     render();

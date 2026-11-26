@@ -9,7 +9,7 @@
 /* Boot guard (R1a fix A-F1) — no dependencies, runs before anything else loads. The page shows "กำลังอัปเดตแอป…"
    with a "โหลดใหม่" button instead of a blank or broken screen when, during an update from v2.2:
    - a script of THIS release (js/*.js?v=BOOT_BUILD) or the stylesheet fails to load, or
-   - the app did not start (window.App.core / window.UiKit missing after `load`), or
+   - the app did not start (window.App.core / window.UiKit missing after `load`) or is another release's (App.build), or
    - the stylesheet is the one of v2.2: css/tailwind.css?v=BOOT_BUILD is versioned like the scripts, but a stylesheet
      left in the v2.2 worker's cache (or the HTTP cache) is still recognised by a rule only this release's has (CSS_MARK,
      the safety net).
@@ -20,7 +20,7 @@
    BOOT_BUILD = sw.js VERSION = the ?v= of the stylesheet and the scripts = js/api.js CLIENT_VERSION (tests/sw.test.js). */
 (function () {
   'use strict';
-  var BOOT_BUILD = '2.9.1';
+  var BOOT_BUILD = '3.0.0';
   /* a class of this release's stylesheet that v2.2's did not have (any background colour counts: a theme tweak is fine;
      removing the class from every page/script would make every start look stale — tests/e2e-upgrade.test.js U9) */
   var CSS_MARK = 'bg-brand-600';
@@ -115,7 +115,8 @@
     if (isAsset(u)) { failed.push(u); if (document.readyState === 'complete') show(); }
   }, true);
   window.addEventListener('load', function () {
-    setTimeout(function () { if (!healthy() || !(window.App && window.App.core && window.UiKit)) show(); }, 0);
+    // R1b: a js/app.js of another release (App.build differs; v2.9 had none) is not this page's app either
+    setTimeout(function () { if (!healthy() || !(window.App && window.App.core && window.UiKit) || window.App.build !== BOOT_BUILD) show(); }, 0);
   });
   /* js/app.js calls fail() when it finds itself on a page it was not built for, and healthy() before it clears
      the reload counter; failed = the URLs that did not load */
@@ -127,6 +128,8 @@
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#8FD8F5">
 <meta name="color-scheme" content="light">
+<!-- R1b FIX-CL CL-19: iOS must not turn an all-digit password (or any number) into a phone link -->
+<meta name="format-detection" content="telephone=no">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
@@ -145,7 +148,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Mitr:wght@500;600&family=Sarabun:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
 <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Mitr:wght@500;600&family=Sarabun:wght@400;500;600;700&display=swap"></noscript>
-<link rel="stylesheet" href="css/tailwind.css?v=2.9.1">
+<link rel="stylesheet" href="css/tailwind.css?v=3.0.0">
 <style>
 *{-webkit-tap-highlight-color:transparent;}
 /* no double-tap zoom delay, but pinch zoom stays available (accessibility) */
@@ -172,6 +175,14 @@ input,textarea,select{-webkit-user-select:text;user-select:text;font-size:16px!i
 input[type="date"],input[type="time"],input[type="datetime-local"],input[type="month"],input[type="week"]{-webkit-appearance:none;appearance:none;box-sizing:border-box;min-width:0;max-width:100%;display:flex;align-items:center;text-align:left;}
 /* the display above must not beat the hidden attribute (preflight's [hidden] rule is less specific) */
 input[hidden]{display:none!important;}
+/* R1b FIX-CL CL-12: the "เลือกเวลา" hint of an empty time field of the leave sheet (iOS shows nothing in an empty time input);
+   Chromium's own "--:--" is hidden while the hint shows, and comes back while the field has focus (typing works as before) */
+.time-hint{position:absolute;left:.875rem;top:0;bottom:0;display:none;align-items:center;pointer-events:none;color:#64748b;font-size:1rem;line-height:1.5rem;}
+.time-field input[data-empty="1"]:not(:focus)+.time-hint{display:flex;}
+.time-field input[data-empty="1"]:not(:focus)::-webkit-datetime-edit{color:transparent;}
+/* Chromium draws its picker button right after the (hidden) value, on top of the hint: hidden with it (a tap still opens the
+   picker on Android; on a desktop the button comes back as soon as the field has focus) */
+.time-field input[data-empty="1"]:not(:focus)::-webkit-calendar-picker-indicator{opacity:0;}
 /* iOS: the inner value box — left-aligned, no reserved arrow margin, allowed to get narrower (a long value is clipped by the
    field, it never widens it). Its own rule: an engine that does not know the pseudo-element drops only this rule. */
 input::-webkit-date-and-time-value{text-align:left;margin:0;min-width:0;}
@@ -247,7 +258,7 @@ html.no-webfont .font-display{font-weight:600;}
 #tab-leave.active{display:flex;flex-direction:column;gap:.75rem;}
 #leaveColA,#leaveColB{display:contents;}
 #leaveCalendarCard{order:1;}
-#myLeaveCard{order:2;}
+#myLeaveCard,#myRequestsCard{order:2;}
 #leaveListCard{order:3;}
 #leaveHistory{order:4;}
 @media (min-width:1024px){
@@ -417,6 +428,33 @@ summary::-webkit-details-marker{display:none;}
       <div id="confirmLeaveText" class="space-y-3">-</div>
       <div id="leaveSheetNote" class="hidden"></div>
       <div id="leaveOptions" class="grid grid-cols-2 gap-2" role="group" aria-label="เลือกสถานะ"></div>
+      <!-- R1b: the time range of a doctor visit (ลาหาหมอตอนเช้า / ตอนบ่าย): preset chips + two native time inputs.
+           The inputs are never re-created while the sheet is open (js/app.js renderLeaveTime), so typing is not lost. -->
+      <div id="leaveTimeStep" class="hidden space-y-2.5 pt-1" role="group" aria-labelledby="leaveTimeLabel">
+        <p id="leaveTimeLabel" data-kit="label">ช่วงเวลาที่ลา</p>
+        <div id="leaveTimePresets" class="flex flex-wrap gap-2"></div>
+        <!-- start / end side by side while each gets at least 7.5rem, else one under the other (the iOS rules of hotfix 2.9.1:
+             no min-w-0, so a time field that will not get narrower stacks them instead of leaving the sheet) -->
+        <div class="flex flex-wrap gap-2">
+          <!-- R1b FIX-CL CL-12: an empty field (data-empty="1", js/app.js markEmptyTimes) shows the hint "เลือกเวลา" — iOS draws
+               nothing at all in an empty time input; the hint is decorative (the label names the field) and lets taps through -->
+          <div class="flex-1 basis-[7.5rem] max-w-full space-y-1">
+            <label for="leaveTimeStart" data-kit="textMeta">เวลาเริ่ม</label>
+            <div class="time-field relative">
+              <input type="time" id="leaveTimeStart" step="300" min="06:00" max="20:00" data-kit="timeInput" data-empty="1" aria-describedby="leaveTimeError">
+              <span class="time-hint" aria-hidden="true">เลือกเวลา</span>
+            </div>
+          </div>
+          <div class="flex-1 basis-[7.5rem] max-w-full space-y-1">
+            <label for="leaveTimeEnd" data-kit="textMeta">ถึงเวลา</label>
+            <div class="time-field relative">
+              <input type="time" id="leaveTimeEnd" step="300" min="06:00" max="20:00" data-kit="timeInput" data-empty="1" aria-describedby="leaveTimeError">
+              <span class="time-hint" aria-hidden="true">เลือกเวลา</span>
+            </div>
+          </div>
+        </div>
+        <p id="leaveTimeError" class="hidden" data-kit="fieldError" role="alert"></p>
+      </div>
     </div>
     <div data-kit="sheetActions">
       <button type="button" id="confirmLeaveCancelBtn" class="flex-1" data-kit="btn btnSecondary">ยกเลิก</button>
@@ -560,7 +598,7 @@ summary::-webkit-details-marker{display:none;}
   <div id="bannerSlot" class="space-y-2" aria-live="polite" hidden></div>
 
   <!-- TAB 1 : STATION (วันนี้) — #stationMain (the stations) and #stationSide (ของฉันวันนี้, leaves, remark, audit); the
-       layout (one column on phones, two from md:) is in the inline <style>. Cards are rendered by js/app.js. -->
+       layout (one column on phones and tablets, two from lg:) is in the inline <style>. Cards are rendered by js/app.js. -->
   <section id="tab-station" class="tab-panel active">
     <div id="stationLead">
       <!-- "ของฉันวันนี้": my station(s) or my leave on the selected date, derived from loaded state (js/app.js renderMyDay) -->
@@ -586,10 +624,12 @@ summary::-webkit-details-marker{display:none;}
 
       <!-- who is on leave on the selected date (everyone sees it) -->
       <div id="stationLeavesCard" class="hidden bg-white border-2 border-brand-100 rounded-3xl p-4 space-y-3">
-        <div class="flex items-center gap-3 min-w-0">
+        <!-- R1b FIX-CL CL-16: the count names each kind ("ลาทั้งวัน 5 · ลาบางช่วง 1 · รออนุมัติ 1"): it moves under the title
+             when the row is too narrow, instead of squeezing the title into three lines -->
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-1 min-w-0">
           <span class="inline-flex items-center justify-center w-9 h-9 shrink-0 rounded-full bg-coral-100 text-coral-700"><i data-ic="calendar-off" class="w-5 h-5"></i></span>
-          <h2 class="flex-1 min-w-0 font-display text-base font-medium leading-7 text-ink-900">ผู้ลา / สถานะพิเศษ</h2>
-          <span id="stationLeaveCount" class="inline-flex items-center gap-1 h-6 px-2.5 rounded-full text-xs font-medium leading-4 border whitespace-nowrap bg-coral-50 border-coral-200 text-coral-700">0 คน</span>
+          <h2 class="flex-1 basis-[9.5rem] min-w-0 font-display text-base font-medium leading-7 text-ink-900">ผู้ลา / สถานะพิเศษ</h2>
+          <span id="stationLeaveCount" class="ml-auto inline-flex items-center gap-1 h-6 px-2.5 rounded-full text-xs font-medium leading-4 border whitespace-nowrap bg-coral-50 border-coral-200 text-coral-700">0 คน</span>
         </div>
         <div id="stationLeaves" class="space-y-2"></div>
       </div>
@@ -641,6 +681,11 @@ summary::-webkit-details-marker{display:none;}
           <span class="inline-flex items-center justify-center min-w-[24px] h-6 px-1.5 rounded-lg border bg-rose-200 border-rose-300 text-rose-900">3</span>
           <span class="inline-flex items-center justify-center min-w-[24px] h-6 px-1.5 rounded-lg border bg-rose-300 border-rose-400 text-rose-900">4+</span>
           <span class="ml-1">· แตะวันที่เพื่อดูรายชื่อ</span>
+        </div>
+        <!-- R1b: markers of days with a doctor visit / a pending request (shown when the server has the new leave types) -->
+        <div id="calMarkLegend" class="hidden flex flex-wrap items-center gap-x-3 gap-y-1 text-xs leading-4 text-slate-500">
+          <span class="inline-flex items-center gap-1.5"><span class="block w-2 h-2 rounded-full bg-accent-800" aria-hidden="true" data-mark="partial"></span>มีลาบางช่วง (ยังทำงาน)</span>
+          <span class="inline-flex items-center gap-1.5"><span class="block w-2 h-2 rotate-45 rounded-[1px] bg-amber-800" aria-hidden="true" data-mark="pending"></span>มีคำขอรออนุมัติ</span>
         </div>
         <p id="calMonthTotal" class="text-[0.8125rem] leading-5 font-medium text-slate-600"></p>
         <div id="calDayDetail" class="rounded-2xl bg-cream-50 border-2 border-cream-100 px-3.5 py-3 space-y-2 text-sm leading-6 text-slate-700"></div>
@@ -703,6 +748,16 @@ summary::-webkit-details-marker{display:none;}
           </div>
         </div>
         <div id="myLeaveRow"></div>
+      </div>
+
+      <!-- R1b "คำขอของฉัน": my pending and rejected requests on any date (the server's `requests`); hidden while empty -->
+      <div id="myRequestsCard" class="hidden space-y-2" data-kit="card">
+        <div data-kit="cardHead">
+          <span data-kit="listIcon listIconSun"><i data-ic="inbox" class="w-5 h-5"></i></span>
+          <h2 class="flex-1 min-w-0" data-kit="titleCard">คำขอของฉัน</h2>
+          <span id="myRequestsCount" data-kit="pill pillNeutral"></span>
+        </div>
+        <div id="myRequestsList" class="-mx-4 divide-y divide-brand-100 border-t-2 border-brand-50"></div>
       </div>
 
       <!-- everyone: group filter + one compact row per person (all rows are rendered; the filter hides rows) -->
@@ -866,16 +921,20 @@ summary::-webkit-details-marker{display:none;}
        the list of their nav.section (mine | sup | system, anything else → other) by nav.order. -->
   <div id="menuContent" class="space-y-4 md:max-w-2xl md:mx-auto" hidden>
     <div id="menuProfile" class="space-y-4" data-kit="card">
-      <div class="flex items-center gap-4 min-w-0">
+      <!-- R1b: a button to the "profile" screen while that feature is registered and visible (js/app.js renderMenu) -->
+      <div id="menuProfileHead" class="flex items-center gap-4 min-w-0 -m-2 p-2 rounded-2xl">
         <span id="menuAvatar" class="inline-flex shrink-0"></span>
         <div class="min-w-0 flex-1">
           <p id="menuName" class="break-words" data-kit="titleScreen">-</p>
           <p id="menuGroup" data-kit="textMeta">-</p>
           <p id="menuRole" class="mt-1.5"></p>
         </div>
+        <span id="menuProfileChevron" class="hidden shrink-0 text-ink-300"><i data-ic="chevron-right" class="w-5 h-5"></i></span>
       </div>
       <button type="button" id="menuPasswordBtn" class="w-full" data-kit="btn btnTonal"><i data-ic="key" class="w-5 h-5"></i>เปลี่ยนรหัสผ่าน</button>
     </div>
+    <!-- R1b: the Supervisor is told once here when Code.gs is older than 3.0 (nothing new is shown or sent meanwhile) -->
+    <p id="menuServerNote" class="hidden" data-kit="note" role="status"></p>
     <div id="menuNav" class="space-y-4" data-nav-slot="menu">
       <section data-menu-section="mine" hidden>
         <h2 data-kit="sectionLabel">ของฉัน</h2>
@@ -933,9 +992,11 @@ summary::-webkit-details-marker{display:none;}
 <button type="button" id="updateBanner" class="hidden fixed left-1/2 -translate-x-1/2 top-32 z-[65] bg-brand-600 active:bg-brand-700 border-b-4 border-brand-800 text-white font-display text-sm font-medium px-5 py-2.5 rounded-full shadow-lg shadow-brand-900/20 whitespace-nowrap">🔄 มีเวอร์ชันใหม่ — แตะเพื่อโหลดใหม่</button>
 
 <script src="config.js"></script>
-<script src="js/utils.js?v=2.9.1"></script>
-<script src="js/api.js?v=2.9.1"></script>
-<script src="js/ui-kit.js?v=2.9.1"></script>
-<script src="js/app.js?v=2.9.1"></script>
+<script src="js/utils.js?v=3.0.0"></script>
+<script src="js/api.js?v=3.0.0"></script>
+<script src="js/ui-kit.js?v=3.0.0"></script>
+<script src="js/app.js?v=3.0.0"></script>
+<script src="js/feat-profile.js?v=3.0.0"></script>
+<script src="js/feat-approval.js?v=3.0.0"></script>
 </body>
 </html>

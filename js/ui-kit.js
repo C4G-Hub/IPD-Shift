@@ -15,7 +15,7 @@
  *
  * ---------------------------------------------------------------- PUBLIC SURFACE
  *
- * UiKit.version                        '1.3.0'  (1.3 = R1a FIX-2: rem text sizes, neutral disabled buttons, 16 px primary labels, Sarabun
+ * UiKit.version                        '1.5.0'  (1.5 = R1b I1: dialog opts detail / maxLength / data; 1.4 = R1b: leave-model recipes, avatars.refresh; 1.3 = R1a FIX-2: rem text sizes, neutral disabled buttons, 16 px primary labels, Sarabun
  *                                      initials, dvh sheets that follow the on-screen keyboard, calendar / save-bar / stepper recipes;
  *                                      1.2 = R1a-B3 screen recipes, larger avatar initials; 1.1 = theme v2 "Pastel Kawaii": semantic
  *                                      colour families, display font, sticker buttons, stroke-2 icons, decoration glyphs)
@@ -56,7 +56,9 @@
  *                                      size: 'xs'|'sm'|'md'|'lg'|'xl' (default 'sm' = 32 px). Initials are drawn by
  *                                      a ::before rule from data-initials, so they are NOT part of textContent
  *                                      (exact-text test assertions keep holding). When UiKit.avatars.get(name)
- *                                      returns a URL an <img> covers the initials (removed again if it fails).
+ *                                      returns a URL an <img> covers the initials (removed again if it fails; a URL
+ *                                      that failed once is not drawn again — avatar() and refresh() keep the initials —
+ *                                      until another URL is set for that name or the registry is cleared).
  *                                      opts: { label: true } → role="img" + aria-label=name instead of aria-hidden;
  *                                            { cls: 'ring-2 ring-white' } extra classes.
  * UiKit.avatars                        in-memory registry name → image URL: blob:, data:image/png|jpeg|webp, or a same-origin
@@ -65,6 +67,9 @@
  *     .get(name)                       → url or null
  *     .clear()                         removes all (listeners get (null, null))
  *     .onChange(fn)                    fn(name, url) after every change; returns an unsubscribe function
+ *     .refresh(root?, name?)           patches the <img> of every [data-avatar] under root (default document) — only
+ *                                      that name's when given — to match the registry; → number changed (R1b: js/app.js
+ *                                      calls it on every registry change, so no screen needs a full re-render)
  *
  * Small markup helpers
  * UiKit.pill(text, tone, icon?)        tone 'ok'|'pending'|'danger'|'partial'|'neutral' → status pill with data-tone
@@ -133,7 +138,22 @@
  *     preserved, input for prompt ([data-uk-input]), buttons [data-uk-action="ok"|"cancel"].
  *     Enter = OK (Enter on a focused button activates that button), Escape / backdrop = cancel.
  *     opts: { title, okLabel ('ตกลง'), cancelLabel ('ยกเลิก'), danger (red OK button, focus starts on cancel),
- *             placeholder, inputType ('text'), icon (icon name shown above the title) }
+ *             placeholder, inputType ('text'), icon (icon name shown above the title),
+ *             R1b: detail { title, text?, avatar? (a name: UiKit.avatar), tone? 'neutral'|'ok'|'danger' } — a framed block
+ *               between the title and the message ([data-uk-detail]); with native dialogs its title and text (and
+ *               opts.title) are put in front of the message, separated by a blank line, because window.confirm/prompt
+ *               cannot show it;
+ *             maxLength (prompt) — the input stops at that many characters and a live counter "n/max" ([data-uk-count],
+ *               aria-live polite) sits under it; native prompts cannot limit the input: check the answer's length;
+ *             hint (prompt) — helper text under the input ([data-uk-hint], linked by aria-describedby); natively it is
+ *               appended to the message in parentheses — opts.nativeHint, when given, is used there instead (shorter);
+ *             data { key: value } — data-* attributes on the dialog wrapper (camelCase keys, as el.dataset) for tests and
+ *               for finding the dialog again (e.g. to close it);
+ *             R1b FIX-CL: multiline (prompt) — a growing <textarea> (Enter = new line, Ctrl/⌘+Enter = OK); with maxLength the
+ *               text is cut at the limit (never thrown away), the counter turns to the danger tone there and is announced
+ *               only from 90 %; returnFocus (element, selector or function) — where focus goes when the dialog closes and
+ *               the opener was re-rendered meanwhile (otherwise the opener is found again by its id / data-* attributes);
+ *               the decorative icon ([data-uk-dialog-icon]) is hidden on short screens and while a keyboard is open }
  *   if (await UiKit.confirm('ต้องการลบ "' + name + '" ออกจากระบบใช่หรือไม่?', { danger: true, okLabel: 'ลบ' })) …
  *   const pw = await UiKit.prompt('ตั้งรหัสผ่านใหม่', '', { inputType: 'password' });   // null when cancelled
  *
@@ -148,18 +168,23 @@
  *   const r = await UiKit.image.compress(file, { square: true, maxSide: 192, maxChars: 24000 });
  * UiKit.image.toObjectUrl(base64, mime) → blob: URL (accepts a full data: URL too); revoke it when done. Only image/png,
  *                                      image/jpeg and image/webp: any other type throws the Error of code 'not-image'
+ * UiKit.image.jpegSize(base64)         → {width, height} read from the JPEG frame header (SOFn marker), or null when the
+ *                                      data is not a JPEG (FF D8 start) or no frame header can be read. Reads only the
+ *                                      header bytes (never decodes pixels), so a "decode bomb" picture can be refused
+ *                                      before any <img> sees it (R1b FIX-CL CL-9: avatars are JPEG ≤ 512 px per side).
  *
  * ---------------------------------------------------------------- INTEGRATION NOTES
  * - Sheet markup: a full-screen wrapper (`fixed inset-0 ... hidden items-end md:items-center`, e.g. cls.sheetWrap)
- *   holding ONE panel element (first element child, or mark it with data-sheet-panel). The seven modals in
- *   index.html already have this shape. The wrapper gets class `uk-sheet` on first open; the injected rule
+ *   holding ONE panel element (first element child, or mark it with data-sheet-panel). Every modal in
+ *   index.html has this shape. The wrapper gets class `uk-sheet` on first open; the injected rule
  *   `.uk-sheet.hidden{display:none!important}` keeps closed sheets hidden even where Tailwind is absent.
  * - Closing is always synchronous, so `hidden` is set before the next line of app code runs (tests assert
  *   !isOpen() right after settle()). Only the enter is animated (classes `uk-enter` on the wrapper and
  *   `uk-panel` on the panel, 180 ms, disabled by prefers-reduced-motion).
  * - The Escape listener is registered on `document` when this file loads, i.e. before app.js adds its own, so it
- *   runs first; it calls preventDefault() whenever a sheet is open. Until the app's Escape chain is replaced it
- *   must start with `if (e.defaultPrevented) return;` or a second modal would close too.
+ *   runs first; it calls preventDefault() whenever a sheet is open (one Escape closes only the top sheet). The app has
+ *   no Escape chain of its own: its modals join this stack (UiKit.sheet.register with onRequestClose). Any other
+ *   keydown handler must still start with `if (e.defaultPrevented) return;`.
  * - Dialog sheets are appended to <body> and removed after closing; z-index is raised above any open sheet
  *   (e.g. #diagModal z-[65]). Their classes come from UiKit.cls, so css/tailwind.css must be rebuilt after this
  *   file is wired into the CSS build.
@@ -190,6 +215,7 @@
  * Avatar:   avatar avatarXs avatarSm avatarMd avatarLg avatarXl avatarTint1 … avatarTint6 (initials in Sarabun: looped Thai letters
  *           are not misread as Latin ones)
  * Sheets:   sheetWrap sheetPanel sheetGrabber sheetBody sheetTitle sheetText sheetFooter dialogIcon dialogIconDanger
+ *           (R1b) dialogDetail dialogDetailOk dialogDetailDanger dialogDetailTitle (opts.detail) · dialogCount (opts.maxLength)
  * Banners:  banner bannerInfo bannerOk bannerWarn bannerDanger
  * Nav:      navInner navItem navOn navOff   (R1a-B2) navRail navItemRail navIcon — the bar becomes a left rail from md:
  * Shell:    hdrIconBtn hdrPill (ink on the pastel header) · dayCell dayCellOn dayCellOff dayCellToday dayLabel dayNum
@@ -212,6 +238,15 @@
  *           keyboard focus = an offset ink ring) · saveBtn + saveBtnClean / saveBtnDirty (the save bar's button: secondary
  *           while nothing is unsaved, primary while the draft is dirty) · stepBtn (labelled −/+ text button) · countRow
  *           (white station row of the counts sheet)
+ * R1b:      inlineTag + inlineTagPartial / inlineTagPending (tag inside a person chip: "หาหมอ 09:00–11:00", "รออนุมัติ") ·
+ *           slotNote + slotNoteDanger / slotNotePartial / slotNotePending (line under a slot picker) · timeChip (preset of the
+ *           leave sheet's time step, with chipOn / chipOff) timeInput (native time input) fieldError · calMarks calMarkPartial
+ *           calMarkPending (leave calendar day markers) · statusBox + statusBoxPending / statusBoxRejected / statusBoxPartial /
+ *           statusBoxOk (the leave sheet's status line)
+ * FIX-CL:   (R1b fix round) pillRejected (dashed soft coral: a rejected request) · calMarkPartialSel / calMarkPendingSel (white
+ *           markers on the selected day) calNumSundayTint (Sunday number on a strongly tinted day) · tileTight (doctor-visit
+ *           tiles: the label never wraps) · navDot (a dot on a nav entry, core.badges.dot) · secretValue (a revealed
+ *           password: monospaced, slashed zero) · dialogCountDanger (the prompt counter at its limit)
  * Disabled buttons (btn) are neutral (ink-100 fill, ink-400 text) — a busy button (aria-busy) keeps its colours.
  *
  * ---------------------------------------------------------------- ICONS
@@ -271,6 +306,8 @@
     chipOn: 'bg-brand-600 border-brand-600 text-white',
     // option tiles
     tile: 'flex items-center justify-center gap-1.5 h-12 px-3 rounded-2xl border-2 text-sm font-medium leading-5 text-center select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 disabled:opacity-50',
+    // R1b FIX-CL CL-20: the doctor-visit tiles (icon + "หาหมอ (เช้า)") — less padding, the label never wraps (360 px, 130 % text)
+    tileTight: 'flex items-center justify-center gap-1 h-12 px-2 rounded-2xl border-2 text-sm font-medium leading-5 text-center whitespace-nowrap select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 disabled:opacity-50',
     tileOff: 'bg-white border-ink-100 text-ink-800 active:bg-brand-50',
     tileOn: 'bg-brand-50 border-brand-500 text-brand-700',
     // status (never by colour alone: a pill always carries a word, optionally an icon)
@@ -280,6 +317,8 @@
     pillDanger: 'bg-coral-50 border-coral-200 text-coral-700',
     pillPartial: 'bg-accent-50 border-accent-200 text-accent-700',
     pillNeutral: 'bg-ink-50 border-ink-100 text-ink-700',
+    // R1b FIX-CL CL-22: a rejected request — soft coral, outlined and dashed (an absence is the filled coral pillDanger)
+    pillRejected: 'bg-white border-dashed border-coral-300 text-coral-700',
     badge: 'inline-block min-w-[20px] h-5 px-1.5 rounded-full bg-coral-600 text-white text-xs font-bold leading-5 text-center tabular-nums',
     // avatar
     avatar: 'relative inline-flex shrink-0 items-center justify-center rounded-full font-body font-semibold overflow-hidden select-none',
@@ -305,6 +344,13 @@
     sheetFooter: 'sticky bottom-0 flex gap-2 px-5 pt-3 pb-4 bg-white',
     dialogIcon: 'flex items-center justify-center w-14 h-14 rounded-full bg-brand-100 text-brand-700',
     dialogIconDanger: 'flex items-center justify-center w-14 h-14 rounded-full bg-coral-100 text-coral-700',
+    // R1b (I1): the framed block above a dialog's message (opts.detail) and the counter under a prompt's input (opts.maxLength)
+    dialogDetail: 'flex items-center gap-3 p-3 rounded-2xl border-2 bg-cream-50 border-cream-100',
+    dialogDetailOk: 'flex items-center gap-3 p-3 rounded-2xl border-2 bg-emerald-50 border-emerald-100',
+    dialogDetailDanger: 'flex items-center gap-3 p-3 rounded-2xl border-2 bg-coral-50 border-coral-100',
+    dialogDetailTitle: 'font-display text-base font-medium leading-6 text-ink-900 break-words',
+    dialogCount: 'text-xs font-medium leading-4 text-slate-500 text-right tabular-nums',
+    dialogCountDanger: 'text-xs font-semibold leading-4 text-coral-700 text-right tabular-nums',
     // banners
     banner: 'flex items-start gap-3 p-3 rounded-2xl border-2 text-sm leading-6',
     bannerInfo: 'bg-accent-50 border-accent-100 text-ink-800',
@@ -319,6 +365,8 @@
     navRail: 'md:grid-flow-row md:auto-rows-min md:gap-1 md:px-2',
     navItemRail: 'pt-1 pb-1.5 md:py-0 md:h-[72px] md:w-full md:rounded-2xl',
     navIcon: 'nav-ic inline-flex items-center justify-center w-14 h-7 rounded-full transition-colors',
+    // R1b FIX-CL CL-14: a dot without a count on a nav entry (e.g. การลา while an own rejection is not dismissed)
+    navDot: 'block w-2.5 h-2.5 rounded-full bg-coral-600 ring-2 ring-white',
     // app shell: pastel gradient header (ink text), week strip, menu rows, save bar, sheets with a title row
     hdrIconBtn: 'inline-flex items-center justify-center w-11 h-11 shrink-0 rounded-full text-ink-900 active:bg-white/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-800 disabled:opacity-60',
     hdrPill: 'inline-flex items-center gap-1.5 h-8 min-w-0 max-w-[8.5rem] px-2.5 rounded-full bg-white/70 text-xs font-medium leading-4 text-ink-800 active:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-800',
@@ -377,31 +425,65 @@
     rowAction: 'inline-flex flex-col items-center justify-center gap-0.5 min-w-[52px] h-12 px-1.5 rounded-2xl font-display text-xs font-medium leading-4 text-ink-700 active:bg-brand-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 disabled:opacity-50',
     rowActionDanger: 'inline-flex flex-col items-center justify-center gap-0.5 min-w-[52px] h-12 px-1.5 rounded-2xl font-display text-xs font-medium leading-4 text-coral-700 active:bg-coral-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-coral-400 disabled:opacity-50',
     note: 'flex items-start gap-2.5 p-3 rounded-2xl bg-cream-50 border-2 border-cream-100 text-sm leading-6 text-slate-700',
+    // R1b FIX-CL CL-19: a revealed password — monospaced (0/O and 1/l/I differ), slashed zero, a little letter spacing
+    secretValue: 'font-mono text-lg font-semibold leading-7 tracking-wider slashed-zero text-ink-900',
     // R1a FIX-2
     wrapAnywhere: '[overflow-wrap:anywhere]',
     dateCaption: 'mt-1 px-1 text-xs font-medium leading-4 text-slate-500 tabular-nums',
     // leave calendar (one selection language with the week strip)
-    calCell: 'cal-day relative h-12 rounded-xl border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-800 focus-visible:ring-offset-2',
+    calCell: 'cal-day relative h-14 rounded-xl border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-800 focus-visible:ring-offset-2',
     calCellToday: 'border-2 border-accent-400',
     calSelFill: 'absolute -inset-px rounded-xl bg-brand-600 shadow-md shadow-brand-600/30',
     calNum: 'absolute top-1 left-1 min-w-[20px] px-1 rounded-full text-xs font-semibold leading-5 tabular-nums',
     calNumToday: 'bg-white text-accent-700 ring-1 ring-accent-300',
-    calNumSunday: 'text-coral-600',
+    calNumSunday: 'text-coral-700',
+    // R1b FIX-CL CL-13: a Sunday number on a strongly tinted cell (3+ people) sits on a white chip (AA for 12 px text)
+    calNumSundayTint: 'bg-white text-coral-700',
     calNumSel: 'bg-brand-600 text-white',
-    calCount: 'cal-count absolute bottom-0.5 inset-x-0 text-xs font-semibold leading-4 text-rose-900',
-    calCountSel: 'cal-count absolute bottom-0.5 inset-x-1 rounded-full bg-brand-600 text-xs font-semibold leading-4 text-white',
+    calCount: 'cal-count absolute bottom-0.5 inset-x-0 text-xs font-semibold leading-4 whitespace-nowrap text-rose-900',
+    calCountSel: 'cal-count absolute bottom-0.5 inset-x-0.5 rounded-full bg-brand-600 text-xs font-semibold leading-4 whitespace-nowrap text-white',
     // the save bar's button: quiet while nothing is unsaved, the primary action while the draft is dirty
     saveBtn: 'inline-flex items-center justify-center gap-2 h-11 min-w-[9.5rem] px-5 rounded-2xl font-display font-medium leading-5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2 [&:disabled:not([aria-busy=true])]:bg-ink-100 [&:disabled:not([aria-busy=true])]:border-ink-100 [&:disabled:not([aria-busy=true])]:text-ink-400',
     saveBtnClean: 'bg-white border-2 border-b-4 border-ink-200 text-ink-800 text-sm active:bg-ink-50',
     saveBtnDirty: 'bg-brand-600 border-b-4 border-brand-800 text-white text-base active:bg-brand-700',
     // station-count steppers: a word, never a chevron (the station name is in the aria-label)
     stepBtn: 'count-step inline-flex items-center justify-center min-w-[52px] h-11 px-3 rounded-2xl bg-white border-2 border-b-4 border-ink-200 font-display text-sm font-medium leading-5 text-ink-800 active:bg-ink-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2 [&:disabled:not([aria-busy=true])]:bg-ink-100 [&:disabled:not([aria-busy=true])]:border-ink-100 [&:disabled:not([aria-busy=true])]:text-ink-400',
-    countRow: 'flex items-center justify-between gap-2 py-2 pl-3 pr-2 rounded-2xl bg-white border-2 border-brand-100'
+    countRow: 'flex items-center justify-between gap-2 py-2 pl-3 pr-2 rounded-2xl bg-white border-2 border-brand-100',
+    // R1b (leave model): a small tag INSIDE a person chip / next to a name — a doctor visit with its time, a pending request
+    inlineTag: 'inline-flex items-center gap-0.5 h-5 px-1.5 rounded-full border text-xs font-medium leading-4 whitespace-nowrap',
+    inlineTagPartial: 'bg-accent-50 border-accent-200 text-accent-800',
+    inlineTagPending: 'bg-sun-100 border-sun-300 text-amber-800',
+    // the line under a Supervisor's slot picker (aligned with the name, after the 32 px avatar + gap)
+    slotNote: 'flex items-center gap-1.5 pl-[42px] text-xs font-medium leading-4',
+    slotNoteDanger: 'text-coral-700',
+    slotNotePartial: 'text-accent-800',
+    slotNotePending: 'text-amber-800',
+    // time-range step of the leave sheet: preset chips in a wrapping row, two native time inputs side by side
+    // R1b FIX-CL CL-23: the same typeface (Sarabun) as the time fields next to them
+    timeChip: 'inline-flex items-center justify-center h-11 px-3.5 rounded-full border-2 text-sm font-semibold leading-5 tabular-nums select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-1',
+    timeInput: 'w-full h-11 px-3 rounded-2xl border-2 border-ink-200 bg-white text-base leading-6 text-ink-900 tabular-nums focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-200 aria-[invalid=true]:border-coral-400',
+    fieldError: 'flex items-start gap-1.5 text-[0.8125rem] font-medium leading-5 text-coral-700',
+    // leave calendar: small markers for days that also have a doctor visit / a pending request (never colour alone:
+    // the cell's aria-label and the legend say what they mean)
+    // R1b FIX-CL CL-13: the markers sit in their own row between the number and the count (never on the number), differ by
+    // shape (circle = doctor visit, diamond = pending) as well as colour, and are dark enough for 3:1 on every cell tint;
+    // on the selected (brand-600) cell they are white
+    calMarks: 'absolute top-[27px] left-1.5 flex items-center gap-1.5',
+    calMarkPartial: 'block w-2 h-2 rounded-full bg-accent-800',
+    calMarkPending: 'block w-2 h-2 rotate-45 rounded-[1px] bg-amber-800',
+    calMarkPartialSel: 'block w-2 h-2 rounded-full bg-white',
+    calMarkPendingSel: 'block w-2 h-2 rotate-45 rounded-[1px] bg-white',
+    // a status line that leads with an icon in a pastel circle (leave sheet: pending / rejected / decided)
+    statusBox: 'flex items-start gap-3 p-3 rounded-2xl border-2 text-sm leading-6',
+    statusBoxPending: 'bg-sun-50 border-sun-200 text-ink-900',
+    statusBoxRejected: 'bg-coral-50 border-coral-200 text-ink-900',
+    statusBoxPartial: 'bg-accent-50 border-accent-100 text-ink-900',
+    statusBoxOk: 'bg-emerald-50 border-emerald-100 text-ink-900'
   });
 
   const AVATAR_SIZES = Object.freeze({ xs: cls.avatarXs, sm: cls.avatarSm, md: cls.avatarMd, lg: cls.avatarLg, xl: cls.avatarXl });
   const AVATAR_TINTS = Object.freeze([cls.avatarTint1, cls.avatarTint2, cls.avatarTint3, cls.avatarTint4, cls.avatarTint5, cls.avatarTint6]);
-  const PILL_TONES = Object.freeze({ ok: cls.pillOk, pending: cls.pillPending, danger: cls.pillDanger, partial: cls.pillPartial, neutral: cls.pillNeutral });
+  const PILL_TONES = Object.freeze({ ok: cls.pillOk, pending: cls.pillPending, danger: cls.pillDanger, partial: cls.pillPartial, neutral: cls.pillNeutral, rejected: cls.pillRejected });
   const SKELETON_WIDTHS = ['w-full', 'w-5/6', 'w-2/3', 'w-3/4', 'w-1/2'];
 
   /* ---------------------------------------------------------------- basics */
@@ -437,7 +519,16 @@
     '.uk-safe-t{padding-top:env(safe-area-inset-top,0px)}',
     '.uk-safe-b{padding-bottom:env(safe-area-inset-bottom,0px)}',
     '.uk-safe-pb{padding-bottom:calc(1rem + env(safe-area-inset-bottom,0px))}',
-    '.uk-safe-x{padding-left:env(safe-area-inset-left,0px);padding-right:env(safe-area-inset-right,0px)}'
+    '.uk-safe-x{padding-left:env(safe-area-inset-left,0px);padding-right:env(safe-area-inset-right,0px)}',
+    // R1b FIX-CL CL-17: on a short screen (landscape, or an on-screen keyboard: html.uk-kb, set by fitViewport) a dialog's
+    // decorative icon makes room, so the field and the buttons stay visible above the keyboard
+    '@media (max-height:500px){[data-uk-dialog-icon]{display:none!important}}',
+    'html.uk-kb [data-uk-dialog-icon]{display:none!important}',
+    // a growing multi-line prompt field (opts.multiline): at most about six lines, then it scrolls
+    'textarea[data-uk-input]{resize:none;overflow-y:auto;max-height:10.5rem;min-height:4.75rem;padding-top:.5rem;padding-bottom:.5rem;line-height:1.5rem}',
+    '@media (max-height:500px){textarea[data-uk-input]{min-height:3rem;max-height:6rem}[data-uk-detail] [data-avatar]{display:none}}',
+    // a dialog scrolls as a whole above its sticky button row: a field scrolled into view stays clear of that row
+    '[data-uk-input]{scroll-margin-bottom:5.5rem;scroll-margin-top:1rem}'
   ].join('\n');
 
   function injectStyle() {
@@ -621,6 +712,12 @@
 
   const avatarMap = new Map();
   const avatarListeners = [];
+  const brokenAvatarUrls = new Set();   // R1b I1: URLs whose <img> failed to load: the initials stay, no new <img> for them
+  /** The URL to draw for a normalised name, or null (none, or its picture failed to load). */
+  function avatarUrl(k) {
+    const u = avatarMap.has(k) ? avatarMap.get(k) : null;
+    return u && !brokenAvatarUrls.has(u) ? u : null;
+  }
   function notifyAvatars(name, url) {
     avatarListeners.slice().forEach(function (fn) {
       try { fn(name, url); } catch (e) { setTimeout(function () { throw e; }, 0); }
@@ -643,12 +740,44 @@
     clear: function () {
       const had = avatarMap.size > 0;
       avatarMap.clear();
+      brokenAvatarUrls.clear();
       if (had) notifyAvatars(null, null);
     },
     onChange: function (fn) {
       if (typeof fn !== 'function') return function () {};
       avatarListeners.push(fn);
       return function () { const i = avatarListeners.indexOf(fn); if (i >= 0) avatarListeners.splice(i, 1); };
+    },
+    /**
+     * Brings every avatar ([data-avatar]) under root (default document) in line with the registry: adds, replaces or
+     * removes its <img>. name: only that person's avatars (null/undefined = all). Cheap DOM patch, no re-render;
+     * names are compared, never put into a selector. → number of avatars changed.
+     */
+    refresh: function (root, name) {
+      const scope = root && typeof root.querySelectorAll === 'function' ? root : doc;
+      if (!scope) return 0;
+      const only = name === null || name === undefined ? null : normName(name);
+      let n = 0;
+      Array.prototype.forEach.call(scope.querySelectorAll('[data-avatar]'), function (el) {
+        const who = el.getAttribute('data-avatar');
+        if (only !== null && who !== only) return;
+        const url = avatarUrl(who);
+        let img = null;
+        for (let c = el.firstElementChild; c; c = c.nextElementSibling) if (c.hasAttribute('data-uk-avatar-img')) { img = c; break; }
+        if (!url) { if (img) { el.removeChild(img); n++; } return; }
+        if (img && img.getAttribute('src') === url) return;
+        if (img) img.setAttribute('src', url);
+        else {   // the attributes in the order avatar() writes them, so a later re-render sees identical markup
+          img = doc.createElement('img');
+          img.setAttribute('src', url);
+          img.setAttribute('alt', '');
+          img.setAttribute('data-uk-avatar-img', '1');
+          img.setAttribute('draggable', 'false');
+          el.appendChild(img);
+        }
+        n++;
+      });
+      return n;
     }
   });
 
@@ -660,7 +789,7 @@
     const ini = initials(n) || '?';
     const extra = opts.cls ? ' ' + esc(opts.cls) : '';
     const a11y = opts.label ? ' role="img" aria-label="' + esc(n) + '"' : ' aria-hidden="true"';
-    const url = avatars.get(n);
+    const url = avatarUrl(n);
     const img = url ? '<img src="' + esc(url) + '" alt="" data-uk-avatar-img="1" draggable="false">' : '';
     return '<span class="' + cls.avatar + ' ' + sizeCls + ' ' + tint + extra + '" data-initials="' + esc(ini) + '"' +
       ' data-avatar="' + esc(n) + '"' + a11y + '>' + img + '</span>';
@@ -784,11 +913,63 @@
     observe(el);
   }
 
+  /**
+   * R1b FIX-CL CL-15: a selector that finds the element that opened a sheet again after a re-render replaced that node — its
+   * id, else its tag and data-* attributes, prefixed by the nearest ancestor with an id or data-* attributes (e.g. the inbox
+   * row of a button). State attributes (busy / loading / state / pressed) are left out: they change while the sheet is open.
+   */
+  const VOLATILE_ATTR = /^data-(busy|state|loading|status|leave-status|request-status|locked|count|uk-.*)$/;
+  function attrQuote(v) { return '"' + String(v).replace(/["\\]/g, '\\$&') + '"'; }
+  function ownSelector(node) {
+    if (!node || node.nodeType !== 1) return '';
+    if (node.id) return '[id=' + attrQuote(node.id) + ']';
+    const parts = [];
+    Array.prototype.forEach.call(node.attributes, function (a) {
+      if (/^data-/.test(a.name) && !VOLATILE_ATTR.test(a.name)) parts.push('[' + a.name + '=' + attrQuote(a.value) + ']');
+    });
+    return parts.length ? node.tagName.toLowerCase() + parts.join('') : '';
+  }
+  function focusSelector(el) {
+    const own = ownSelector(el);
+    if (!own || own.indexOf('[id=') === 0) return own;
+    for (let p = el.parentElement; p && p !== doc.body && p !== doc.documentElement; p = p.parentElement) {
+      const ps = ownSelector(p);
+      if (ps) return ps + ' ' + own;
+    }
+    return own;
+  }
+  /**
+   * The element focus returns to when a sheet closes: the remembered node, or — re-rendered meanwhile — opts.returnFocus
+   * (element, selector or function → element), then the same selector as the node had, but only when exactly ONE element
+   * matches it (never "a button like it" of another person's row — reviewer 2). null → the fallback (setFallbackFocus).
+   */
+  function restoreTarget(entry) {
+    const r = entry.restore;
+    if (r && r.isConnected) return r;
+    const rf = entry.opts && entry.opts.returnFocus;
+    let el = null;
+    try {
+      el = typeof rf === 'function' ? rf() : typeof rf === 'string' ? doc.querySelector(rf) : rf && rf.nodeType === 1 ? rf : null;
+    } catch (e) { el = null; }
+    if (el && el.isConnected) return el;
+    if (!entry.restoreSel) return null;
+    try {
+      const all = doc.querySelectorAll(entry.restoreSel);
+      el = all.length === 1 ? all[0] : null;
+    } catch (e) { el = null; }
+    return el && el.isConnected && !el.disabled ? el : null;
+  }
+  let fallbackFocus = null;   // () → element: where focus goes when the opener is gone and nothing unambiguous replaces it
+
   /** Pushes an already visible element onto the stack (shared by open() and sync()). */
   function adopt(el, opts, animate) {
-    const entry = { el: el, opts: opts || {}, restore: null, zSet: false };
+    const entry = { el: el, opts: opts || {}, restore: null, restoreSel: '', restoreOwn: '', zSet: false };
     const active = doc.activeElement;
-    if (active && active !== doc.body && !el.contains(active)) entry.restore = active;
+    if (active && active !== doc.body && !el.contains(active)) {
+      entry.restore = active;
+      entry.restoreSel = focusSelector(active);
+      entry.restoreOwn = ownSelector(active);
+    }
     if (!el.hasAttribute('role')) el.setAttribute('role', 'dialog');
     el.setAttribute('aria-modal', 'true');
     el.classList.add('uk-sheet');
@@ -820,6 +1001,7 @@
   function fitViewport() {
     const vv = global.visualViewport;
     const kb = keyboardOpen(vv);
+    if (doc && doc.documentElement) doc.documentElement.classList.toggle('uk-kb', kb && stack.length > 0);
     stack.forEach(function (e) {
       if (!kb) { clearFit(e.el); return; }
       e.el.style.top = Math.max(0, Math.round(vv.offsetTop || 0)) + 'px';
@@ -852,16 +1034,26 @@
     stack.splice(i, 1);
     // sheets opened from inside this one inherit its restore target
     for (let j = i; j < stack.length; j++) {
-      if (stack[j].restore && el.contains(stack[j].restore)) stack[j].restore = entry.restore;
+      if (stack[j].restore && el.contains(stack[j].restore)) {
+        stack[j].restore = entry.restore;
+        stack[j].restoreSel = entry.restoreSel;
+        stack[j].restoreOwn = entry.restoreOwn;
+      }
     }
     el.classList.remove('uk-enter');
     if (entry.zSet) { el.style.zIndex = ''; entry.zSet = false; }
     updateLock();
+    if (doc.documentElement && !stack.length) doc.documentElement.classList.remove('uk-kb');
     if (hadFocus) {
       const top = stack[stack.length - 1];
-      const r = entry.restore;
-      if (r && r.isConnected && (!top || top.el.contains(r))) focusEl(r);
+      const r = restoreTarget(entry);
+      if (r && (!top || top.el.contains(r))) focusEl(r);
       else if (top) focusEl(initialFocus(top));
+      else if (fallbackFocus) {
+        let f = null;
+        try { f = fallbackFocus(); } catch (e) { f = null; }
+        if (f && f.isConnected) focusEl(f);
+      }
     }
     if (typeof entry.opts.onClose === 'function') {
       try { entry.opts.onClose(reason); } catch (e) { setTimeout(function () { throw e; }, 0); }
@@ -966,6 +1158,9 @@
     },
     sync: sync,
     fitViewport: fitViewport,
+    /** fn() → element (e.g. the current screen's heading): focus goes there when a sheet closes, its opener is gone and no
+     *  single element replaces it (null removes it). */
+    setFallbackFocus: function (fn) { fallbackFocus = typeof fn === 'function' ? fn : null; },
     onChange: function (fn) {
       if (typeof fn !== 'function') return function () {};
       sheetListeners.push(fn);
@@ -1009,7 +1204,10 @@
   }
   function onImgError(e) {
     const t = e.target;
-    if (t && t.tagName === 'IMG' && t.hasAttribute('data-uk-avatar-img') && t.parentNode) t.parentNode.removeChild(t);
+    if (!t || t.tagName !== 'IMG' || !t.hasAttribute('data-uk-avatar-img')) return;
+    const src = t.getAttribute('src');
+    if (src) brokenAvatarUrls.add(src);   // never tried again (no flicker, no repeated load errors) until a new URL is set
+    if (t.parentNode) t.parentNode.removeChild(t);
   }
 
   /* ---------------------------------------------------------------- dialogs */
@@ -1033,6 +1231,10 @@
       wrap.setAttribute('aria-describedby', id + '-m');
       wrap.setAttribute('data-uikit-dialog', kind);
       const okCls = cls.btn + ' ' + (o.danger ? cls.btnDanger : cls.btnPrimary) + ' flex-1';
+      const det = o.detail && typeof o.detail === 'object' && o.detail.title ? o.detail : null;
+      const maxLen = kind === 'prompt' && Number(o.maxLength) > 0 ? Math.floor(Number(o.maxLength)) : 0;
+      const multi = kind === 'prompt' && !!o.multiline;
+      const detTone = det && det.tone === 'ok' ? cls.dialogDetailOk : det && det.tone === 'danger' ? cls.dialogDetailDanger : cls.dialogDetail;
       const cancelBtn = kind === 'alert' ? '' :
         '<button type="button" class="' + cls.btn + ' ' + cls.btnSecondary + ' flex-1" data-uk-action="cancel">' +
         esc(o.cancelLabel || 'ยกเลิก') + '</button>';
@@ -1040,10 +1242,16 @@
         '<div class="' + cls.sheetPanel + ' uk-safe-b" data-sheet-panel>' +
           '<div class="' + cls.sheetGrabber + '" aria-hidden="true"></div>' +
           '<div class="' + cls.sheetBody + '">' +
-            (o.icon && ICONS[o.icon] ? '<div class="' + (o.danger ? cls.dialogIconDanger : cls.dialogIcon) + '">' + icon(o.icon, 'w-7 h-7') + '</div>' : '') +
+            (o.icon && ICONS[o.icon] ? '<div class="' + (o.danger ? cls.dialogIconDanger : cls.dialogIcon) + '" data-uk-dialog-icon>' + icon(o.icon, 'w-7 h-7') + '</div>' : '') +
             '<h2 id="' + id + '-t" class="' + cls.sheetTitle + '"></h2>' +
+            (det ? '<div class="' + detTone + '" data-uk-detail>' + (det.avatar ? avatar(String(det.avatar), 'md') : '') +
+              '<div class="min-w-0 flex-1"><p class="' + cls.dialogDetailTitle + '">' + esc(det.title) + '</p>' +
+              (det.text ? '<p class="' + cls.textMeta + '">' + esc(det.text) + '</p>' : '') + '</div></div>' : '') +
             '<p id="' + id + '-m" class="' + cls.sheetText + '"></p>' +
-            (kind === 'prompt' ? '<input data-uk-input class="' + cls.input + '" autocomplete="off">' : '') +
+            (multi ? '<textarea data-uk-input rows="2" class="' + cls.input + '" autocomplete="off" enterkeyhint="enter"></textarea>'
+              : kind === 'prompt' ? '<input data-uk-input class="' + cls.input + '" autocomplete="off">' : '') +
+            (maxLen ? '<p class="' + cls.dialogCount + '" data-uk-count aria-live="off"></p>' : '') +
+            (kind === 'prompt' && o.hint ? '<p id="' + id + '-h" class="' + cls.textCaption + '" data-uk-hint></p>' : '') +
           '</div>' +
           '<div class="' + cls.sheetFooter + '">' + cancelBtn +
             '<button type="button" class="' + okCls + '" data-uk-action="ok">' + esc(o.okLabel || 'ตกลง') + '</button>' +
@@ -1053,10 +1261,63 @@
       wrap.querySelector('#' + id + '-m').textContent = message === null || message === undefined ? '' : String(message);
       const input = wrap.querySelector('[data-uk-input]');
       if (input) {
-        input.type = o.inputType || 'text';
+        if (!multi) input.type = o.inputType || 'text';
         if (o.placeholder) input.placeholder = String(o.placeholder);
         input.value = defaultValue === null || defaultValue === undefined ? '' : String(defaultValue);
         input.setAttribute('aria-labelledby', id + '-m');
+        const hint = wrap.querySelector('[data-uk-hint]');
+        if (hint) {
+          hint.textContent = String(o.hint);
+          input.setAttribute('aria-describedby', id + '-h');
+        }
+        if (maxLen) {
+          // R1b FIX-CL CL-17: never longer than maxLen (an IME or a paste can push past maxlength: the text is cut, never
+          // thrown away); the counter turns to the danger tone at the limit and is announced only near it (from 90 %)
+          input.maxLength = maxLen;
+          const count = wrap.querySelector('[data-uk-count]');
+          let cut = false;
+          // counted and cut by code points (an emoji is one character, never split into half a surrogate pair), and never
+          // longer than maxLen UTF-16 units either (what a server's String.length limit counts)
+          const fit = function (v) {
+            const cps = Array.from(v);
+            let out = '';
+            for (let i = 0; i < cps.length && i < maxLen; i++) {
+              if (out.length + cps[i].length > maxLen) break;
+              out += cps[i];
+            }
+            return out;
+          };
+          input.value = fit(input.value);   // a longer default is cut quietly
+          const upd = function () {
+            const v = input.value;
+            if (Array.from(v).length > maxLen || v.length > maxLen) {
+              const f = fit(v);
+              if (f !== v) { input.value = f; cut = true; }
+            }
+            const n = Array.from(input.value).length;
+            const full = n >= maxLen || input.value.length >= maxLen;
+            count.textContent = n + '/' + maxLen + (full && cut ? ' — ตัดให้เหลือ ' + maxLen + ' ตัวอักษรแล้ว' : full ? ' — ครบจำนวนแล้ว' : '');
+            count.className = full ? cls.dialogCountDanger : cls.dialogCount;
+            count.setAttribute('aria-live', n >= Math.floor(maxLen * 0.9) ? 'polite' : 'off');
+            count.setAttribute('data-full', full ? '1' : '');
+          };
+          upd();
+          input.addEventListener('input', upd);
+        }
+        if (multi) {
+          // grows with its text (up to the CSS max-height, then it scrolls)
+          const grow = function () { input.style.height = 'auto'; input.style.height = input.scrollHeight + 2 + 'px'; };
+          input.addEventListener('input', grow);
+          setTimeout(function () {
+            grow();
+            if (doc.activeElement === input) { try { input.scrollIntoView({ block: 'nearest' }); } catch (e) { /* ignore */ } }
+          }, 0);
+        }
+      }
+      if (o.data && typeof o.data === 'object') {
+        Object.keys(o.data).forEach(function (k) {
+          if (/^[a-z][A-Za-z0-9]*$/.test(k) && o.data[k] !== undefined && o.data[k] !== null) wrap.dataset[k] = String(o.data[k]);
+        });
       }
       let settled = false;
       function settle(v) {
@@ -1075,6 +1336,8 @@
       });
       wrap.addEventListener('keydown', function (e) {
         if (e.key !== 'Enter' || e.isComposing) return;
+        // R1b FIX-CL CL-17: in a multi-line field Enter is a new line (Ctrl / ⌘ + Enter confirms)
+        if (multi && e.target === input && !(e.ctrlKey || e.metaKey)) return;
         const b = e.target && e.target.closest ? e.target.closest('[data-uk-action]') : null;
         e.preventDefault();
         finish(b ? b.getAttribute('data-uk-action') === 'ok' : true);
@@ -1085,26 +1348,41 @@
       open(wrap, {
         backdrop: true,
         initialFocus: focusTarget,
+        returnFocus: o.returnFocus,
         onRequestClose: function () { finish(false); },
         onClose: function () {
           settle(cancelValue);
           if (wrap.parentNode) wrap.parentNode.removeChild(wrap);
         }
       });
-      if (input) { try { input.select(); } catch (e) { /* ignore */ } }
+      if (input) {
+        try { input.select(); } catch (e) { /* ignore */ }
+        // R1b FIX-CL CL-17: on a short screen the field is scrolled into the dialog's visible part (the buttons are fixed below)
+        try { input.scrollIntoView({ block: 'nearest' }); } catch (e) { /* ignore */ }
+      }
     });
   }
 
+  /** Native dialogs cannot show opts.detail / opts.hint: the detail lines (and the title) go in front, the hint behind. */
+  function nativeText(message, o) {
+    const det = o && o.detail && typeof o.detail === 'object' && o.detail.title ? o.detail : null;
+    const hint = o && (o.nativeHint || o.hint);
+    if (hint) message = (message === null || message === undefined ? '' : String(message)) + ' (' + String(hint) + ')';
+    if (!det) return message;
+    const head = [o.title, det.title, det.text].filter(function (x) { return x !== undefined && x !== null && String(x) !== ''; });
+    return head.join('\n') + '\n\n' + (message === null || message === undefined ? '' : String(message));
+  }
   function confirmDialog(message, opts) {
     if (nativeDialogs()) {
-      try { return Promise.resolve(!!global.confirm(message)); } catch (e) { return Promise.reject(e); }
+      try { return Promise.resolve(!!global.confirm(nativeText(message, opts))); } catch (e) { return Promise.reject(e); }
     }
     return buildDialog('confirm', message, null, opts || {});
   }
   function promptDialog(message, defaultValue, opts) {
     if (nativeDialogs()) {
       try {
-        const r = defaultValue === undefined ? global.prompt(message) : global.prompt(message, defaultValue);
+        const text = nativeText(message, opts);
+        const r = defaultValue === undefined ? global.prompt(text) : global.prompt(text, defaultValue);
         return Promise.resolve(r === null || r === undefined ? null : String(r));
       } catch (e) { return Promise.reject(e); }
     }
@@ -1213,6 +1491,38 @@
     return global.URL.createObjectURL(new global.Blob([bytes], { type: m }));
   }
 
+  /**
+   * The pixel size of a JPEG from its frame header: walks the marker segments after SOI (FF D8) up to the first SOFn
+   * (C0–CF except C4 DHT, C8 JPG, CC DAC). → {width, height} or null (not a JPEG, a truncated/garbled header, zero size).
+   */
+  function jpegSize(base64) {
+    let s = String(base64 || '');
+    const dm = /^data:[^,]*,/.exec(s);
+    if (dm) s = s.slice(dm[0].length);
+    let bin;
+    try { bin = global.atob(s.replace(/\s+/g, '')); } catch (e) { return null; }
+    const at = i => bin.charCodeAt(i) & 0xFF;
+    if (bin.length < 4 || at(0) !== 0xFF || at(1) !== 0xD8) return null;
+    let i = 2;
+    for (let guard = 0; guard < 4096 && i + 3 < bin.length; guard++) {
+      if (at(i) !== 0xFF) return null;
+      let m = at(i + 1);
+      while (m === 0xFF && i + 2 < bin.length) { i++; m = at(i + 1); }   // fill bytes
+      if (m === 0xD8 || m === 0x01 || (m >= 0xD0 && m <= 0xD7)) { i += 2; continue; }   // markers without a length
+      if (m === 0xD9 || m === 0xDA) return null;                                        // end / scan before any frame header
+      const len = (at(i + 2) << 8) | at(i + 3);
+      if (len < 2) return null;
+      if (m >= 0xC0 && m <= 0xCF && m !== 0xC4 && m !== 0xC8 && m !== 0xCC) {
+        if (i + 8 >= bin.length || len < 7) return null;
+        const height = (at(i + 5) << 8) | at(i + 6);
+        const width = (at(i + 7) << 8) | at(i + 8);
+        return width > 0 && height > 0 ? { width, height } : null;
+      }
+      i += 2 + len;
+    }
+    return null;
+  }
+
   /* ---------------------------------------------------------------- wiring */
   if (doc) {
     injectStyle();
@@ -1224,7 +1534,7 @@
   }
 
   global.UiKit = Object.freeze({
-    version: '1.3.0',
+    version: '1.5.0',
     cls: cls,
     esc: esc,
     injectStyle: injectStyle,
@@ -1245,6 +1555,6 @@
     confirm: confirmDialog,
     prompt: promptDialog,
     alert: alertDialog,
-    image: Object.freeze({ compress: compress, toObjectUrl: toObjectUrl })
+    image: Object.freeze({ compress: compress, toObjectUrl: toObjectUrl, jpegSize: jpegSize })
   });
 })(window);
