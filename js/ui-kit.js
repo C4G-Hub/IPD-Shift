@@ -15,7 +15,7 @@
  *
  * ---------------------------------------------------------------- PUBLIC SURFACE
  *
- * UiKit.version                        '1.5.0'  (1.5 = R1b I1: dialog opts detail / maxLength / data; 1.4 = R1b: leave-model recipes, avatars.refresh; 1.3 = R1a FIX-2: rem text sizes, neutral disabled buttons, 16 px primary labels, Sarabun
+ * UiKit.version                        '1.6.0'  (1.6 = 3.0.1: image.decode, compress opts.crop, picture-framing recipes; 1.5 = R1b I1: dialog opts detail / maxLength / data; 1.4 = R1b: leave-model recipes, avatars.refresh; 1.3 = R1a FIX-2: rem text sizes, neutral disabled buttons, 16 px primary labels, Sarabun
  *                                      initials, dvh sheets that follow the on-screen keyboard, calendar / save-bar / stepper recipes;
  *                                      1.2 = R1a-B3 screen recipes, larger avatar initials; 1.1 = theme v2 "Pastel Kawaii": semantic
  *                                      colour families, display font, sticker buttons, stroke-2 icons, decoration glyphs)
@@ -161,11 +161,26 @@
  * UiKit.image.compress(fileOrBlob, opts) → Promise<{ base64, mime, width, height, chars }>
  *     opts: maxSide (1280, longest output side; never upscales), maxChars (300000, base64 length bound),
  *           mime ('image/jpeg'; 'image/png' and 'image/webp' allowed; the browser may fall back to PNG — the
- *           returned mime is what was really produced), square (false; centre crop to a square first).
+ *           returned mime is what was really produced), square (false; centre crop to a square first),
+ *           crop ({x, y, size}: a SQUARE region in source pixels of the decoded, upright picture — the same coordinates
+ *           as image.decode's width / height — kept INSTEAD of the centre crop, so the result is square; validated and
+ *           clamped into the picture: size to 1 … min(width, height), x to 0 … width − size, y to 0 … height − size; a
+ *           non-finite x / y centres that axis, a missing or non-positive size takes the whole short side; absent → the
+ *           old behaviour, unchanged).
+ *     fileOrBlob may also be the result of image.decode (not released): its working copy is encoded, no second decode.
  *     Adaptive loop: JPEG/WebP quality 0.85 → 0.45, then the size shrinks by 25 % per round, until
  *     chars <= maxChars. JPEG output is flattened on white. Rejects with an Error whose message is Thai and can
  *     be shown to the user; err.code = 'no-file'|'not-image'|'decode'|'too-large'|'unsupported'.
  *   const r = await UiKit.image.compress(file, { square: true, maxSide: 192, maxChars: 24000 });
+ * UiKit.image.decode(fileOrBlob, opts) → Promise<{ width, height, canvas, scale, release() }>
+ *     Decodes once (same checks and Thai errors as compress: 'no-file'|'not-image'|'decode'|'unsupported') and keeps a
+ *     working copy of at most opts.maxSide (1600) px on its longest side in `canvas` (memory on phones). width / height:
+ *     the picture's natural size AFTER the EXIF orientation (browsers apply it on decode: image-orientation from-image);
+ *     scale = canvas.width / width (≤ 1). release() frees the copy (removes the canvas from the page, 0 × 0) — call it
+ *     when done; a released result is no longer accepted by compress ('no-file').
+ *   const d = await UiKit.image.decode(file);   // show d.canvas while the user frames the picture, then:
+ *   const r = await UiKit.image.compress(d, { crop: { x: 120, y: 0, size: 900 }, maxSide: 192, maxChars: 24000 });
+ *   d.release();
  * UiKit.image.toObjectUrl(base64, mime) → blob: URL (accepts a full data: URL too); revoke it when done. Only image/png,
  *                                      image/jpeg and image/webp: any other type throws the Error of code 'not-image'
  * UiKit.image.jpegSize(base64)         → {width, height} read from the JPEG frame header (SOFn marker), or null when the
@@ -247,6 +262,9 @@
  *           markers on the selected day) calNumSundayTint (Sunday number on a strongly tinted day) · tileTight (doctor-visit
  *           tiles: the label never wraps) · navDot (a dot on a nav entry, core.badges.dot) · secretValue (a revealed
  *           password: monospaced, slashed zero) · dialogCountDanger (the prompt counter at its limit)
+ * 3.0.1:    cropStage (the square picture-framing stage: up to 288 px, touch-action none, focusable) cropImage (the working
+ *           canvas inside it, moved by a transform) cropMask (the round outline with the lightly dimmed corners) range (a
+ *           44 px slider with a 16 px font, brand thumb)
  * Disabled buttons (btn) are neutral (ink-100 fill, ink-400 text) — a busy button (aria-busy) keeps its colours.
  *
  * ---------------------------------------------------------------- ICONS
@@ -351,6 +369,12 @@
     dialogDetailTitle: 'font-display text-base font-medium leading-6 text-ink-900 break-words',
     dialogCount: 'text-xs font-medium leading-4 text-slate-500 text-right tabular-nums',
     dialogCountDanger: 'text-xs font-semibold leading-4 text-coral-700 text-right tabular-nums',
+    // 3.0.1: framing a profile picture — a square stage (at most 288 px, never wider than its card), the picture inside
+    // moved with a transform, a round outline with the corners outside it lightly dimmed (avatars are circles)
+    cropStage: 'relative block w-full max-w-[288px] aspect-square mx-auto overflow-hidden rounded-3xl bg-lilac-50 border-2 border-brand-100 touch-none select-none cursor-grab active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2',
+    cropImage: 'absolute left-0 top-0 max-w-none origin-top-left pointer-events-none',
+    cropMask: 'absolute inset-0 rounded-full pointer-events-none border-2 border-white ring-[9999px] ring-white/60',
+    range: 'block w-full h-11 min-w-0 text-base accent-brand-600 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 rounded-full',
     // banners
     banner: 'flex items-start gap-3 p-3 rounded-2xl border-2 text-sm leading-6',
     bannerInfo: 'bg-accent-50 border-accent-100 text-ink-800',
@@ -1421,16 +1445,47 @@
     });
   }
 
-  function encodeLoop(img, o) {
-    const w = img.naturalWidth;
-    const h = img.naturalHeight;
-    let sx = 0, sy = 0, sw = w, sh = h;
+  /** The checks every image entry point makes before decoding: → an Error to reject with, or null. */
+  function checkFile(file) {
+    if (!file || typeof global.Blob !== 'function' || !(file instanceof global.Blob)) return imgError('no-file');
+    if (file.type && !/^image\//i.test(file.type)) return imgError('not-image');
+    if (/^image\/svg/i.test(file.type || '')) return imgError('not-image');
+    if (!file.size) return imgError('decode');
+    return null;
+  }
+
+  /**
+   * The square region of a w × h source that compress keeps: opts.crop {x, y, size} (source pixels) validated and clamped
+   * into the picture — size to 1 … min(w, h), x / y to 0 … w − size / h − size (a non-finite x or y centres that axis, a
+   * missing / non-positive size takes the whole short side) — or, without crop, the centre square (o.square) / the whole
+   * picture. → {sx, sy, sw, sh} in source pixels.
+   */
+  function cropRegion(w, h, o) {
+    const c = o.crop;
+    if (c && typeof c === 'object') {
+      const short = Math.min(w, h);
+      let size = Number(c.size);
+      size = isFinite(size) && size > 0 ? Math.max(1, Math.min(short, size)) : short;
+      let x = Number(c.x), y = Number(c.y);
+      x = isFinite(x) ? Math.max(0, Math.min(w - size, x)) : (w - size) / 2;
+      y = isFinite(y) ? Math.max(0, Math.min(h - size, y)) : (h - size) / 2;
+      return { sx: x, sy: y, sw: size, sh: size };
+    }
     if (o.square) {
       const s = Math.min(w, h);
-      sx = Math.floor((w - s) / 2);
-      sy = Math.floor((h - s) / 2);
-      sw = s; sh = s;
+      return { sx: Math.floor((w - s) / 2), sy: Math.floor((h - s) / 2), sw: s, sh: s };
     }
+    return { sx: 0, sy: 0, sw: w, sh: h };
+  }
+
+  /**
+   * src: anything drawImage takes (the decoded <img>, or the working canvas of image.decode); w × h: the picture's size
+   * in SOURCE pixels; k: src pixels per source pixel (1 for the <img>, the working copy's scale for its canvas).
+   */
+  function encodeLoop(src, w, h, k, o) {
+    const r = cropRegion(w, h, o);
+    // in the drawable's own pixels (the output never upscales beyond what the drawable holds)
+    const sx = r.sx * k, sy = r.sy * k, sw = Math.max(1, r.sw * k), sh = Math.max(1, r.sh * k);
     const canvas = doc.createElement('canvas');
     const ctx = canvas.getContext && canvas.getContext('2d');
     if (!ctx || typeof canvas.toDataURL !== 'function') throw imgError('unsupported');
@@ -1445,7 +1500,7 @@
       if (o.mime === 'image/jpeg') { ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H); } else ctx.clearRect(0, 0, W, H);
       ctx.imageSmoothingEnabled = true;
       try { ctx.imageSmoothingQuality = 'high'; } catch (e) { /* ignore */ }
-      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, W, H);
+      ctx.drawImage(src, sx, sy, sw, sh, 0, 0, W, H);
       for (let qi = 0; qi < qualities.length; qi++) {
         const url = qualities[qi] === undefined ? canvas.toDataURL(o.mime) : canvas.toDataURL(o.mime, qualities[qi]);
         const comma = url.indexOf(',');
@@ -1453,6 +1508,7 @@
         const base64 = url.slice(comma + 1);
         if (base64.length <= o.maxChars) {
           const m = /^data:([^;,]+)/.exec(head);
+          canvas.width = 0; canvas.height = 0;   // frees the bitmap at once (iOS counts canvas memory)
           return { base64: base64, mime: m ? m[1] : o.mime, width: W, height: H, chars: base64.length };
         }
         // the browser fell back to PNG (no lossy encoder) — quality steps are pointless
@@ -1461,7 +1517,53 @@
       if (W <= 8 && H <= 8) break;
       scale *= 0.75;
     }
+    canvas.width = 0; canvas.height = 0;
     throw imgError('too-large');
+  }
+
+  /** Pictures made by image.decode and not released yet (compress accepts them in place of a file). */
+  const decodedLive = typeof global.WeakMap === 'function' ? new global.WeakMap() : null;
+
+  /**
+   * Decodes a picture ONCE and keeps a working copy of at most opts.maxSide (1600) px on its longest side in a canvas (a
+   * 12-megapixel photo would otherwise stay in memory at full size while the user frames it). The browser applies the
+   * EXIF orientation when it decodes (`image-orientation: from-image`, the default of every current browser), so width /
+   * height are the upright size. → {width, height, canvas, scale, release()}.
+   */
+  function decode(file, opts) {
+    const o = Object.assign({ maxSide: 1600 }, opts || {});
+    const maxSide = Math.max(1, Math.floor(Number(o.maxSide) || 1600));
+    const bad = checkFile(file);
+    if (bad) return Promise.reject(bad);
+    return decodeImage(file).then(function (img) {
+      const w = img.naturalWidth, h = img.naturalHeight;
+      const k = Math.min(1, maxSide / Math.max(w, h));
+      const canvas = doc.createElement('canvas');
+      const ctx = canvas.getContext && canvas.getContext('2d');
+      if (!ctx) throw imgError('unsupported');
+      canvas.width = Math.max(1, Math.round(w * k));
+      canvas.height = Math.max(1, Math.round(h * k));
+      ctx.imageSmoothingEnabled = true;
+      try { ctx.imageSmoothingQuality = 'high'; } catch (e) { /* ignore */ }
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      try { img.removeAttribute('src'); } catch (e) { /* ignore */ }
+      let live = true;
+      const out = Object.freeze({
+        width: w,
+        height: h,
+        canvas: canvas,
+        scale: canvas.width / w,
+        release: function () {
+          if (!live) return;
+          live = false;
+          if (decodedLive) decodedLive.delete(out);
+          if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
+          canvas.width = 0; canvas.height = 0;
+        }
+      });
+      if (decodedLive) decodedLive.set(out, true);
+      return out;
+    });
   }
 
   function compress(file, opts) {
@@ -1469,11 +1571,12 @@
     o.maxSide = Math.max(1, Math.floor(Number(o.maxSide) || 1280));
     o.maxChars = Math.max(1, Math.floor(Number(o.maxChars) || 300000));
     if (OUT_MIMES.indexOf(o.mime) < 0) o.mime = 'image/jpeg';
-    if (!file || typeof global.Blob !== 'function' || !(file instanceof global.Blob)) return Promise.reject(imgError('no-file'));
-    if (file.type && !/^image\//i.test(file.type)) return Promise.reject(imgError('not-image'));
-    if (/^image\/svg/i.test(file.type || '')) return Promise.reject(imgError('not-image'));
-    if (!file.size) return Promise.reject(imgError('decode'));
-    return decodeImage(file).then(function (img) { return encodeLoop(img, o); });
+    if (decodedLive && file && typeof file === 'object' && decodedLive.has(file)) {
+      try { return Promise.resolve(encodeLoop(file.canvas, file.width, file.height, file.scale, o)); } catch (e) { return Promise.reject(e); }
+    }
+    const bad = checkFile(file);
+    if (bad) return Promise.reject(bad);
+    return decodeImage(file).then(function (img) { return encodeLoop(img, img.naturalWidth, img.naturalHeight, 1, o); });
   }
 
   /** Only image types make blob: URLs (R1a fix B-8): a text/html blob would run script in the app's origin if opened. */
@@ -1534,7 +1637,7 @@
   }
 
   global.UiKit = Object.freeze({
-    version: '1.5.0',
+    version: '1.6.0',
     cls: cls,
     esc: esc,
     injectStyle: injectStyle,
@@ -1555,6 +1658,6 @@
     confirm: confirmDialog,
     prompt: promptDialog,
     alert: alertDialog,
-    image: Object.freeze({ compress: compress, toObjectUrl: toObjectUrl, jpegSize: jpegSize })
+    image: Object.freeze({ compress: compress, decode: decode, toObjectUrl: toObjectUrl, jpegSize: jpegSize })
   });
 })(window);

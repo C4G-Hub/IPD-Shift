@@ -31,7 +31,7 @@
    *    ipd_boot_retry with the inline guard: after 2 only the "โหลดใหม่" button remains. init() clears the counter.
    * APP_BUILD = sw.js VERSION = the ?v= of index.html's scripts = js/api.js CLIENT_VERSION (tests/sw.test.js).
    */
-  const APP_BUILD = '3.0.0';
+  const APP_BUILD = '3.0.1';
   const BOOT_RETRY_KEY = 'ipd_boot_retry';
   // R1b: also a page of another release (its inline guard names its own build, e.g. a v2.9 index.html served from the HTTP cache
   // whose ?v=2.9.0 URLs now answer with these files): its markup is not this release's — the guard of that page takes over
@@ -3550,7 +3550,7 @@
     const start = $('leaveTimeStart').value, end = $('leaveTimeEnd').value;
     ui.leaveTime = { start, end };
     const pickType = sheetPick(sh, sheetCurrent(activeLeaves(sh.date)[sh.staff])).type;
-    const err = U.validateTimeRange(start, end, pickType);   // CL-21: within 06:00–20:00 and the morning / afternoon rule
+    const err = U.validateTimeRange(start, end, pickType);   // within 08:00–16:00 and the morning / afternoon rule
     setLeaveDetail(err ? '' : U.joinTimeRange(start, end));
     ui.leaveTimeError = err && start && end ? err : '';   // a half-filled range only blocks บันทึก (asked again on a forced save)
     renderLeaveSheet();
@@ -5597,7 +5597,7 @@
     title: 'มีอะไรใหม่',
     subtitle: 'เวอร์ชัน 3.0 — ส่วนบุคคล',
     items: Object.freeze([
-      { icon: 'stethoscope', title: 'ลาหาหมอแบบระบุเวลา', text: 'เลือก "ลาหาหมอตอนเช้า" หรือ "ลาหาหมอตอนบ่าย" แล้วเลือกช่วงเวลา (หรือกำหนดเอง ระหว่าง 06:00–20:00 น. ไม่เกิน 6 ชั่วโมง) — นอกช่วงเวลานั้นยังจัดเข้า Station ได้ตามปกติ' },
+      { icon: 'stethoscope', title: 'ลาหาหมอแบบระบุเวลา', text: 'เลือก "ลาหาหมอตอนเช้า" หรือ "ลาหาหมอตอนบ่าย" แล้วเลือกช่วงเวลา (หรือกำหนดเอง ระหว่าง 08:00–16:00 น.) — คนที่ลาหาหมอยังจัดเข้า Station ได้ตามปกติ' },
       { icon: 'clock', title: 'ลาพักร้อนเกินจำนวนต้องรออนุมัติ', text: 'ถ้าวันนั้นมีผู้ลาพักร้อนครบจำนวนแล้ว คำขอใหม่จะส่งให้ Supervisor อนุมัติก่อน ระหว่างรอยังไม่นับเป็นวันลา' },
       { icon: 'inbox', title: 'คำขอของฉัน', text: 'หน้าการลารวมคำขอที่รออนุมัติหรือไม่อนุมัติ แตะเพื่อดูผลและเหตุผล ส่งคำขอใหม่ หรือลบคำขอ' },
       { icon: 'check-circle', title: 'อนุมัติการลา (Supervisor)', text: 'เมื่อมีคำขอรออนุมัติจะมีข้อความแจ้งที่หน้าวันนี้และการลา — อนุมัติหรือไม่อนุมัติ (พร้อมเหตุผล) ได้จากแผ่นบันทึกการลา หรือที่ เมนู → งานหัวหน้า → อนุมัติการลา' },

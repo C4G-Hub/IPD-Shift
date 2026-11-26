@@ -28,7 +28,7 @@
 (function (global) {
   'use strict';
 
-  const CLIENT_VERSION = '3.0.0';
+  const CLIENT_VERSION = '3.0.1';
   const MSG_NETWORK = 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ กรุณาตรวจสอบอินเทอร์เน็ต';
   const MSG_BAD_DEPLOYMENT = 'การตั้งค่า Web App ไม่ถูกต้อง (ต้องตั้งค่า Who has access เป็น Anyone)';
   const MSG_BAD_RESPONSE = 'เซิร์ฟเวอร์ตอบกลับผิดพลาดชั่วคราว';

@@ -11,11 +11,17 @@
  *
  * Screen (sections render only for what the server offers):
  *  - header card: large avatar (with a camera button when 'avatar'), name, group, role
- *  - รูปโปรไฟล์ ('avatar'): choose a picture (native file input: camera or library) → UiKit.image.compress (centre
- *    square, 192 px, ≤ 24,000 base64 characters) → preview → setAvatar; remove (with a confirmation). Every failure has
- *    its own message (not an image / cannot decode e.g. HEIC on a browser without it / too large after compression /
- *    server TOO_LARGE or VALIDATION / offline / connection lost); a logout or an expired session meanwhile shows and
- *    stores nothing.
+ *  - รูปโปรไฟล์ ('avatar'): choose a picture (native file input: camera or library) → UiKit.image.decode (once; a working
+ *    copy of at most 1600 px) → FRAMING step (3.0.1): a square stage (≤ 288 px) with a round outline and lightly dimmed
+ *    corners; the picture always covers the circle (zoom 1 = cover … 4 × cover, panning clamped); drag (pointer events,
+ *    mouse + touch, pointer capture), two-finger pinch, the zoom slider, the wheel, keyboard on the focused stage (arrows
+ *    move, Shift = bigger steps, + / − zoom); จัดกึ่งกลาง (centred, zoom 1) · เลือกรูปอื่น · ยกเลิก (the old picture stays)
+ *    · ใช้รูปนี้ → UiKit.image.compress(working copy, {crop: the square under the circle in source pixels}) → 192 px JPEG,
+ *    ≤ 24,000 base64 characters → preview (ปรับตำแหน่ง goes back to the framing with the same position) → บันทึกรูป =
+ *    setAvatar; remove (with a confirmation). Every failure has its own message, at the step where it happens: a file over
+ *    30 MB, not an image, cannot decode (e.g. HEIC on a browser without it) — before the framing; too large after
+ *    compression / no JPEG encoder — on ใช้รูปนี้, the framing stays; server TOO_LARGE or VALIDATION / offline /
+ *    connection lost — on บันทึกรูป, the preview stays; a logout or an expired session meanwhile shows and stores nothing.
  *  - รหัสผ่านของฉัน ('password'): masked; "แสดงรหัสผ่าน" asks the server (getMyPassword) on EVERY tap and shows the answer
  *    for 30 s with a countdown and "ซ่อน". The value only ever lives in one text node of this screen: it is never put in
  *    a variable that outlives the call, an attribute, storage, a cache, history or a log, and the node is dropped when
@@ -33,8 +39,9 @@
  * pictures at all) or an old server clears them without a request. reset() (logout, new login, expired session)
  * revokes every URL this file created and drops all state; the core wipes the media stores and the registry.
  *
- * Public surface: none (no provide()). DOM hooks for tests: [data-pf="head|photo|photoBody|photoError|password|pwBody|
- * pwValue|pwCountdown|pwBar|pwError|team|teamBody"], buttons [data-pf-act="…"], #pfPhotoInput, #pfPwConfirm.
+ * Public surface: none (no provide()). DOM hooks for tests: [data-pf="head|photo|photoBody|photoError|frame|stage|zoom|
+ * preview|password|pwBody|pwValue|pwCountdown|pwBar|pwError|team|teamBody"], buttons [data-pf-act="…"], #pfPhotoInput,
+ * #pfZoom, #pfPwConfirm.
  * ===================================================================== */
 (function () {
   'use strict';
@@ -47,6 +54,10 @@
   const SERVER_CHARS = 30000;           // the largest picture accepted from the server
   const MAX_SIDE = 512;                 // FIX-CL CL-9 (same rule as the server): no picture wider or taller than this
   const MAX_FILE_BYTES = 30 * 1024 * 1024;   // a bigger file is refused before decoding (memory of older phones)
+  const WORK_SIDE = 1600;               // 3.0.1 framing: the decoded working copy is at most this many px on its longest side
+  const ZOOM_MAX = 4;                   // the framing zooms from "cover" (1) to 4 × cover
+  const ZOOM_STEP = 0.25;               // + / − on the keyboard
+  const MOVE_STEP = 10;                 // stage px per arrow key (Shift: × 4)
   const REVEAL_MS = 30000;              // how long a revealed password stays on screen
   const MEDIA_STORE = 'blobs';
   const KEY_PREFIX = 'avatar:';
@@ -59,6 +70,9 @@
 
   const MSG = {
     preparing: 'กำลังเตรียมรูป…',
+    frameTitle: 'จัดตำแหน่งรูป',
+    frameHint: 'ลากเพื่อเลื่อนรูป · ใช้แถบด้านล่างเพื่อซูม',
+    frameStage: 'ตำแหน่งรูปโปรไฟล์: ลากหรือกดปุ่มลูกศรเพื่อเลื่อนรูป กดปุ่มบวกหรือลบเพื่อซูม',
     fileTooBig: 'ไฟล์รูปใหญ่เกินไป (เกิน 30 MB) กรุณาเลือกรูปอื่น',
     // FIX-CL CL-24: what to try next (a HEIC photo from some phones cannot be opened by every browser)
     imageFailed: 'เปิดรูปนี้ไม่ได้ (เช่น รูปแบบ HEIC จากบางเครื่อง) — ลองถ่ายภาพหน้าจอของรูปนั้นแล้วเลือกภาพหน้าจอแทน หรือเลือกรูปอื่น',
@@ -94,8 +108,14 @@
   let restoring = null;         // promise of the startup restore from the media store (sync waits for it)
   const pub = new Map();        // name → blob: URL this file created and published in UiKit.avatars
 
-  /** The own picture flow. result: {base64, mime, width, height, chars} waiting in the preview. */
-  const pic = { seq: 0, busy: false, result: null, url: '', error: '' };
+  /**
+   * The own picture flow. frame: {dec, x, y, size} while a chosen picture is framed (dec = UiKit.image.decode's working
+   * copy; x, y, size = the square under the circle in SOURCE pixels — independent of the stage's size); result: {base64,
+   * mime, width, height, chars} waiting in the preview (the frame is kept for ปรับตำแหน่ง).
+   */
+  const pic = { seq: 0, busy: false, frame: null, result: null, url: '', error: '' };
+  const ptrs = new Map();       // pointerId → {x, y} of the pointers down on the framing stage
+  let frameRO = null;           // ResizeObserver of the framing stage
   /** The password card. mode: 'masked' | 'shown' | 'confirm'. The password itself is never kept here. */
   const pw = { seq: 0, mode: 'masked', until: 0, timer: null };
 
@@ -369,18 +389,45 @@
       return `<div class="flex items-center gap-4">` +
         `<span class="${c.avatar} ${c.avatarXl} ${c.avatarTint1}" data-initials="" data-pf="preview"><img src="${esc(pic.url)}" alt="ตัวอย่างรูปโปรไฟล์ใหม่" draggable="false"></span>` +
         `<div class="min-w-0 flex-1 space-y-1"><p class="${c.titleCard}">ตัวอย่างรูปใหม่</p>` +
-        `<p class="${c.textMeta}">ตัดเป็นสี่เหลี่ยมและย่อขนาดแล้ว พร้อมบันทึก</p>` +
+        `<p class="${c.textMeta}">จัดตำแหน่งและย่อขนาดแล้ว พร้อมบันทึก</p>` +
         `<p>${kit().pill('ยังไม่ได้บันทึก', 'pending')}</p></div></div>` +
         `<div class="flex flex-wrap gap-2">` +
         `<button type="button" data-pf-act="photo-save" class="${c.btn} ${c.btnPrimary} flex-1">${icon('check')}บันทึกรูป</button>` +
         `<button type="button" data-pf-act="photo-cancel" class="${c.btn} ${c.btnSecondary} flex-1">ยกเลิก</button></div>` +
-        pickerLabel(c.btn + ' ' + c.btnGhost + ' w-full', icon('image') + 'เลือกรูปอื่น');
+        `<div class="flex flex-wrap gap-2">` +
+        (pic.frame ? `<button type="button" data-pf-act="photo-adjust" class="${c.btn} ${c.btnGhost} flex-1 whitespace-nowrap">${icon('sliders')}ปรับตำแหน่ง</button>` : '') +
+        pickerLabel(c.btn + ' ' + c.btnGhost + ' flex-1 whitespace-nowrap', icon('image') + 'เลือกรูปอื่น') + `</div>`;
     }
+    if (pic.frame) return frameHtml();
     const has = !!known()[name];
     return `<div class="flex flex-wrap gap-2">` +
       pickerLabel(c.btn + ' ' + c.btnTonal + ' flex-1', icon('image') + (has ? 'เปลี่ยนรูป' : 'เลือกรูป')) +
       (has ? `<button type="button" data-pf-act="photo-remove" class="${c.btn} ${c.btnSecondary} flex-1">${icon('trash')}ลบรูป</button>` : '') +
-      `</div><p class="${c.textCaption}">ถ่ายรูปใหม่หรือเลือกจากคลังภาพ ระบบจะตัดเป็นสี่เหลี่ยมจัตุรัสตรงกลางและย่อขนาดให้เอง</p>`;
+      `</div><p class="${c.textCaption}">ถ่ายรูปใหม่หรือเลือกจากคลังภาพ แล้วเลื่อนและซูมให้รูปอยู่กลางวงกลมก่อนบันทึก</p>`;
+  }
+
+  /**
+   * The framing step. The markup is the same string for every render (the position lives in the DOM: the canvas's
+   * transform and the slider's value, set by paintFrame), so a re-render of the screen (a heartbeat, a picture arriving)
+   * never rebuilds the stage under a finger that is dragging.
+   */
+  function frameHtml() {
+    const c = k();
+    return `<div data-pf="frame" class="space-y-3">` +
+      `<div class="space-y-0.5"><p class="${c.titleCard}">${esc(MSG.frameTitle)}</p>` +
+      `<p class="${c.textMeta}">${esc(MSG.frameHint)}</p></div>` +
+      `<div data-pf="stage" class="${c.cropStage}" tabindex="0" role="group" aria-roledescription="ตัวจัดตำแหน่งรูป" aria-label="${esc(MSG.frameStage)}">` +
+      `<div class="${c.cropMask}" aria-hidden="true"></div></div>` +
+      `<div class="flex items-center gap-2 w-full max-w-[288px] mx-auto">` +
+      icon('image', 'w-4 h-4 shrink-0 text-ink-400') +
+      `<input type="range" id="pfZoom" data-pf="zoom" min="1" max="${ZOOM_MAX}" step="0.01" value="1" class="${c.range} flex-1" aria-label="ซูมรูป">` +
+      icon('image', 'w-6 h-6 shrink-0 text-ink-500') + `</div>` +
+      `<button type="button" data-pf-act="frame-use" class="${c.btn} ${c.btnPrimary} w-full">${icon('check')}ใช้รูปนี้</button>` +
+      `<div class="flex flex-wrap gap-2">` +
+      `<button type="button" data-pf-act="frame-reset" class="${c.btn} ${c.btnSecondary} flex-1 whitespace-nowrap">${icon('refresh')}จัดกึ่งกลาง</button>` +
+      pickerLabel(c.btn + ' ' + c.btnSecondary + ' flex-1 whitespace-nowrap', icon('image') + 'เลือกรูปอื่น') +
+      `<button type="button" data-pf-act="frame-cancel" class="${c.btn} ${c.btnGhost} flex-1 whitespace-nowrap">ยกเลิก</button>` +
+      `</div></div>`;
   }
 
   function teamHtml() {
@@ -409,6 +456,7 @@
   function renderPhoto() {
     if (!built) return;
     C.setHtml(ref.photoBody, photoHtml());
+    if (pic.frame && !pic.result && !pic.busy) bindFrame(); else unbindFrame();
     ref.file.disabled = pic.busy;
     C.setHtml(ref.photoError, pic.error ? icon('alert-triangle', 'w-4 h-4 shrink-0 mt-0.5') + `<span class="min-w-0">${esc(pic.error)}</span>` : '');
     C.setVisible(ref.photoError, !!pic.error);
@@ -433,12 +481,229 @@
     return MSG.imageFailed;
   }
 
-  function discardPreview() {
-    pic.seq++;
-    pic.busy = false;
+  /** Drops the preview (its blob: URL is revoked); the frame, if any, stays for ปรับตำแหน่ง. */
+  function dropResult() {
     pic.result = null;
     if (pic.url) revoke(pic.url);
     pic.url = '';
+  }
+
+  /** Drops everything of the own picture flow: the preview and the framing (its working copy is released). */
+  function discardPreview() {
+    pic.seq++;
+    pic.busy = false;
+    dropResult();
+    unbindFrame();
+    if (pic.frame) { try { pic.frame.dec.release(); } catch (e) { /* ignore */ } }
+    pic.frame = null;
+  }
+
+  /* ------------------------------------------------------------------ framing (3.0.1) */
+  // The geometry is kept in SOURCE pixels of the decoded picture: size = the side of the square under the circle
+  // (short side / zoom), x / y = its top-left corner. The stage only draws it (paintFrame), at whatever width it has.
+  function frameShort(f) { return Math.min(f.dec.width, f.dec.height); }
+  function frameZoom(f) { return frameShort(f) / f.size; }
+  /** Zoom 1 … ZOOM_MAX (the picture always covers the circle) and no empty area: the square stays inside the picture. */
+  function clampFrame(f) {
+    const s = frameShort(f);
+    if (!(f.size > 0)) f.size = s;
+    f.size = Math.max(s / ZOOM_MAX, Math.min(s, f.size));
+    f.x = Math.max(0, Math.min(f.dec.width - f.size, isFinite(f.x) ? f.x : 0));
+    f.y = Math.max(0, Math.min(f.dec.height - f.size, isFinite(f.y) ? f.y : 0));
+  }
+  /** จัดกึ่งกลาง: zoom 1, centred. */
+  function centreFrame(f) {
+    f.size = frameShort(f);
+    f.x = (f.dec.width - f.size) / 2;
+    f.y = (f.dec.height - f.size) / 2;
+  }
+  /** Zoom to z keeping the point (fx, fy) of the stage (fractions 0…1) over the same spot of the picture. */
+  function zoomFrame(f, z, fx, fy) {
+    const zz = Math.max(1, Math.min(ZOOM_MAX, Number(z) || 1));
+    const px = f.x + fx * f.size, py = f.y + fy * f.size;
+    f.size = frameShort(f) / zz;
+    f.x = px - fx * f.size;
+    f.y = py - fy * f.size;
+    clampFrame(f);
+  }
+  /** The picture moves by (dx, dy) stage pixels on a stage `side` pixels wide (the square moves the other way). */
+  function moveFrame(f, dx, dy, side) {
+    if (!(side > 0)) return;
+    f.x -= dx * f.size / side;
+    f.y -= dy * f.size / side;
+    clampFrame(f);
+  }
+
+  function stageEl() { return built ? ref.photoBody.querySelector('[data-pf="stage"]') : null; }
+
+  /** Draws the frame: the working canvas inside the stage, moved and scaled by a transform; the slider follows. */
+  function paintFrame() {
+    const f = pic.frame, stage = stageEl();
+    if (!f || !stage) return;
+    const cv = f.dec.canvas;
+    if (cv.parentNode !== stage) {
+      cv.className = k().cropImage;
+      cv.setAttribute('aria-hidden', 'true');
+      cv.style.willChange = 'transform';
+      stage.insertBefore(cv, stage.firstChild);
+    }
+    const side = stage.clientWidth;
+    if (side > 0) {
+      // a browser without aspect-ratio (iOS < 15) keeps the stage square this way
+      if (Math.abs(stage.clientHeight - side) > 1) stage.style.height = side + 'px';
+      const d = side / f.size;   // stage px per source px
+      cv.style.transform = 'translate(' + (-f.x * d).toFixed(3) + 'px,' + (-f.y * d).toFixed(3) + 'px) scale(' + (d / f.dec.scale).toFixed(6) + ')';
+    }
+    const zoom = ref.photoBody.querySelector('[data-pf="zoom"]');
+    if (zoom) {
+      const z = frameZoom(f);
+      zoom.value = String(Math.round(z * 100) / 100);
+      zoom.setAttribute('aria-valuetext', Math.round(z * 100) + '%');
+    }
+  }
+
+  /** The stage of a (re)built framing step gets its listeners once; then it is painted. */
+  function bindFrame() {
+    const stage = stageEl();
+    if (!stage) return;
+    if (!stage._pfBound) {
+      stage._pfBound = true;
+      ptrs.clear();
+      stage.style.touchAction = 'none';   // also without the stylesheet: the page must not scroll under the finger
+      stage.addEventListener('pointerdown', onStageDown);
+      stage.addEventListener('pointermove', onStageMove);
+      stage.addEventListener('pointerup', onStageUp);
+      stage.addEventListener('pointercancel', onStageUp);
+      stage.addEventListener('lostpointercapture', onStageUp);
+      stage.addEventListener('wheel', onStageWheel, { passive: false });
+      stage.addEventListener('keydown', onStageKey);
+      stage.addEventListener('dragstart', e => e.preventDefault());
+      const zoom = ref.photoBody.querySelector('[data-pf="zoom"]');
+      if (zoom) zoom.addEventListener('input', onZoomInput);
+      if (frameRO) frameRO.disconnect();
+      frameRO = typeof window.ResizeObserver === 'function' ? new window.ResizeObserver(() => paintFrame()) : null;
+      if (frameRO) frameRO.observe(stage);
+    }
+    paintFrame();
+  }
+
+  function unbindFrame() {
+    ptrs.clear();
+    if (frameRO) { frameRO.disconnect(); frameRO = null; }
+  }
+
+  /** Focus to the stage (keyboard users can move the picture at once) when the focus was lost with the old markup. */
+  function focusIfLost(el) {
+    const a = document.activeElement;
+    if (!el || !isCurrent() || (a && a !== document.body && a.isConnected)) return;
+    try { el.focus({ preventScroll: true }); } catch (e) { el.focus(); }
+  }
+
+  function stagePoint(stage, x, y) {
+    const r = stage.getBoundingClientRect(), side = stage.clientWidth || 1;
+    return { fx: (x - r.left - stage.clientLeft) / side, fy: (y - r.top - stage.clientTop) / side };
+  }
+
+  function onStageDown(e) {
+    if (!pic.frame || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    const stage = e.currentTarget;
+    e.preventDefault();   // no text selection, no image drag, no emulated mouse events
+    try { stage.setPointerCapture(e.pointerId); } catch (x) { /* ignore */ }
+    ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (document.activeElement !== stage) { try { stage.focus({ preventScroll: true }); } catch (x) { /* ignore */ } }
+  }
+
+  function onStageMove(e) {
+    const f = pic.frame, p = ptrs.get(e.pointerId);
+    if (!f || !p) return;
+    const stage = e.currentTarget, side = stage.clientWidth;
+    if (ptrs.size === 1) {
+      moveFrame(f, e.clientX - p.x, e.clientY - p.y, side);
+    } else {
+      // two fingers: the midpoint pans, the distance zooms around the midpoint
+      let o = null;
+      ptrs.forEach((v, id) => { if (!o && id !== e.pointerId) o = v; });
+      const d0 = Math.hypot(p.x - o.x, p.y - o.y), d1 = Math.hypot(e.clientX - o.x, e.clientY - o.y);
+      const m0x = (p.x + o.x) / 2, m0y = (p.y + o.y) / 2, m1x = (e.clientX + o.x) / 2, m1y = (e.clientY + o.y) / 2;
+      moveFrame(f, m1x - m0x, m1y - m0y, side);
+      if (d0 > 0 && d1 > 0) {
+        const pt = stagePoint(stage, m1x, m1y);
+        zoomFrame(f, frameZoom(f) * d1 / d0, pt.fx, pt.fy);
+      }
+    }
+    p.x = e.clientX;
+    p.y = e.clientY;
+    paintFrame();
+  }
+
+  function onStageUp(e) { ptrs.delete(e.pointerId); }
+
+  /** Desktop: the wheel (or a touchpad pinch, which arrives as ctrl + wheel) zooms around the pointer. */
+  function onStageWheel(e) {
+    const f = pic.frame;
+    if (!f) return;
+    e.preventDefault();
+    const dy = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1);
+    const pt = stagePoint(e.currentTarget, e.clientX, e.clientY);
+    zoomFrame(f, frameZoom(f) * Math.exp(-dy * 0.002), pt.fx, pt.fy);
+    paintFrame();
+  }
+
+  function onStageKey(e) {
+    const f = pic.frame;
+    if (!f || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
+    const side = e.currentTarget.clientWidth, step = MOVE_STEP * (e.shiftKey ? 4 : 1);
+    switch (e.key) {
+      case 'ArrowLeft': moveFrame(f, -step, 0, side); break;
+      case 'ArrowRight': moveFrame(f, step, 0, side); break;
+      case 'ArrowUp': moveFrame(f, 0, -step, side); break;
+      case 'ArrowDown': moveFrame(f, 0, step, side); break;
+      case '+': case '=': case 'Add': zoomFrame(f, frameZoom(f) + ZOOM_STEP, 0.5, 0.5); break;
+      case '-': case '_': case 'Subtract': zoomFrame(f, frameZoom(f) - ZOOM_STEP, 0.5, 0.5); break;
+      default: return;
+    }
+    e.preventDefault();
+    paintFrame();
+  }
+
+  function onZoomInput(e) {
+    const f = pic.frame;
+    if (!f) return;
+    zoomFrame(f, Number(e.target.value), 0.5, 0.5);
+    paintFrame();
+  }
+
+  /** ใช้รูปนี้: the square under the circle → a JPEG of AVATAR_SIDE px within AVATAR_CHARS → the preview. */
+  async function useFrame(btn) {
+    const f = pic.frame;
+    if (!f || pic.result || pic.busy || !C.serverHas('avatar')) return;
+    const alive = C.alive(), my = pic.seq;
+    const crop = { x: f.x, y: f.y, size: f.size };
+    setPhotoError('');
+    let r = null, err = null;
+    await C.withBusy(btn, MSG.preparing, async () => {
+      try {
+        r = await C.track(kit().image.compress(f.dec, { crop, maxSide: AVATAR_SIDE, maxChars: AVATAR_CHARS, mime: 'image/jpeg' }));
+      } catch (e) { err = e; }
+    });
+    if (!alive() || my !== pic.seq || pic.frame !== f || pic.result) return;
+    // CL-9: the own upload follows the same rule as everything received (a browser that cannot encode JPEG falls back to PNG)
+    if (!err && r && r.mime !== 'image/jpeg') { setPhotoError(MSG.noJpeg); return; }
+    if (!err && !(r && MIMES.indexOf(r.mime) >= 0 && typeof r.base64 === 'string' && r.chars <= AVATAR_CHARS && sizeOk(r.base64))) err = new Error('');
+    if (err) { setPhotoError(imageError(err)); return; }
+    try { pic.url = kit().image.toObjectUrl(r.base64, r.mime); } catch (e) { setPhotoError(MSG.imageFailed); return; }
+    pic.result = r;
+    renderAll();
+    focusIfLost(built ? ref.photoBody.querySelector('[data-pf-act="photo-save"]') : null);
+  }
+
+  /** ปรับตำแหน่ง (from the preview): back to the framing, at the same position. */
+  function adjustFrame() {
+    if (!pic.frame) return;
+    dropResult();
+    pic.error = '';
+    renderAll();
+    focusIfLost(stageEl());
   }
 
   function setPhotoError(msg) {
@@ -456,19 +721,20 @@
     const alive = C.alive(), my = pic.seq;
     pic.busy = true;
     renderAll();
-    let r = null, err = null;
+    let d = null, err = null;
     try {
-      r = await C.track(kit().image.compress(file, { square: true, maxSide: AVATAR_SIDE, maxChars: AVATAR_CHARS, mime: 'image/jpeg' }));
+      // decoded ONCE (not an image / cannot decode fail here, before the framing); a working copy of ≤ WORK_SIDE px
+      d = await C.track(kit().image.decode(file, { maxSide: WORK_SIDE }));
     } catch (e) { err = e; }
-    if (!alive() || my !== pic.seq) return;
+    if (!alive() || my !== pic.seq) { if (d) d.release(); return; }
     pic.busy = false;
-    // CL-9: the own upload follows the same rule as everything received (a browser that cannot encode JPEG falls back to PNG)
-    if (!err && r && r.mime !== 'image/jpeg') { pic.error = MSG.noJpeg; renderAll(); return; }   // the browser fell back to PNG
-    if (!err && !(r && MIMES.indexOf(r.mime) >= 0 && typeof r.base64 === 'string' && r.chars <= AVATAR_CHARS && sizeOk(r.base64))) err = new Error('');
-    if (err) { pic.error = imageError(err); renderAll(); return; }
-    try { pic.url = kit().image.toObjectUrl(r.base64, r.mime); } catch (e) { pic.error = MSG.imageFailed; renderAll(); return; }
-    pic.result = r;
+    if (err || !d || !(d.width > 0 && d.height > 0)) { if (d) d.release(); pic.error = imageError(err); renderAll(); return; }
+    pic.frame = { dec: d, x: 0, y: 0, size: 0 };
+    centreFrame(pic.frame);
     renderAll();
+    const stage = stageEl();
+    focusIfLost(stage);
+    if (stage) { try { stage.scrollIntoView({ block: 'nearest' }); } catch (e) { /* ignore */ } }
   }
 
   function writeError(e, retryHint) {
@@ -728,6 +994,10 @@
     switch (b.getAttribute('data-pf-act')) {
       case 'photo-save': C.spawn(() => savePhoto(b)); break;
       case 'photo-cancel': discardPreview(); pic.error = ''; renderAll(); break;
+      case 'photo-adjust': adjustFrame(); break;
+      case 'frame-use': C.spawn(() => useFrame(b)); break;
+      case 'frame-reset': if (pic.frame) { centreFrame(pic.frame); paintFrame(); } break;
+      case 'frame-cancel': discardPreview(); pic.error = ''; renderAll(); break;
       case 'photo-remove': C.spawn(() => removeOwn(b)); break;
       case 'team-remove': C.spawn(() => removeMember(b)); break;
       case 'pw-show': C.spawn(() => revealPassword(b)); break;
@@ -819,11 +1089,11 @@
       hidePassword();
       leaveConfirm();
       setPwError('');
-      if (pic.result || pic.busy) { discardPreview(); pic.error = ''; renderPhoto(); }
+      if (pic.result || pic.busy || pic.frame) { discardPreview(); pic.error = ''; renderPhoto(); }
     },
 
     canLeave() {
-      return pic.result ? 'ยังไม่ได้บันทึกรูปโปรไฟล์ที่เลือกไว้ — ออกจากหน้านี้หรือไม่?' : true;
+      return pic.result || pic.frame ? 'ยังไม่ได้บันทึกรูปโปรไฟล์ที่เลือกไว้ — ออกจากหน้านี้หรือไม่?' : true;
     },
 
     reset() {

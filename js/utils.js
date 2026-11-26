@@ -312,20 +312,19 @@
     return { start: m[1] + ':' + m[2], end: m[3] + ':' + m[4], value: m[1] + ':' + m[2] + '-' + m[3] + ':' + m[4] };
   }
 
-  /** R1b FIX-CL CL-21: the working-day window of a doctor visit, and the morning / afternoon split. */
   /**
-   * R1b FIX-CL (architect's ruling after the second review, replaces the first CL-21 rule): the working-day window of a
-   * doctor visit, the morning / afternoon split by the START time, and the longest visit (minutes).
+   * The working hours a doctor visit must lie in (owner's rule, 2026-11-26: 08:00–16:00; it replaced 06:00–20:00 and the
+   * 6-hour cap) and the morning / afternoon split by the START time.
    */
-  const PARTIAL_WINDOW = Object.freeze({ from: '06:00', to: '20:00', noon: '12:00', maxMinutes: 360 });
-  function minutesOf_(hhmm) { return Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5)); }
+  const PARTIAL_WINDOW = Object.freeze({ from: '08:00', to: '16:00', noon: '12:00' });
 
   /**
    * The custom range of the leave sheet: Thai error message, or null when start (HH:MM) is before end (HH:MM).
-   * type (a doctor-visit type, optional): both times within 06:00–20:00; at most 6 hours (longer → record a full-day leave);
-   * ลาหาหมอตอนเช้า STARTS before 12:00 (it may end after noon, e.g. 11:30–13:30), ลาหาหมอตอนบ่าย starts at 12:00 or later.
-   * The checks run in that order, so a message that names the other type only does so when that type accepts the range
-   * (the user is never sent back and forth). Every preset complies. Client-side rule (the server takes any valid range).
+   * type (a doctor-visit type, optional): both times within 08:00–16:00; ลาหาหมอตอนเช้า STARTS before 12:00 (it may end
+   * after noon, e.g. 11:30–13:30), ลาหาหมอตอนบ่าย starts at 12:00 or later. The window is checked first, so a message
+   * that names the other type only does so when that type accepts the range (the user is never sent back and forth).
+   * Every preset complies. Client-side rule (the server takes any valid range). A doctor visit never makes anyone absent:
+   * the person stays assignable to a station whatever the time (Utils.isAbsent).
    */
   function validateTimeRange(start, end, type) {
     const a = String(start == null ? '' : start).trim(), b = String(end == null ? '' : end).trim();
@@ -335,9 +334,6 @@
     if (!isPartialType(type)) return null;
     const w = PARTIAL_WINDOW;
     if (a < w.from || b > w.to) return 'เลือกเวลาได้ระหว่าง ' + w.from + '–' + w.to + ' น.';
-    if (minutesOf_(b) - minutesOf_(a) > w.maxMinutes) {
-      return 'ลาหาหมอได้ไม่เกิน ' + (w.maxMinutes / 60) + ' ชั่วโมง — ถ้าลานานกว่านั้น บันทึกเป็นการลาทั้งวันแทน';
-    }
     if (type === 'ลาหาหมอตอนเช้า' && a >= w.noon) {
       return 'ลาหาหมอตอนเช้าต้องเริ่มก่อน ' + w.noon + ' น. — เวลาที่เลือกเริ่มช่วงบ่าย ให้เลือก "หาหมอ (บ่าย)"';
     }
