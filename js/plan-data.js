@@ -64,6 +64,9 @@
  *                    any), only pairs of two active staff; updated at once by setPlanSettings' answer · avoidPartnersOf(name)
  *                    → [names] · proposalInput passes avoidPairs() as input.avoidPairs · avoidPairsKnown() → bool: the
  *                    pairs held are known to be the Supervisor's current ones (RV-1; a pairs editor saves only then)
+ *   R4 (3.3): a Duty's LunchSlot is {tech, assistant, base, tech2, place, place2} (strings, '' default; place2 '' without
+ *                    tech2). saveDuties passes the caller's six keys through (a 3.2 server ignores the extra ones); the UI
+ *                    that edits tech2 / places is gated by core.serverHas('lunch2') in feat-roster.
  *   lockedStation(name) → stationId | null — R2-SPEC §0.26(a): the station of an active person whose skills list holds
  *                    exactly ONE station id ("ประจำ <Station>"; the proposal never places them elsewhere — engine canWork);
  *                    null for not set, several or no stations, inactive or unknown names
@@ -177,7 +180,12 @@
       updatedAt: str(r.updatedAt)
     };
   }
-  function normLunchSlot(s) { return { tech: name(s && s.tech), assistant: name(s && s.assistant), base: name(s && s.base) }; }
+  /** R4 (3.3): + tech2 (a second technologist) and the free-text places place / place2 ('' when the server sent none). */
+  function normLunchSlot(s) {
+    const place = v => str(v).replace(/\s+/g, ' ').trim();
+    const tech2 = name(s && s.tech2);
+    return { tech: name(s && s.tech), assistant: name(s && s.assistant), base: name(s && s.base), tech2, place: place(s && s.place), place2: tech2 ? place(s && s.place2) : '' };
+  }
   function normDuty(d) {
     if (!d || typeof d !== 'object' || !U.isValidYmd(d.date)) return null;
     const lines = Array.isArray(d.lines)

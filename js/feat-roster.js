@@ -1,6 +1,6 @@
 /* =====================================================================
  * js/feat-roster.js — feature "roster" (ตารางเวร), the daily proposal and the "ของฉันวันนี้" plan lines
- * (R2-SPEC §4.4, §0.11–§0.17, §0.24, §0.26; track RO). Data: core.use('plan') (js/plan-data.js) only — never getPlan or
+ * (R2-SPEC §4.4, §0.11–§0.17, §0.24, §0.26; track RO; R4-SPEC §2.2–§2.3: exports in the unit's format, lunch tech2). Data: core.use('plan') (js/plan-data.js) only — never getPlan or
  * the plan sheets directly. Engine: window.PlanEngine (pure).
  *
  *  - Screen 'roster' (bar, order 25, "ตารางเวร", icon table; visible only while core.serverHas('plan')). Header: month
@@ -27,9 +27,26 @@
  *    "ยกเลิกร่าง" / "บันทึก" while a draft exists (always in the ประจำ Station editor, its save disabled without changes).
  *    Banners: draft (warnings grouped per kind), Portable-line leaves (soft), lunch/mission conflicts with leaves (coral,
  *    "ดู" lists them), holidays changed after generation, the next step after saving a roster.
- *  - Exports (everyone, stored data only): "ส่งออกเป็นรูป" (core.shareImage of an off-screen 420 px table with inline
- *    styles, ตารางเวร-<segment>-YYYY-MM.png) and "Excel (.xlsx)" (XlsxLite.saveTable: one sheet "ตารางเวร YYYY-MM",
- *    ตารางเวร-YYYY-MM.xlsx; text cells can never become formulas; the button is hidden while window.XlsxLite is missing).
+ *  - Exports (everyone, stored data only; on every segment once the month has a stored roster or duty): "ส่งออกเป็นรูป"
+ *    opens the sheet "ส่งออกเป็นรูป (PNG)" (R4-SPEC §2.3): five radio rows — ตารางรายชื่อประจำ Station · ตาราง Portable ·
+ *    ตารางภารกิจพิเศษ · เวรกลางวัน X-RAY IPD · เวรกลางวัน X-RAY ER (default from the segment: ประจำ Station → 1, Portable /
+ *    ของฉัน → 2, ภารกิจ → 3, กลางวัน → 4; a choice without data is disabled with a hint: 1 needs the month's stored roster,
+ *    2–5 a stored duty), a preview of the chosen picture scaled to the sheet width (CSS transform, follows resizes) and
+ *    "บันทึกรูป PNG" = core.shareImage(node, '<name>-YYYY-MM.png', {width: 880, scale: 2}); the sheet stays open. The
+ *    pictures copy the unit's own sheets: inline styles only, black / grey (never the pastel theme), Thai month + พ.ศ.,
+ *    names as stored. (1) STATION × RT1…RTn (n = max(6, longest list)) in the unit's station order; (2)–(5) Mon–Fri
+ *    calendars (ภารกิจ + เสาร์/อาทิตย์ when a weekend duty of the month has a mission), one row per Monday week, a 22 px
+ *    line grid (date number, then one line per label), holidays grey with their number; Portable สาย1…L (+ ผช.), ภารกิจ
+ *    เทค 1 / เทค 2 + "***เบอร์ติดต่อ***" (plan.eligible() with phones), เวรกลางวัน เทค / ผู้ช่วย, or เทค 1 / เทค 2 in a week
+ *    with a tech2 (" (place)" in the label when the whole week shares it, else after the name). "Excel (.xlsx)"
+ *    (XlsxLite.saveTable: one sheet "ตารางเวร YYYY-MM", ตารางเวร-YYYY-MM.xlsx; text cells can never become formulas; the
+ *    button is hidden while window.XlsxLite is missing or no duty is stored; R4: + "จุด <S>", "กลางวัน <S> เทค 2",
+ *    "จุด <S> เทค 2" for a lunch station whose month uses tech2 / places).
+ *  - R4 lunch tech2 (LunchSlot {tech, assistant, base, tech2, place, place2}; every save sends the six keys): the กลางวัน
+ *    cell shows "tech (place)", a second line "tech2 (place2)" (its own ลา tag; data-mine for either), then "ผช. …"; the
+ *    lunch edit sheet adds, only while core.serverHas('lunch2'), "จุด (ไม่บังคับ)" (≤ 20), "เทคคนที่ 2 (ไม่บังคับ)" (the
+ *    tech's candidates, never the chosen tech) and its "จุด"; plan.myDay / ของฉัน list the tech2 person's duty with their
+ *    place; the stored-duty repair replaces a tech2 on leave by someone who is not the first tech.
  *  - core.station.setProposer(date → proposeDay(plan.proposalInput(date, 'fresh')) | null): null without a roster for
  *    the month or on a non-working day; memoised on the full engine input.
  *  - Panel 'proposal' (order 20) on วันนี้, Supervisor only, today or later: the active proposal (notes, unfilled,
@@ -55,11 +72,28 @@
     { id: 'mission', label: 'ภารกิจ' },
     { id: 'roster', label: 'ประจำ Station' }   // FIX-RO R-7: "คนประจำ" is also the staff group
   ];
-  const SEG_FILE = { portable: 'Portable', lunch: 'กลางวัน', mission: 'ภารกิจ' };
   const LUNCH = ['er', 'ipd'];
   const LUNCH_LABEL = { er: 'ER', ipd: 'IPD' };
+  /** R4 §2.3: the five pictures in the unit's format (choice id, label in the sheet, file name stem). */
+  const EXPORT_KINDS = [
+    { id: 'roster', label: 'ตารางรายชื่อประจำ Station', file: 'ตารางรายชื่อ' },
+    { id: 'portable', label: 'ตาราง Portable', file: 'ตาราง-Portable' },
+    { id: 'mission', label: 'ตารางภารกิจพิเศษ', file: 'ตารางภารกิจพิเศษ' },
+    { id: 'ipd', label: 'เวรกลางวัน X-RAY IPD', file: 'เวรกลางวัน-IPD' },
+    { id: 'er', label: 'เวรกลางวัน X-RAY ER', file: 'เวรกลางวัน-ER' }
+  ];
+  const EXPORT_DEFAULT = { roster: 'roster', portable: 'portable', mine: 'portable', mission: 'mission', lunch: 'ipd' };
+  /** Rows of picture (1) in the unit's order and spelling. */
+  const EXPORT_ROSTER_ROWS = [
+    { id: 'ipd', label: 'IPD' }, { id: 'portable', label: 'PORTABLE' }, { id: 'er', label: 'ER' }, { id: 'us', label: 'US' },
+    { id: 'or', label: 'OR' }, { id: 'cancer', label: 'Cancer center' }, { id: 'supervisor', label: 'Supervisor' }
+  ];
+  const EXPORT_WIDTH = 880;
+  const EXPORT_SCALE = 2;
+  const EXPORT_FONT = 'Sarabun,"Noto Sans Thai","Leelawadee UI",sans-serif';
   const MEMO_MAX = 30;
   const NOTE_MAX = 200;
+  const PLACE_MAX = 20;          // R4: a lunch place ("จุด") after whitespace normalisation (Code.gs 3.3)
   const MSG = {
     cached: 'ข้อมูลที่บันทึกไว้ในเครื่อง (ยังไม่ได้อัปเดต)',
     staffNone: 'Supervisor ยังไม่ได้จัดตารางเวรของเดือนนี้',
@@ -79,7 +113,8 @@
 
   let core = null;
   let root = null;
-  let sheetEl = null;            // the feature's sheet (generation / cell edit), created on first use
+  let sheetEl = null;            // the feature's sheet (generation / cell edit / R4 export), created on first use
+  let exportObserver = null;     // R4: ResizeObserver of the export preview box while the export sheet is open
   const ui = {
     month: '',                   // 'YYYY-MM' shown
     seg: '',                     // current segment id
@@ -226,7 +261,11 @@
       baseVersion: base | 0
     };
   }
-  function slotOf(s) { return { tech: (s && s.tech) || '', assistant: (s && s.assistant) || '', base: (s && s.base) || '' }; }
+  /** R4: the six keys of a LunchSlot (a 3.2 server ignores tech2 / place / place2; a 3.3 server replaces the stored ones). */
+  function slotOf(s) {
+    const tech2 = (s && s.tech2) || '';
+    return { tech: (s && s.tech) || '', assistant: (s && s.assistant) || '', base: (s && s.base) || '', tech2, place: (s && s.place) || '', place2: tech2 ? (s && s.place2) || '' : '' };
+  }
   function plainDuty(d) {
     const x = toDutyParam(d, 0);
     delete x.baseVersion;
@@ -316,18 +355,19 @@
       if (d >= date) return;
       const slot = ds[d].lunch && ds[d].lunch[s];
       if (slot && slot.tech) out.set(slot.tech, (out.get(slot.tech) || 0) + 1);
+      if (slot && slot.tech2) out.set(slot.tech2, (out.get(slot.tech2) || 0) + 1);   // R4
     });
     return out;
   }
-  /** A lunch substitute for `date` at station s replacing `who` ('' when nobody is free). */
-  function lunchSubstitute(date, s, who, base) {
+  /** A lunch substitute for `date` at station s replacing `who` ('' when nobody is free); never `other` (R4: the slot's other tech). */
+  function lunchSubstitute(date, s, who, base, other) {
     const p = P();
     const r = p.rosterFor(monthOf(date));
     const techs = r && Array.isArray(r[s]) ? r[s] : [];
     if (!techs.length) return '';
     let b = techs.indexOf(base || who);
     if (b < 0) b = Math.max(0, techs.indexOf(who));
-    const pick = PE.lunchPick(techs, b, 0, n => n === who || lunchBlocked(date, n), lunchCounts(date, s));
+    const pick = PE.lunchPick(techs, b, 0, n => n === who || (!!other && n === other) || lunchBlocked(date, n), lunchCounts(date, s));
     return pick.tech || '';
   }
   function missionSubstitute(date, names, who) {
@@ -350,8 +390,10 @@
     const items = list.map(c => {
       let sub = '';
       if (c.kind === 'lunch' && duty.lunch && duty.lunch[c.station]) {
-        sub = lunchSubstitute(date, c.station, c.name, duty.lunch[c.station].base);
-        if (sub) { duty.lunch[c.station].tech = sub; changed = true; }
+        const sl = duty.lunch[c.station];
+        // R4: a second technologist on leave is replaced by someone who is not the first one
+        sub = c.second ? lunchSubstitute(date, c.station, c.name, '', sl.tech) : lunchSubstitute(date, c.station, c.name, sl.base, sl.tech2);
+        if (sub && c.second) { sl.tech2 = sub; changed = true; } else if (sub) { sl.tech = sub; changed = true; }
       } else if (c.kind === 'mission') {
         sub = missionSubstitute(date, duty.mission, c.name);
         if (sub) { duty.mission = duty.mission.map(n => (n === c.name ? sub : n)); changed = true; }
@@ -388,9 +430,12 @@
     if (duty.lunch) {
       LUNCH.forEach(s => {
         const slot = duty.lunch[s];
-        if (!slot || slot.tech !== name) return;
-        const cover = slot.base && slot.base !== name ? ' · แทน ' + slot.base : '';
-        out.push({ icon: 'clock', tone: tone('sun'), main: 'เวรกลางวัน ' + LUNCH_LABEL[s] + tail, sub: 'ผู้ช่วย: ' + (slot.assistant || '–') + cover });
+        if (!slot || !name || (slot.tech !== name && slot.tech2 !== name)) return;
+        // R4: the second technologist has the duty too (with their own place)
+        const first = slot.tech === name;
+        const place = first ? slot.place : slot.place2;
+        const cover = first && slot.base && slot.base !== name ? ' · แทน ' + slot.base : '';
+        out.push({ icon: 'clock', tone: tone('sun'), main: 'เวรกลางวัน ' + LUNCH_LABEL[s] + (place ? ' (' + place + ')' : '') + tail, sub: 'ผู้ช่วย: ' + (slot.assistant || '–') + cover });
       });
     }
     if ((duty.mission || []).indexOf(name) >= 0) {
@@ -611,21 +656,23 @@
 
   /* ---------------------------------------------------------------- segments */
   function segHtml(c) {
-    if (ui.seg === 'roster') return rosterSegHtml(c);
-    if (ui.seg === 'mine') return mineHtml(c);
+    // R4: the pictures are offered on every segment (ประจำ Station → picture 1, ของฉัน → Portable)
+    if (ui.seg === 'roster') return rosterSegHtml(c) + exportsHtml(c);
+    if (ui.seg === 'mine') return mineHtml(c) + exportsHtml(c);
     const k = K();
     const p = P();
     const m = ui.month;
     const sup = c.isSup();
     const hasDuties = storedCount(m) > 0 || (sup && !!dutyDraft(m));
     if (!hasDuties) {
-      if (!sup) return emptyCard('staff-none', 'calendar', MSG.staffNone, '');
+      // R4: a stored roster alone can still be exported (picture 1; the other choices say why they are disabled)
+      if (!sup) return emptyCard('staff-none', 'calendar', MSG.staffNone, '') + exportsHtml(c);
       if (!p.roster(m)) {
         return emptyCard('no-roster', 'users', MSG.noRoster, canEdit() ? 'ตั้งคนประจำของแต่ละ Station ก่อน แล้วจึงสร้างตารางเวร' : '',
           canEdit() ? `<button type="button" class="${k.btn} ${k.btnPrimary}" data-roster-act="go-roster">ตั้งคนประจำเดือน</button>` : '') + (canEdit() ? settingsHint() : '');
       }
       return emptyCard('no-duties', 'table', MSG.noDuties, canEdit() ? 'ระบบจัดสาย Portable เวรกลางวัน และภารกิจพิเศษให้ทั้งเดือน — ตรวจแล้วจึงบันทึก' : '',
-        canEdit() ? `<button type="button" class="${k.btn} ${k.btnPrimary}" data-roster-act="gen-open">${icon('wand', 'w-5 h-5')}สร้างอัตโนมัติทั้งเดือน</button>` : '');
+        canEdit() ? `<button type="button" class="${k.btn} ${k.btnPrimary}" data-roster-act="gen-open">${icon('wand', 'w-5 h-5')}สร้างอัตโนมัติทั้งเดือน</button>` : '') + exportsHtml(c);
     }
     let html = '';
     if (canEdit()) {
@@ -651,11 +698,12 @@
   }
   function exportsHtml(c) {
     const k = K();
-    const has = storedCount(ui.month) > 0;
-    if (!has) return '';
+    const duties = storedCount(ui.month) > 0;
+    const p = P();
+    if (!duties && !(p && p.roster(ui.month))) return '';
     const b = (act, ic, label) => `<button type="button" class="${k.btn} ${k.btnSecondary}" data-roster-act="${act}"${ui.busy === act ? ' disabled aria-busy="true"' : ''}>${icon(ic, 'w-5 h-5')}${label}</button>`;
-    return `<div class="grid grid-cols-1 sm:grid-cols-2 gap-2" data-roster-exports>${b('image', 'image', 'ส่งออกเป็นรูป')}${window.XlsxLite ? b('xlsx', 'download', 'Excel (.xlsx)') : ''}</div>` +
-      (c.isSup() && dutyDraft(ui.month) ? `<p class="${k.textMeta} px-1">ไฟล์ที่ส่งออกเป็นตารางที่บันทึกแล้วเท่านั้น (ไม่รวมร่าง)</p>` : '');
+    return `<div class="grid grid-cols-1 sm:grid-cols-2 gap-2" data-roster-exports>${b('image', 'image', 'ส่งออกเป็นรูป')}${window.XlsxLite && duties ? b('xlsx', 'download', 'Excel (.xlsx)') : ''}</div>` +
+      (c.isSup() && (dutyDraft(ui.month) || rosterDraft(ui.month)) ? `<p class="${k.textMeta} px-1">ไฟล์ที่ส่งออกเป็นตารางที่บันทึกแล้วเท่านั้น (ไม่รวมร่าง)</p>` : '');
   }
 
   /** The cell markup common to the three tables. info: {date, cell, editable, main, sub, mine, leave, draft, deleted, extra}. */
@@ -667,7 +715,10 @@
         (info.cover ? ` <span class="font-normal text-slate-600" data-roster-cover>(${esc(info.cover)})</span>` : '') + `${tags}</span>`
       : `<span class="block text-sm leading-5 text-slate-400">–</span>`;
     const sub = info.sub ? `<span class="block text-[0.8125rem] leading-5 text-slate-600 ${k.wrapAnywhere}">${esc(info.sub)}</span>` : '';
-    const body = main + sub + (info.extra || '');
+    // R4: a second technologist (lunch tech2) has a name line of its own between the first one and the assistant
+    const second = info.second ? `<span class="block text-sm font-medium leading-5 ${info.secondMine ? 'text-brand-800' : 'text-ink-900'} ${k.wrapAnywhere}" data-roster-second>${esc(info.second)}` +
+      (info.secondLeave ? ` <span class="${k.inlineTag} ${LEAVE_TAG_TONE}" data-roster-leave title="${esc(info.secondLeave)}">ลา</span>` : '') + '</span>' : '';
+    const body = main + second + sub + (info.extra || '');
     const attrs = ` data-cell="${esc(info.cell)}"` + (info.mine ? ' data-mine="1"' : '') + (info.draft ? ' data-draft="1"' : '');
     const tone = info.draft ? ' bg-sun-50' : info.mine ? ' bg-brand-50' : '';
     // info.below: markup under the content (the tel: link) — never inside the edit button
@@ -783,12 +834,16 @@
       LUNCH.forEach(s => {
         const slot = duty && duty.lunch ? duty.lunch[s] : null;
         const tech = slot ? slot.tech : '';
+        const tech2 = slot ? slot.tech2 || '' : '';
         const cover = slot && slot.base && tech && slot.base !== tech ? 'แทน ' + slot.base : '';
+        const at = (n, pl) => nameLabel(n, act) + (pl ? ' (' + pl + ')' : '');
+        const lv = n => (n && conf.has(date + '|lunch|' + s + '|' + n) ? (leaveOf(date, n) || {}).type || 'ลา' : '');
         tr += cellHtml({
           date, cell: 'lunch:' + s, editable: edit && sup && !!duty,
           label: 'แก้ไข เวรกลางวัน ' + LUNCH_LABEL[s] + ' · ' + dayShort(date),
-          main: tech ? nameLabel(tech, act) : '', cover, sub: slot && slot.assistant ? 'ผช. ' + slot.assistant : '',
-          mine: !!tech && tech === me, leave: tech && conf.has(date + '|lunch|' + s + '|' + tech) ? (leaveOf(date, tech) || {}).type || 'ลา' : '',
+          main: tech ? at(tech, slot.place) : '', cover, sub: slot && slot.assistant ? 'ผช. ' + slot.assistant : '',
+          second: tech2 ? at(tech2, slot.place2) : '', secondMine: !!tech2 && tech2 === me, secondLeave: lv(tech2),
+          mine: (!!tech && tech === me) || (!!tech2 && tech2 === me), leave: lv(tech),
           draft: hasOwn.call(dd, date)
         });
       });
@@ -858,7 +913,12 @@
         } else l = ls.filter(x => x.tech === me)[0] || null;
       }
       if (l) lines.push('Portable สาย ' + l.line + sub + (l.assistant ? ' · ผช. ' + l.assistant : ''));
-      if (duty.lunch) LUNCH.forEach(s => { const sl = duty.lunch[s]; if (sl && sl.tech === me) lines.push('เวรกลางวัน ' + LUNCH_LABEL[s] + (sl.assistant ? ' · ผช. ' + sl.assistant : '')); });
+      if (duty.lunch) LUNCH.forEach(s => {
+        const sl = duty.lunch[s];
+        if (!sl || !me || (sl.tech !== me && sl.tech2 !== me)) return;
+        const place = sl.tech === me ? sl.place : sl.place2;   // R4: tech2 too
+        lines.push('เวรกลางวัน ' + LUNCH_LABEL[s] + (place ? ' (' + place + ')' : '') + (sl.assistant ? ' · ผช. ' + sl.assistant : ''));
+      });
       if ((duty.mission || []).indexOf(me) >= 0) {
         const mate = duty.mission.filter(n => n && n !== me)[0];
         const ph = mate ? phoneText(phoneOf(mate)) : '';
@@ -1204,7 +1264,7 @@
       `<div class="${k.sheetHead}"><h2 id="rosterSheetTitle" class="flex-1 outline-none ${k.sheetTitle}" data-sheet-title tabindex="-1">${esc(title)}</h2>` +
       `<button type="button" class="${k.iconBtn}" data-sheet-close aria-label="ปิด">${icon('chevron-down', 'w-5 h-5')}</button></div>` +
       `<div class="${k.sheetScroll}" data-roster-sheet-body>${body}</div><div class="${k.sheetActions}">${actions}</div></div>`;
-    core.Kit.sheet.open(el, { initialFocus: '[data-sheet-title]', onClose: () => { ui.sheet = null; ui.suggest = ''; } });
+    core.Kit.sheet.open(el, { initialFocus: '[data-sheet-title]', onClose: () => { ui.sheet = null; ui.suggest = ''; stopExportObserver(); } });
   }
   function closeSheet() { if (sheetEl && core.Kit.sheet.isOpen(sheetEl)) core.Kit.sheet.close(sheetEl, 'api'); ui.sheet = null; }
 
@@ -1249,7 +1309,10 @@
   function currentOf(duty, kind, key) {
     if (!duty) return { tech: '', assistant: '' };
     if (kind === 'line') { const l = sortedLines(duty.lines).filter(x => String(x.line) === String(key))[0]; return { tech: l ? l.tech : '', assistant: l ? l.assistant : '' }; }
-    if (kind === 'lunch') { const s = duty.lunch ? duty.lunch[key] : null; return { tech: s ? s.tech : '', assistant: s ? s.assistant : '', base: s ? s.base : '' }; }
+    if (kind === 'lunch') {
+      const s = duty.lunch ? duty.lunch[key] : null;
+      return { tech: s ? s.tech : '', assistant: s ? s.assistant : '', base: s ? s.base : '', tech2: s ? s.tech2 || '' : '', place: s ? s.place || '' : '', place2: s ? s.place2 || '' : '' };
+    }
     return { tech: (duty.mission || [])[+key] || '', assistant: '' };
   }
   /** "วันนี้" only for today, else "ในวันที่ 27 พ.ย." (R-7). */
@@ -1286,6 +1349,8 @@
     } else {
       body += `<div><label class="${k.label}" for="rosterEditTech">เจ้าหน้าที่</label><select id="rosterEditTech" class="${k.select}" data-roster-edit-tech>${optionsHtml(staffNames, cur.tech, act, '— ว่าง —', date)}</select></div>`;
       body += `<div><label class="${k.label}" for="rosterEditAsst">ผู้ช่วย</label><select id="rosterEditAsst" class="${k.select}" data-roster-edit-asst>${optionsHtml(activeAssistants(), cur.assistant, null, '— ไม่มีผู้ช่วย —')}</select></div>`;
+      // R4 §2.2: the place of เทค 1, a second technologist and their place — only on a server that stores them
+      if (pc.kind === 'lunch' && core.serverHas('lunch2')) body += lunch2Html(date, cur, staffNames, act);
     }
     if (pc.kind !== 'line') {
       body += `<div class="flex flex-wrap items-center gap-2"><button type="button" class="${k.btn} ${k.btnTonal}" data-roster-suggest>${icon('search', 'w-5 h-5')}หาคนแทน</button>` +
@@ -1297,13 +1362,40 @@
       `<button type="button" class="${k.btn} ${k.btnSecondary} flex-1" data-sheet-close>ยกเลิก</button>` +
       `<button type="button" class="${k.btn} ${k.btnPrimary} flex-1" data-roster-edit-ok>ตกลง</button>`);
   }
+  /** R4: "จุด" of เทค 1, the picker "เทคคนที่ 2" (the tech's candidates, never the chosen tech) and its "จุด". */
+  function lunch2Html(date, cur, staffNames, act) {
+    const k = K();
+    const field = (id, attr, label, value, ph, dis) => `<div><label class="${k.label}" for="${id}">${esc(label)}</label>` +
+      `<input type="text" id="${id}" class="${k.input}" ${attr} maxlength="${PLACE_MAX}" autocomplete="off" placeholder="${esc(ph)}" value="${esc(value)}"${dis ? ' disabled' : ''}></div>`;
+    return field('rosterEditPlace', 'data-roster-edit-place', 'จุด (ไม่บังคับ)', cur.place, 'เช่น ER', false) +
+      `<div><label class="${k.label}" for="rosterEditTech2">เทคคนที่ 2 (ไม่บังคับ)</label><select id="rosterEditTech2" class="${k.select}" data-roster-edit-tech2>` +
+      optionsHtml(staffNames.filter(n => n !== cur.tech), cur.tech2 !== cur.tech ? cur.tech2 : '', act, '— ไม่มี —', date) + '</select></div>' +
+      field('rosterEditPlace2', 'data-roster-edit-place2', 'จุด ของเทคคนที่ 2 (ไม่บังคับ)', cur.tech2 ? cur.place2 : '', 'เช่น ภูมิ 2', !cur.tech2);
+  }
+  /** R4: the edit sheet keeps "เทคคนที่ 2" ≠ เทค 1 and its "จุด" usable only with a second technologist. */
+  function syncLunch2() {
+    if (!sheetEl || !ui.sheet || ui.sheet.kind !== 'edit' || ui.sheet.type !== 'lunch') return;
+    const techSel = sheetEl.querySelector('[data-roster-edit-tech]');
+    const t2 = sheetEl.querySelector('[data-roster-edit-tech2]');
+    const p2 = sheetEl.querySelector('[data-roster-edit-place2]');
+    if (!techSel || !t2) return;
+    const tech = techSel.value;
+    let keep = t2.value === tech ? '' : t2.value;
+    const names = core.staff().map(x => x.name).filter(n => n !== tech);
+    t2.innerHTML = optionsHtml(names, keep, activeSet(), '— ไม่มี —', ui.sheet.date);
+    t2.value = keep;
+    if (p2) p2.disabled = !keep;
+  }
+  /** "  a  b " → "a b" (the server's normalisation of a place). */
+  function normPlace(v) { return String(v || '').replace(/\s+/g, ' ').trim(); }
   function suggestFor(s) {
     const date = s.date;
     const duty = viewDuty(date, true);
     const cur = currentOf(duty, s.type, s.key);
     const sel = sheetEl.querySelector('[data-roster-edit-tech]');
     const who = sel ? sel.value : cur.tech;
-    if (s.type === 'lunch') return lunchSubstitute(date, s.key, who, cur.base);
+    const t2 = sheetEl.querySelector('[data-roster-edit-tech2]');
+    if (s.type === 'lunch') return lunchSubstitute(date, s.key, who, cur.base, t2 ? t2.value : cur.tech2);
     const names = (duty.mission || []).slice();
     return missionSubstitute(date, names, who);
   }
@@ -1323,7 +1415,18 @@
     } else if (s.type === 'lunch') {
       if (!day.lunch) day.lunch = { er: slotOf(null), ipd: slotOf(null) };
       const old = day.lunch[s.key];
-      day.lunch[s.key] = { tech, assistant: asst, base: old.base || tech };
+      // R4: tech2 / places from the sheet when it shows them (server 'lunch2'), else the slot keeps its own
+      const t2Sel = sheetEl.querySelector('[data-roster-edit-tech2]');
+      const plEl = sheetEl.querySelector('[data-roster-edit-place]');
+      const pl2El = sheetEl.querySelector('[data-roster-edit-place2]');
+      let tech2 = t2Sel ? t2Sel.value : old.tech2 || '';
+      const place = plEl ? normPlace(plEl.value) : old.place || '';
+      let place2 = pl2El ? normPlace(pl2El.value) : old.place2 || '';
+      if (place.indexOf('|') >= 0 || place2.indexOf('|') >= 0) { c.toast('⚠️ จุดใช้เครื่องหมาย | ไม่ได้'); return; }
+      if (place.length > PLACE_MAX || place2.length > PLACE_MAX) { c.toast('⚠️ จุดยาวได้ไม่เกิน ' + PLACE_MAX + ' ตัวอักษร'); return; }
+      if (tech2 && tech2 === tech) tech2 = '';
+      if (!tech2) place2 = '';
+      day.lunch[s.key] = { tech, assistant: asst, base: old.base || tech, tech2, place, place2 };
     } else {
       const i = +s.key;
       const list = [(day.mission || [])[0] || '', (day.mission || [])[1] || ''];
@@ -1367,32 +1470,60 @@
           const o = document.createElement('option'); o.value = name; o.textContent = name; sel.appendChild(o);
         }
         sel.value = name;
+        syncLunch2();
       }
       ui.suggest = name;
       const was = currentOf(viewDuty(s.date, true), s.type, s.key).tech;
       if (out) out.textContent = name ? (was && was !== name ? 'เปลี่ยนจาก ' + was + ' เป็น ' + name + ' — กดตกลงเพื่อใช้' : 'แนะนำ ' + name + ' — กดตกลงเพื่อใช้') : 'ไม่พบคนแทนที่ว่าง';
       return;
     }
-    if (t.closest('[data-roster-edit-ok]')) applyEdit(c);
+    if (t.closest('[data-roster-edit-ok]')) { applyEdit(c); return; }
+    const pick = t.closest('[data-roster-export-pick]');
+    if (pick && !pick.disabled) { pickExport(pick.dataset.rosterExportPick); return; }
+    if (t.closest('[data-roster-export-save]')) c.spawn(() => saveExport(c));
   }
-  function onSheetChange() { /* the values are read when "ตกลง" is pressed */ }
+  function onSheetChange(e) {
+    // the values are read when "ตกลง" is pressed; R4: the second technologist's picker follows the first one
+    const t = e && e.target;
+    if (t && t.matches && (t.matches('[data-roster-edit-tech]') || t.matches('[data-roster-edit-tech2]'))) syncLunch2();
+  }
 
   /* ---------------------------------------------------------------- exports */
+  /** L of the stored month (the longest stored line list; the station count when nothing is stored). */
+  function exportLines(stored) {
+    let n = 0;
+    stored.forEach(d => { if (d && Array.isArray(d.lines) && d.lines.length > n) n = d.lines.length; });
+    return n || core.state.stationCounts.portable || 3;
+  }
   function exportRows(m) {
     const p = P();
     const r = rangeOf(m);
     const stored = U().eachDate(r.from, r.to).map(d => p.duty(d));
-    const L = lineCount(stored.filter(Boolean));
+    const L = exportLines(stored.filter(Boolean));
     return { L, dates: U().eachDate(r.from, r.to), stored };
   }
-  /** ตารางเวร → one .xlsx sheet with the columns of the former CSV (stored data only; R3-SPEC §4.4). */
+  /** R4: the stations of the month whose stored lunch slots use tech2 or a place (the three extra Excel columns). */
+  function lunchExtras(stored) {
+    const out = { er: false, ipd: false };
+    stored.forEach(d => LUNCH.forEach(s => {
+      const sl = d && d.lunch ? d.lunch[s] : null;
+      if (sl && (sl.tech2 || sl.place || sl.place2)) out[s] = true;
+    }));
+    return out;
+  }
+  /** ตารางเวร → one .xlsx sheet with the columns of the former CSV (stored data only; R3-SPEC §4.4; R4 lunch extras). */
   async function exportXlsx(c) {
     if (!window.XlsxLite) return;
     const m = ui.month;
     const ex = exportRows(m);
+    const extra = lunchExtras(ex.stored);
     const head = ['วันที่', 'วัน'];
     for (let i = 1; i <= ex.L; i++) head.push('สาย' + i + ' เทค', 'สาย' + i + ' ผู้ช่วย');
-    head.push('กลางวัน ER', 'ผู้ช่วย ER', 'กลางวัน IPD', 'ผู้ช่วย IPD', 'ภารกิจ 1', 'เบอร์ 1', 'ภารกิจ 2', 'เบอร์ 2');
+    LUNCH.forEach(s => {
+      head.push('กลางวัน ' + LUNCH_LABEL[s], 'ผู้ช่วย ' + LUNCH_LABEL[s]);
+      if (extra[s]) head.push('จุด ' + LUNCH_LABEL[s], 'กลางวัน ' + LUNCH_LABEL[s] + ' เทค 2', 'จุด ' + LUNCH_LABEL[s] + ' เทค 2');
+    });
+    head.push('ภารกิจ 1', 'เบอร์ 1', 'ภารกิจ 2', 'เบอร์ 2');
     const DAYS = ['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์'];
     const rows = [head];
     ex.dates.forEach((date, i) => {
@@ -1400,7 +1531,11 @@
       const row = [date, DAYS[weekday(date)]];
       const lines = d ? sortedLines(d.lines) : [];
       for (let n = 1; n <= ex.L; n++) { const l = lines.filter(x => x.line === n)[0]; row.push(l ? l.tech : '', l ? l.assistant : ''); }
-      LUNCH.forEach(s => { const sl = d && d.lunch ? d.lunch[s] : null; row.push(sl ? sl.tech : '', sl ? sl.assistant : ''); });
+      LUNCH.forEach(s => {
+        const sl = d && d.lunch ? d.lunch[s] : null;
+        row.push(sl ? sl.tech : '', sl ? sl.assistant : '');
+        if (extra[s]) row.push(sl ? sl.place || '' : '', sl ? sl.tech2 || '' : '', sl ? sl.place2 || '' : '');
+      });
       for (let n = 0; n < 2; n++) { const nm = d ? (d.mission || [])[n] || '' : ''; row.push(nm, nm ? phoneText(phoneOf(nm)) : ''); }
       rows.push(row);
     });
@@ -1408,43 +1543,283 @@
     const spec = { sheets: [{ name: 'ตารางเวร ' + m, columns, rows: rows.slice(1) }] };
     if (await window.XlsxLite.saveTable(c, 'ตารางเวร-' + m + '.xlsx', spec)) c.toast('📥 ดาวน์โหลด Excel แล้ว');
   }
-  /** The picture of the current table segment: an off-screen node with inline styles only (like #captureArea). */
-  function imageNode(seg, m) {
-    const ex = exportRows(m);
-    const td = 'border:1px solid #FFE3EF;padding:4px 5px;vertical-align:top;font-size:13px;line-height:18px;color:#1A2C63;';
-    const th = td + 'background:#FFFBF2;font-weight:600;font-size:12px;';
-    const cell = (main, sub) => `<td style="${td}"><div style="font-size:14px;font-weight:600;">${esc(main || '–')}</div>${sub ? `<div style="color:#475569;">${esc(sub)}</div>` : ''}</td>`;
-    let cols = [];
-    const rows = [];
-    if (seg === 'portable') { for (let i = 1; i <= ex.L; i++) cols.push('สาย ' + i); }
-    else if (seg === 'lunch') cols = ['ER', 'IPD'];
-    else cols = ['คนที่ 1', 'คนที่ 2'];
-    ex.dates.forEach((date, i) => {
-      const d = ex.stored[i];
-      const wd = weekday(date);
-      if (seg !== 'mission' && (wd === 0 || wd === 6)) return;
-      let tr = `<tr><td style="${th}">${esc(dateCellLabel(date))}</td>`;
-      if (seg === 'portable') {
-        const lines = d ? sortedLines(d.lines) : [];
-        for (let n = 1; n <= ex.L; n++) { const l = lines.filter(x => x.line === n)[0]; tr += cell(l ? l.tech : '', l && l.assistant ? 'ผช. ' + l.assistant : ''); }
-      } else if (seg === 'lunch') {
-        LUNCH.forEach(s => { const sl = d && d.lunch ? d.lunch[s] : null; tr += cell(sl ? sl.tech : '', sl && sl.assistant ? 'ผช. ' + sl.assistant : ''); });
-      } else {
-        for (let n = 0; n < 2; n++) { const nm = d ? (d.mission || [])[n] || '' : ''; tr += cell(nm, nm ? phoneText(phoneOf(nm)) : ''); }
-      }
-      rows.push(tr + '</tr>');
-    });
+
+  /* ---------------------------------------------------------------- R4 §2.3: the five pictures in the unit's format */
+  /*
+   * Built from STORED data only, inline styles only (html2canvas), fixed black / grey like the unit's own sheets (never the
+   * pastel theme), 880 px wide, drawn at scale 2. Names exactly as stored (no "(ลบแล้ว)"). Month = full Thai month, พ.ศ.
+   */
+  function exportNode(kind, m) {
     const node = document.createElement('div');
-    node.setAttribute('data-roster-image', seg);
-    node.style.cssText = 'width:420px;box-sizing:border-box;padding:12px;background:#ffffff;font-family:Sarabun,"Noto Sans Thai","Leelawadee UI",sans-serif;color:#1A2C63;';
-    node.innerHTML = `<div style="font-size:16px;font-weight:600;margin:0 0 8px;">ตารางเวร ${esc(SEG_FILE[seg])} · ${esc(U().thaiMonthYear(m))}</div>` +
-      `<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><colgroup><col style="width:52px">${cols.map(() => '<col>').join('')}</colgroup>` +
-      `<thead><tr><th style="${th}">วันที่</th>${cols.map(t => `<th style="${th}">${esc(t)}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`;
+    node.setAttribute('data-roster-export', kind);
+    node.style.cssText = 'width:' + EXPORT_WIDTH + 'px;box-sizing:border-box;padding:20px 24px 24px;background:#ffffff;color:#000000;font-family:' + EXPORT_FONT + ';';
+    node.innerHTML = kind === 'roster' ? rosterExportHtml(m) : calendarExportHtml(kind, m);
     return node;
   }
-  async function exportImage(c) {
-    const seg = SEG_FILE[ui.seg] ? ui.seg : 'portable';
-    await c.shareImage(imageNode(seg, ui.month), 'ตารางเวร-' + SEG_FILE[seg] + '-' + ui.month + '.png');
+  function monthParts(m) { const t = U().thaiMonthYear(m).split(' '); return { name: t[0] || '', year: t[1] || '' }; }
+  /** (1) ตารางรายชื่อ: STATION × RT1…RTn (n = max(6, the longest station list)), white 2 px cell borders. */
+  function rosterExportHtml(m) {
+    const ro = P().roster(m);
+    const mp = monthParts(m);
+    const st = ro ? ro.stations : {};
+    let n = 6;
+    EXPORT_ROSTER_ROWS.forEach(r => { const l = (st[r.id] || []).length; if (l > n) n = l; });
+    const cell = (bg, color, extra) => `border-right:2px solid #ffffff;border-bottom:2px solid #ffffff;background:${bg};color:${color};text-align:center;vertical-align:middle;padding:0 4px;height:36px;line-height:20px;overflow:hidden;${extra || ''}`;
+    let rows = `<tr data-export-row="month"><td colspan="${n + 1}" style="${cell('#000000', '#ffffff', 'font-size:16px;font-weight:700;')}">${esc(mp.name + ' ' + mp.year)}</td></tr>`;
+    rows += `<tr data-export-row="head"><td style="${cell('#000000', '#ffffff', 'font-size:14px;font-weight:700;')}">STATION</td>`;
+    for (let i = 1; i <= n; i++) rows += `<td style="${cell('#A6A6A6', '#000000', 'font-size:14px;font-weight:700;')}" data-export-rt>RT${i}</td>`;
+    rows += '</tr>';
+    EXPORT_ROSTER_ROWS.forEach((r, ri) => {
+      const bg = ri % 2 ? '#A6A6A6' : '#D9D9D9';
+      const names = st[r.id] || [];
+      rows += `<tr data-export-station="${r.id}"><td style="${cell('#000000', '#ffffff', 'font-size:13px;')}">${esc(r.label)}</td>`;
+      for (let i = 0; i < n; i++) rows += `<td style="${cell(bg, '#000000', 'font-size:16px;')}">${esc(names[i] || '')}</td>`;
+      rows += '</tr>';
+    });
+    return `<div style="font-size:20px;font-weight:700;text-align:center;line-height:30px;margin:0 0 14px;" data-export-title>` +
+      `ตารางรายชื่อนักรังสีการแพทย์ประจำหน่วยงานผู้ป่วยในเดือน<u style="text-decoration:underline;">${esc(mp.name)}</u> ${esc(mp.year)}</div>` +
+      `<table style="width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;"><colgroup><col style="width:16%">${'<col>'.repeat(n)}</colgroup><tbody>${rows}</tbody></table>`;
+  }
+  /** Monday-based weeks of month m that hold an in-month date in one of the shown weekday columns → [[date per column]]. */
+  function exportWeeks(m, cols) {
+    const r = rangeOf(m);
+    const wd = weekday(r.from);
+    let mon = U().addDays(r.from, -((wd + 6) % 7));
+    const weeks = [];
+    while (mon <= r.to) {
+      const dates = cols.map(c => U().addDays(mon, (c + 6) % 7));
+      if (dates.some(d => d >= r.from && d <= r.to)) weeks.push(dates);
+      mon = U().addDays(mon, 7);
+    }
+    return weeks;
+  }
+  /**
+   * The model of a calendar picture (2)–(5): {title, cols: weekday numbers, weeks: [{dates, labels, cells: {date: lines}}],
+   * showOnHoliday, footer}. Every cell of a week has labels.length name lines under its date line.
+   */
+  function calendarModel(kind, m) {
+    const p = P();
+    const r = rangeOf(m);
+    const mp = monthParts(m);
+    const inMonth = d => d >= r.from && d <= r.to;
+    const duty = d => (inMonth(d) ? p.duty(d) : null);
+    const monthDates = U().eachDate(r.from, r.to);
+    const stored = monthDates.map(d => p.duty(d)).filter(Boolean);
+    const WEEK = [1, 2, 3, 4, 5];
+    const suffix = 'ประจำเดือน' + mp.name + ' ' + mp.year;
+    if (kind === 'portable') {
+      const L = exportLines(stored);
+      const asst = stored.some(d => (d.lines || []).some(l => l && l.assistant));
+      const labels = [];
+      for (let i = 1; i <= L; i++) { labels.push('สาย' + i); if (asst) labels.push('ผช.'); }
+      return {
+        title: 'ตาราง Portable ' + suffix, cols: WEEK, showOnHoliday: false,
+        weeks: exportWeeks(m, WEEK).map(dates => ({ dates, labels, cells: cellsOf(dates, d => {
+          const ls = sortedLines((duty(d) || {}).lines);
+          const out = [];
+          for (let i = 1; i <= L; i++) { const l = ls.filter(x => x.line === i)[0]; out.push(l ? l.tech : ''); if (asst) out.push(l ? l.assistant : ''); }
+          return out;
+        }) }))
+      };
+    }
+    if (kind === 'mission') {
+      const weekend = stored.some(d => { const w = weekday(d.date); return (w === 0 || w === 6) && (d.mission || []).some(Boolean); });
+      const cols = weekend ? [1, 2, 3, 4, 5, 6, 0] : WEEK;
+      const contacts = p.eligible().filter(e => String(e.phone || '').trim()).map(e => e.name + ' ' + phoneText(e.phone));
+      return {
+        title: 'ตารางภารกิจพิเศษ ' + suffix, cols, showOnHoliday: true, contacts,
+        weeks: exportWeeks(m, cols).map(dates => ({ dates, labels: ['เทค 1', 'เทค 2'], cells: cellsOf(dates, d => {
+          const ms = (duty(d) || {}).mission || [];
+          return [ms[0] || '', ms[1] || ''];
+        }) }))
+      };
+    }
+    // (4) / (5) เวรกลางวัน X-RAY IPD / ER
+    const s = kind === 'er' ? 'er' : 'ipd';
+    const slotOn = d => { const x = duty(d); return x && x.lunch && x.lunch[s] ? x.lunch[s] : null; };
+    const asst = stored.some(d => d.lunch && d.lunch[s] && d.lunch[s].assistant);
+    return {
+      title: 'ตาราง เวรกลางวัน X-RAY ' + LUNCH_LABEL[s] + ' ' + suffix, cols: WEEK, showOnHoliday: false,
+      weeks: exportWeeks(m, WEEK).map(dates => {
+        const withTwo = dates.map(slotOn).filter(x => x && x.tech2);
+        const two = withTwo.length > 0;
+        /** the place a label carries: every day of the week with tech2 has the same non-empty place */
+        const common = key => { const v = withTwo.map(x => x[key] || ''); return v.length && v[0] && v.every(x => x === v[0]) ? v[0] : ''; };
+        const lp1 = two ? common('place') : '', lp2 = two ? common('place2') : '';
+        const labels = (two ? ['เทค 1' + (lp1 ? ' (' + lp1 + ')' : ''), 'เทค 2' + (lp2 ? ' (' + lp2 + ')' : '')] : ['เทค']).concat(asst ? ['ผู้ช่วย'] : []);
+        const withPlace = (n, place, carried) => (n && place && place !== carried ? n + ' (' + place + ')' : n);
+        return { dates, labels, cells: cellsOf(dates, d => {
+          const x = slotOn(d);
+          const out = [withPlace(x ? x.tech : '', x ? x.place : '', lp1)];
+          if (two) out.push(withPlace(x ? x.tech2 || '' : '', x ? x.place2 : '', lp2));
+          if (asst) out.push(x ? x.assistant : '');
+          return out;
+        }) };
+      })
+    };
+  }
+  function cellsOf(dates, fn) { const o = {}; dates.forEach(d => { o[d] = fn(d); }); return o; }
+  /**
+   * (2)–(5): 1 px black grid lines (separate borders: each cell draws its right / bottom edge, the table its top / left — the
+   * same look as border-collapse, but html2canvas then draws every line exactly 1 px); a label column (16 %) + the day
+   * columns; a fixed 22 px line grid shared by the label cell and the day cells.
+   */
+  function calendarExportHtml(kind, m) {
+    const md = calendarModel(kind, m);
+    const r = rangeOf(m);
+    const hol = P().holidays();
+    const DAY_NAMES = ['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์'];
+    const LINE = 'height:22px;line-height:22px;white-space:nowrap;overflow:hidden;';
+    const td = bg => `border-right:1px solid #000000;border-bottom:1px solid #000000;vertical-align:top;padding:2px 6px;background:${bg};`;
+    const line = (t, align, size) => `<div style="${LINE}text-align:${align};font-size:${size}px;">${t ? esc(t) : '&nbsp;'}</div>`;
+    let html = `<div style="font-size:18px;font-weight:700;text-align:center;line-height:28px;margin:0 0 12px;" data-export-title>${esc(md.title)}</div>`;
+    html += `<table style="width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;border-top:1px solid #000000;border-left:1px solid #000000;"><colgroup><col style="width:16%">${'<col>'.repeat(md.cols.length)}</colgroup>`;
+    html += `<thead><tr><th style="${td('#ffffff')}"></th>` +
+      md.cols.map(c => `<th style="${td('#ffffff')}text-align:center;font-size:13px;font-weight:700;${LINE}" data-export-day="${c}">${DAY_NAMES[c]}</th>`).join('') + '</tr></thead><tbody>';
+    md.weeks.forEach(w => {
+      html += `<tr data-export-week="${esc(w.dates[0])}"><td style="${td('#ffffff')}" data-export-labels>${line('', 'left', 13)}${w.labels.map(t => line(t, 'left', 13)).join('')}</td>`;
+      w.dates.forEach(d => {
+        const inside = d >= r.from && d <= r.to;
+        const isHol = hol.has(d);
+        const names = inside && (!isHol || md.showOnHoliday) ? w.cells[d] : [];
+        const bg = isHol ? '#808080' : '#ffffff';
+        html += `<td style="${td(bg)}" data-export-date="${esc(d)}"${inside ? '' : ' data-export-out="1"'}${isHol ? ' data-export-holiday="1"' : ''}>` +
+          line(inside ? String(+d.slice(8)) : '', 'right', 13) + w.labels.map((x, i) => line(names[i] || '', 'right', 14)).join('') + '</td>';
+      });
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+    if (md.contacts && md.contacts.length) {
+      html += `<div style="margin-top:12px;font-size:13px;font-weight:700;line-height:20px;" data-export-contacts-head>***เบอร์ติดต่อ***</div>` +
+        `<div style="font-size:13px;line-height:20px;" data-export-contacts>${esc(md.contacts.join(', '))}</div>`;
+    }
+    return html;
+  }
+  function exportFile(kind, m) { const k = EXPORT_KINDS.filter(x => x.id === kind)[0]; return (k ? k.file : 'ตารางเวร') + '-' + m + '.png'; }
+  /** A choice without data is disabled: (1) needs the month's stored roster, (2)–(5) at least one stored duty. */
+  function exportAvailable(kind, m) { const p = P(); return kind === 'roster' ? !!(p && p.roster(m)) : storedCount(m) > 0; }
+  function exportDefault(m) {
+    const want = EXPORT_DEFAULT[ui.seg] || 'portable';
+    if (exportAvailable(want, m)) return want;
+    const first = EXPORT_KINDS.filter(k => exportAvailable(k.id, m))[0];
+    return first ? first.id : want;
+  }
+  function exportPickHtml(kind, on, ok) {
+    const k = EXPORT_KINDS.filter(x => x.id === kind)[0];
+    const hint = ok ? '' : kind === 'roster' ? 'ยังไม่ได้บันทึกคนประจำของเดือนนี้' : 'ยังไม่มีตารางเวรที่บันทึกของเดือนนี้';
+    return `<button type="button" role="radio" aria-checked="${on}" data-roster-export-pick="${kind}"${ok ? '' : ' disabled aria-disabled="true"'} ` +
+      `class="w-full min-h-[44px] flex items-center gap-3 px-3 py-2 rounded-2xl border-2 text-left ${on ? 'border-brand-400 bg-brand-50' : 'border-ink-200 bg-white'} disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400">` +
+      `<span class="w-5 h-5 shrink-0 rounded-full border-2 ${on ? 'border-brand-600' : 'border-slate-400'} flex items-center justify-center" aria-hidden="true">${on ? '<span class="w-2.5 h-2.5 rounded-full bg-brand-600"></span>' : ''}</span>` +
+      `<span class="min-w-0 flex-1"><span class="block text-sm font-medium leading-6 text-ink-900">${esc(k.label)}</span>` +
+      (hint ? `<span class="block text-[0.8125rem] leading-5 text-slate-500" data-roster-export-hint>${esc(hint)}</span>` : '') + '</span></button>';
+  }
+  function exportPicksHtml(m, choice) {
+    return EXPORT_KINDS.map(k => exportPickHtml(k.id, k.id === choice, exportAvailable(k.id, m))).join('');
+  }
+  function openExport(c) {
+    const m = ui.month;
+    const k = K();
+    const choice = exportDefault(m);
+    const any = EXPORT_KINDS.some(x => exportAvailable(x.id, m));
+    ui.sheet = { kind: 'export', month: m, choice };
+    const body = `<p class="${k.textMeta}">${esc(U().thaiMonthYear(m))} — ตารางที่บันทึกแล้วเท่านั้น ในรูปแบบตารางของหน่วยงาน</p>` +
+      `<div class="space-y-2" role="radiogroup" aria-label="แบบตาราง" data-roster-export-picks>${exportPicksHtml(m, choice)}</div>` +
+      `<p class="${k.label}">ตัวอย่าง</p>` +
+      `<div class="relative w-full overflow-hidden rounded-xl border-2 border-ink-200 bg-white" data-roster-export-preview aria-hidden="true"></div>` +
+      `<p class="${k.textMeta} ${k.wrapAnywhere}" data-roster-export-file></p>`;
+    openSheet('export', 'ส่งออกเป็นรูป (PNG)', body,
+      `<button type="button" class="${k.btn} ${k.btnSecondary} flex-1" data-sheet-close>ปิด</button>` +
+      `<button type="button" class="${k.btn} ${k.btnPrimary} flex-1" data-roster-export-save${any ? '' : ' disabled'}>${icon('image', 'w-5 h-5')}บันทึกรูป PNG</button>`);
+    // a desktop scrollbar that comes and goes with the picture's height must not change the preview's width
+    const scroller = sheetEl.querySelector('[data-roster-sheet-body]');
+    if (scroller) scroller.style.scrollbarGutter = 'stable';
+    showExportChoice();
+    // the preview follows the sheet's width (rotation, a scrollbar that comes with the picture's height)
+    if (exportObserver) exportObserver.disconnect();
+    exportObserver = null;
+    const box = sheetEl.querySelector('[data-roster-export-preview]');
+    if (box && typeof window.ResizeObserver === 'function') {
+      // only a new width matters (the box's own height is set by the fit); the fit runs in the next frame, never inside the
+      // observer's delivery (a size change there is reported as "ResizeObserver loop completed with undelivered notifications")
+      let lastW = box.clientWidth;
+      exportObserver = new window.ResizeObserver(() => {
+        if (!ui.sheet || ui.sheet.kind !== 'export') { stopExportObserver(); return; }
+        if (box.clientWidth === lastW) return;
+        lastW = box.clientWidth;
+        if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(fitExportPreview); else setTimeout(fitExportPreview, 0);
+      });
+      exportObserver.observe(box);
+    }
+    if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(fitExportPreview);
+  }
+  function stopExportObserver() { if (exportObserver) exportObserver.disconnect(); exportObserver = null; }
+  /** Puts the selected table into the preview (scaled to the sheet's width) and names the file. */
+  function showExportChoice() {
+    const s = ui.sheet;
+    if (!s || s.kind !== 'export' || !sheetEl) return;
+    const ok = exportAvailable(s.choice, s.month);
+    const box = sheetEl.querySelector('[data-roster-export-preview]');
+    const file = sheetEl.querySelector('[data-roster-export-file]');
+    if (box) {
+      box.innerHTML = '';
+      if (ok) {
+        const node = exportNode(s.choice, s.month);
+        node.style.position = 'absolute';
+        node.style.left = '0';
+        node.style.top = '0';
+        node.style.transformOrigin = '0 0';
+        box.appendChild(node);
+      }
+      box.hidden = !ok;
+    }
+    if (file) file.textContent = ok ? 'ไฟล์: ' + exportFile(s.choice, s.month) : '';
+    fitExportPreview();
+  }
+  function fitExportPreview() {
+    if (!sheetEl || !ui.sheet || ui.sheet.kind !== 'export') return;
+    const box = sheetEl.querySelector('[data-roster-export-preview]');
+    const node = box && box.firstElementChild;
+    if (!node) return;
+    // the new height may bring the sheet's scrollbar (a desktop browser): measure again until the width holds
+    for (let i = 0; i < 3; i++) {
+      const w = box.clientWidth;
+      if (!w) return;
+      const sc = Math.min(1, w / EXPORT_WIDTH);
+      node.style.transform = 'scale(' + sc + ')';
+      box.style.height = Math.ceil(node.offsetHeight * sc) + 'px';
+      if (box.clientWidth === w) return;
+    }
+  }
+  function pickExport(kind) {
+    const s = ui.sheet;
+    if (!s || s.kind !== 'export' || !EXPORT_KINDS.some(k => k.id === kind) || !exportAvailable(kind, s.month)) return;
+    s.choice = kind;
+    sheetEl.querySelectorAll('[data-roster-export-pick]').forEach(b => {
+      const on = b.dataset.rosterExportPick === kind;
+      const fresh = document.createElement('div');
+      fresh.innerHTML = exportPickHtml(b.dataset.rosterExportPick, on, exportAvailable(b.dataset.rosterExportPick, s.month));
+      const nb = fresh.firstElementChild;
+      b.setAttribute('aria-checked', String(on));
+      b.className = nb.className;
+      b.innerHTML = nb.innerHTML;
+    });
+    showExportChoice();
+  }
+  async function saveExport(c) {
+    const s = ui.sheet;
+    if (!s || s.kind !== 'export' || ui.busy || !exportAvailable(s.choice, s.month)) return;
+    const btn = sheetEl.querySelector('[data-roster-export-save]');
+    const label = btn ? btn.innerHTML : '';
+    const alive = c.alive();
+    ui.busy = 'image';
+    if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.textContent = 'กำลังสร้างรูป…'; }
+    try {
+      await c.shareImage(exportNode(s.choice, s.month), exportFile(s.choice, s.month), { width: EXPORT_WIDTH, scale: EXPORT_SCALE });
+    } finally {
+      if (ui.busy === 'image') ui.busy = '';
+      if (btn && btn.isConnected) { btn.disabled = false; btn.removeAttribute('aria-busy'); btn.innerHTML = label; }
+      if (alive()) c.render();
+    }
   }
   function runExport(c, act, fn) {
     if (ui.busy) return;
@@ -1509,7 +1884,7 @@
       return;
     }
     if (act === 'xlsx') { runExport(c, 'xlsx', exportXlsx); return; }
-    if (act === 'image') { runExport(c, 'image', exportImage); }
+    if (act === 'image') { openExport(c); }
   }
   function onRootChange(e) {
     const c = core;
@@ -1693,7 +2068,11 @@
       root = el;
       el.addEventListener('click', onRootClick);
       el.addEventListener('change', onRootChange);
-      const resync = () => { syncOffsets(); if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(syncOffsets); };
+      const resync = () => {
+        syncOffsets();
+        fitExportPreview();
+        if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(() => { syncOffsets(); fitExportPreview(); });
+      };
       window.addEventListener('resize', resync);
       window.addEventListener('orientationchange', resync);
       if (window.visualViewport && typeof window.visualViewport.addEventListener === 'function') window.visualViewport.addEventListener('resize', resync);

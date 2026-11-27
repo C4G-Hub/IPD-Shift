@@ -11,7 +11,10 @@
  * Shapes (§0.2): Staff {name, group:'regular'|'backup', active?}; Leave {date, staff, type, status?,
  * start?, end?, detail?, recordedBy?, recordedAt?} (R2 E-1: a partial leave without valid start/end takes its times from
  * detail "HH:MM-HH:MM", the server's format); Roster {[stationId]: string[]}; Line {line, tech, assistant};
- * LunchSlot {tech, base, assistant}; Duty {date, working, lines, lunch:{er,ipd}|null, mission, missionNext};
+ * LunchSlot {tech, base, assistant, tech2, place, place2} (R4 3.3: tech2 = an optional second technologist, place / place2
+ * = optional free-text places of tech / tech2; everywhere a lunch tech counts as a person — dutyConflicts, personStats /
+ * teamStats lunch counts, the lunch counts of frozen days in generateMonthDuties — tech2 counts too; generated slots carry
+ * tech2/place/place2 = ''); Duty {date, working, lines, lunch:{er,ipd}|null, mission, missionNext};
  * Tail {month, mission:{order,next}, lines:{techs,ringSize,next}, lunch:{er:{techs,next}, ipd:{techs,next}}}.
  *
  * EXPORTS (window.PlanEngine)
@@ -52,7 +55,8 @@
  * Month (§5)
  *   generateMonthDuties(input) → {month, from, days:{[date]:Duty|null}, config, tail, warnings}
  *   suggestOffsets(previousTail, input) → {lines, lunch:{er, ipd}}   non-zero only for an unchanged ring
- *   dutyConflicts(duties, leaves, {lunchWindow}?) → [{date, kind:'line'|'lunch'|'mission', line?, station?, name, reason}]
+ *   dutyConflicts(duties, leaves, {lunchWindow}?) → [{date, kind:'line'|'lunch'|'mission', line?, station?, name, reason,
+ *                                           second?}]   R4: second: true for a lunch slot's tech2
  * Proposal (§6)
  *   proposeDay(input) → {date, assignments, lines, notes, unfilled, spare, added, warnings}
  *                                           R2-SPEC §0.27: input.avoidPairs [[a, b]] — the matching never puts a pool
@@ -519,7 +523,8 @@
         const rec = own(existing, d) && isObj(existing[d]) ? existing[d] : null;
         days[d] = rec;
         if (!rec) { warnings.push({ code: 'MISSING_STORED_DAY', date: d }); return; }
-        if (isObj(rec.lunch)) LUNCH_STATIONS.forEach(s => { if (isObj(rec.lunch[s])) bump(s, cleanName(rec.lunch[s].tech)); });
+        // R4: a frozen day's second lunch technologist counts for fairness like the first
+        if (isObj(rec.lunch)) LUNCH_STATIONS.forEach(s => { if (isObj(rec.lunch[s])) { bump(s, cleanName(rec.lunch[s].tech)); bump(s, cleanName(rec.lunch[s].tech2)); } });
         const nx = cleanName(rec.missionNext);
         if (nx) raw = nx;
         else {
@@ -544,7 +549,7 @@
           if (p.tech) bump(s, p.tech);
           else if (lunchTechs[s].length) warnings.push({ code: 'LUNCH_VACANT', date: d, station: s });
           const m = lunchAsst[s].length;
-          duty.lunch[s] = { tech: p.tech, base: p.base, assistant: m ? lunchAsst[s][mod(k + offsets.lunchAssistant[s], m)] : '' };
+          duty.lunch[s] = { tech: p.tech, base: p.base, assistant: m ? lunchAsst[s][mod(k + offsets.lunchAssistant[s], m)] : '', tech2: '', place: '', place2: '' };
         });
       }
       const mp = missionPick(order, cursor, n => av.absent.has(n));
@@ -625,10 +630,14 @@
       if (isObj(duty.lunch)) {
         LUNCH_STATIONS.forEach(s => {
           const slot = duty.lunch[s];
-          const n = isObj(slot) ? cleanName(slot.tech) : '';
-          if (!n) return;
-          if (av.absent.has(n)) out.push({ date: d, kind: 'lunch', station: s, name: n, reason: av.absent.get(n) });
-          else if (partialBlocksLunch(av, n, win)) out.push({ date: d, kind: 'lunch', station: s, name: n, reason: av.partial.get(n).type });
+          if (!isObj(slot)) return;
+          const n1 = cleanName(slot.tech), n2 = cleanName(slot.tech2);
+          [n1, n2 !== n1 ? n2 : ''].forEach((n, i) => {
+            if (!n) return;
+            const extra = i ? { second: true } : {};
+            if (av.absent.has(n)) out.push(Object.assign({ date: d, kind: 'lunch', station: s, name: n, reason: av.absent.get(n) }, extra));
+            else if (partialBlocksLunch(av, n, win)) out.push(Object.assign({ date: d, kind: 'lunch', station: s, name: n, reason: av.partial.get(n).type }, extra));
+          });
         });
       }
       arr(duty.mission).forEach(raw => {
@@ -1897,7 +1906,7 @@
         if (isObj(duty.lunch)) {
           LUNCH_STATIONS.forEach(s => {
             const slot = duty.lunch[s];
-            if (!isObj(slot) || cleanName(slot.tech) !== name) return;
+            if (!isObj(slot) || (cleanName(slot.tech) !== name && cleanName(slot.tech2) !== name)) return;   // R4: tech2 too
             if (fullLeave.has(d)) { conflicts.push({ date: d, kind: 'lunch', station: s }); return; }
             if (d <= today) lunch[s].served++; else lunch[s].scheduled++;
           });
@@ -1927,7 +1936,7 @@
         const duty = getByDate(o.duties, d);
         if (isObj(duty)) {
           arr(duty.lines).forEach(l => { if (isObj(l)) add(l.tech); });
-          if (isObj(duty.lunch)) LUNCH_STATIONS.forEach(s => { if (isObj(duty.lunch[s])) add(duty.lunch[s].tech); });
+          if (isObj(duty.lunch)) LUNCH_STATIONS.forEach(s => { if (isObj(duty.lunch[s])) { add(duty.lunch[s].tech); add(duty.lunch[s].tech2); } });
           arr(duty.mission).forEach(add);
         }
       });

@@ -31,7 +31,7 @@
    *    ipd_boot_retry with the inline guard: after 2 only the "โหลดใหม่" button remains. init() clears the counter.
    * APP_BUILD = sw.js VERSION = the ?v= of index.html's scripts = js/api.js CLIENT_VERSION (tests/sw.test.js).
    */
-  const APP_BUILD = '3.2.0';
+  const APP_BUILD = '3.3.0';
   const BOOT_RETRY_KEY = 'ipd_boot_retry';
   // R1b: also a page of another release (its inline guard names its own build, e.g. a v2.9 index.html served from the HTTP cache
   // whose ?v=2.9.0 URLs now answer with these files): its markup is not this release's — the guard of that page takes over
@@ -4728,19 +4728,22 @@
   /**
    * `node` drawn by html2canvas at CAPTURE_WIDTH (staged off-screen; a node that is not in the document is staged and
    * removed again) → a File named `filename` (PNG when the name ends in .png, else JPEG), or null with a toast.
+   * R4: opts {width, scale} (core.shareImage) — the stage width in CSS px (200–2000, default CAPTURE_WIDTH) and the
+   * html2canvas scale (1–4, default 3).
    */
-  async function captureNode(node, filename) {
+  async function captureNode(node, filename, opts) {
+    const o = captureOpts(opts);
     let draw;
     try { draw = await loadHtml2canvas(); }
     catch (e) { toast(MSG.imageToolFailed, 4000); return null; }
     if (!node) { toast(MSG.imageFailed); return null; }
     const png = /\.png$/i.test(filename);
     const type = png ? 'image/png' : 'image/jpeg';
-    const restore = stageCaptureArea(node);
+    const restore = stageCaptureArea(node, o.width);
     const unfix = baselineFix();
     await new Promise(r => setTimeout(r, 0));   // let the staged width settle
     try {
-      const canvas = await draw(node, { scale: 3, backgroundColor: '#ffffff', useCORS: true });
+      const canvas = await draw(node, { scale: o.scale, backgroundColor: '#ffffff', useCORS: true });
       const blob = await new Promise(resolve => canvas.toBlob(resolve, type, png ? undefined : 0.95));
       if (blob) return new File([blob], filename, { type });
     } catch (e) { /* reported below */ }
@@ -4750,16 +4753,18 @@
   }
 
   /**
-   * R2 core.shareImage(node, filename) → Promise<bool>: the capture logic of the day picture for any node (e.g. a month
-   * table built off-screen with inline styles, like #captureArea), saved with saveFile; true when it was saved.
+   * R2 core.shareImage(node, filename, opts?) → Promise<bool>: the capture logic of the day picture for any node (e.g. a
+   * month table built off-screen with inline styles, like #captureArea), saved with saveFile; true when it was saved.
+   * R4: opts {width, scale} — e.g. the unit-format month pictures of ตารางเวร use {width: 880, scale: 2}; without opts
+   * the day picture's 420 px / scale 3.
    * One image at a time (a second call while one is drawing resolves false).
    */
-  async function shareImage(node, filename) {
+  async function shareImage(node, filename, opts) {
     if (imageBusy) return false;
     let ok = false;
     await oneImageAtATime(async () => {
       const name = typeof filename === 'string' && filename ? filename : 'ตารางเวร.png';
-      const file = await captureNode(node, name);
+      const file = await captureNode(node, name, opts);
       if (file && await saveFile(file, file.name)) { toast('⬇️ บันทึกภาพเรียบร้อย'); ok = true; }
     });
     return ok;
@@ -4783,13 +4788,23 @@
    * the capture area moves into a stage outside the viewport for the drawing (html2canvas can only draw what is
    * rendered; on the รายงาน screen a placeholder of the same height keeps the page still). → restore() puts it back.
    */
-  function stageCaptureArea(area) {
+  /** R4: {width, scale} of a capture — out-of-range or missing values fall back to CAPTURE_WIDTH / 3. */
+  function captureOpts(opts) {
+    const o = opts && typeof opts === 'object' ? opts : {};
+    const w = Number(o.width), sc = Number(o.scale);
+    return {
+      width: Number.isFinite(w) && w >= 200 && w <= 2000 ? Math.round(w) : CAPTURE_WIDTH,
+      scale: Number.isFinite(sc) && sc >= 1 && sc <= 4 ? sc : 3
+    };
+  }
+  function stageCaptureArea(area, width) {
     if (!area) return () => {};
+    const stageW = width || CAPTURE_WIDTH;
     const parent = area.parentNode;
     if (!parent) {   // R2: a node built for the picture only (core.shareImage): staged, then taken out again
       const tmp = document.createElement('div');
       tmp.setAttribute('aria-hidden', 'true');
-      tmp.style.cssText = 'position:fixed;left:-10000px;top:0;width:' + CAPTURE_WIDTH + 'px;pointer-events:none;';
+      tmp.style.cssText = 'position:fixed;left:-10000px;top:0;width:' + stageW + 'px;pointer-events:none;';
       document.body.appendChild(tmp);
       tmp.appendChild(area);
       return () => { if (area.parentNode === tmp) tmp.removeChild(area); tmp.remove(); };
@@ -4801,7 +4816,7 @@
     parent.insertBefore(hold, area);
     const stage = document.createElement('div');
     stage.setAttribute('aria-hidden', 'true');
-    stage.style.cssText = 'position:fixed;left:-10000px;top:0;width:' + CAPTURE_WIDTH + 'px;pointer-events:none;';
+    stage.style.cssText = 'position:fixed;left:-10000px;top:0;width:' + stageW + 'px;pointer-events:none;';
     document.body.appendChild(stage);
     stage.appendChild(area);
     return () => {
@@ -5225,7 +5240,8 @@
    *     have reset the range), else that month; leaving การลา restores the plan range around the selected date (as ตารางเวร does).
    *   R2 (I2): openStationCounts() — the station-counts sheet (Supervisor) · refresh() → Promise<bool> — a heartbeat now
    *     (getData of the selected date's window; never rejects; e.g. after a write whose new plan version must be learnt)
-   *   R2: shareImage(node, filename) → Promise<bool> — node drawn by html2canvas at 420 px (staged off-screen; a node not in
+   *   R2: shareImage(node, filename, opts?) → Promise<bool> — node drawn by html2canvas at 420 px (R4: opts {width, scale}
+   *     e.g. {width: 880, scale: 2}; default 420 / 3) (staged off-screen; a node not in
    *     the document is staged and removed again; inline styles only, like #captureArea), PNG when filename ends in .png,
    *     else JPEG; saved with saveFile (toast on success). applyRules(rules) → bool — e.g. setPlanSettings' answer
    *     {planPriority, planSlotOrder} into state.rules (+ offline copy, render).
@@ -6300,20 +6316,14 @@
    * an update (never on a first-ever login on a device) unless APP_CONFIG.WHATS_NEW === false. An item with `sup: true`
    * is listed only for the Supervisor (R3 FIX-CL L-8: staff cannot open Dashboard ทีม).
    */
-  // R3-SPEC §4.8 (WHATS_NEW 3.2.0, I2)
+  // R4-SPEC §2.5 (WHATS_NEW 3.3.0)
   const WHATS_NEW = Object.freeze({
-    version: '3.2.0',
+    version: '3.3.0',
     title: 'มีอะไรใหม่',
-    subtitle: 'เวอร์ชัน 3.2 — Dashboard · แจ้งปัญหา · แชท',
+    subtitle: 'เวอร์ชัน 3.3 — ตารางเวรแบบของหน่วยงาน',
     items: Object.freeze([
-      { icon: 'bar-chart', title: 'Dashboard ของฉัน', text: 'เมนู → ของฉัน: พักร้อนคงเหลือ คะแนนใบประกอบ สถิติการลาและการอยู่ Station จำนวนเวร และเวร 7 วันข้างหน้า' },
-      { icon: 'alert-triangle', title: 'แจ้งปัญหา', text: 'แจ้งปัญหาของแต่ละ Station พร้อมรูปไม่เกิน 3 รูป ติดตามสถานะ ยังไม่แก้/แก้แล้ว และส่งออก Excel' },
-      { icon: 'message', title: 'แชทส่วนตัว', text: 'ไอคอนแชทที่หัวแอป คุยกันแบบ 1 ต่อ 1 — ข้อความเก็บใน Google Sheet ของหน่วย ห้ามส่งข้อมูลผู้ป่วย' },
-      { icon: 'users', title: 'Dashboard ทีม (Supervisor)', sup: true, text: 'ตารางทุกคน การลารายเดือน ความเท่าเทียมของเวร วันที่คนไม่ครบ ปัญหาค้าง และ Excel' },
-      { icon: 'table', title: 'ตารางเวรเป็นไฟล์ Excel', text: 'ปุ่ม Excel ในตารางเวรได้ไฟล์ .xlsx แล้ว' },
-      // R3 track F (owner requests F-1, F-2)
-      { icon: 'calendar', title: 'วันหยุดในปฏิทินการลา', text: 'วันหยุดที่ Supervisor ลงไว้ขึ้นในปฏิทินหน้า การลา แล้ว' },
-      { icon: 'sort', title: 'จัดลำดับคนใน Station', sup: true, text: 'Supervisor กด จัดลำดับ บนการ์ด Station เพื่อเลื่อนลำดับคนขึ้นลง แล้วกด บันทึก' }
+      { icon: 'image', title: 'ส่งออกตารางเวรเป็นรูป', text: 'ตารางเวร → ส่งออกเป็นรูป: รูปแบบตารางของหน่วยงาน 5 แบบ — ตารางรายชื่อประจำ Station, Portable, ภารกิจพิเศษ, เวรกลางวัน X-RAY IPD และ ER เป็นไฟล์ PNG' },
+      { icon: 'clock', title: 'เวรกลางวันเทค 2 คน', text: 'เวรกลางวันใส่เทคคนที่ 2 และจุดประจำได้ (เช่น ER, ภูมิ 2) — ขึ้นในตาราง กลางวัน และในเวรของฉัน' }
     ])
   });
   const WHATS_NEW_SEEN = 'whatsNewSeen';   // core.store.prefs key: the version whose notes were shown on this device
@@ -6419,7 +6429,7 @@
     selectedDate: () => state.selectedDate,
     setSelectedDate: date => track(setSelectedDate(date)),
     ensureRange, dayView, leavesOn, leaveList, leaveLines, isAbsent: U.isAbsent, saveFile,
-    shareImage: (node, filename) => track(shareImage(node, filename)),
+    shareImage: (node, filename, opts) => track(shareImage(node, filename, opts)),
     // R2 (I2): the station-counts sheet (Supervisor; the same routine as วันนี้'s button) and a heartbeat now (the window of
     // the selected date is read again: versions → domains such as 'plan' refetch) → Promise<bool>, never rejects
     // R2 FIX I-8: the one wording of the 3.0-server notice (เมนู's note; the settings empty state uses the same text)
