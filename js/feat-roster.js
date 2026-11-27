@@ -9,7 +9,7 @@
  *    core.ensureRange(month) (leaves for the "ลา" tags and for generation).
  *    Tables (table-fixed, w-full, break-words; the wrapper may scroll on its own with a sticky date column, the page never
  *    does): Portable = date | สาย 1…L (tech over "ผช. …", working days, a weekday holiday is one muted row); กลางวัน =
- *    date | ER | IPD; ภารกิจ = every calendar day | คนที่ 1 | คนที่ 2 (name + formatted phone + a 44 px tel: button).
+ *    date | ER | IPD; ภารกิจ = working days (R6) | คนที่ 1 | คนที่ 2 (name + formatted phone + a 44 px tel: button).
  *    Today's row is highlighted, my cells carry data-mine, a name with a blocking leave gets a coral "ลา" tag
  *    (PlanEngine.dutyConflicts), deleted staff "(ลบแล้ว)". ของฉัน = agenda of my stored duties of the month.
  *    States: loading (skeleton, data-loading) · not on this device (retry) · offline copy (caption) · no roster · roster
@@ -64,7 +64,32 @@
  *    (proposeDay mode 'fill' → station.applyToDraft); the lunch / mission repair of the stored duty ("เวรของวันนี้ที่ต้อง
  *    แก้", checkbox "บันทึกการแก้เวรพร้อมกัน", default on; the duty patch is set only while วันนี้ is the current screen).
  *  - core.provide('plan.myDay', (date, name) → lines): my line (resolveLines on a saved day, else the planned line), my
- *    lunch duty, my special mission with the partner and phone; stored duties only.
+ *    lunch duty, my special mission with the partner and phone; stored duties only. R6: an approved full-day leave → tone
+ *    'danger' + " — แต่คุณมีวันลา"; a pending full-day request → tone 'warn' + " — มีคำขอลารออนุมัติ".
+ *  - R6 (web 3.5 / Code.gs 3.5, R6-SPEC §4):
+ *    · "หาคนแทน" of a lunch slot picks from PlanEngine.lunchPool (IPD → the IPD, Portable and Supervisor people); the
+ *      ประจำ Station editor says so under IPD; missions are generated on working days only (the ภารกิจ table lists working
+ *      days, a weekday holiday muted, a weekend only for a stored ALGO 1 mission); a generation drops the empty
+ *      weekend / holiday days that have no stored row (nothing to save).
+ *    · Staff edit the daytime duty while core.serverHas('lunchEdit'): in กลางวัน ("แก้ไข" next to the pictures opens the
+ *      list; its ER / IPD cells of stored days with lunch in an editable month open the lunch edit sheet) and "แก้/แลกเวร"
+ *      on my lunch rows in ของฉัน ([data-roster-swap]; the Supervisor's goes to the draft in กลางวัน as a cell tap does).
+ *      The Staff's sheet saves that one day at once: plan.saveLunch({days: [{date, <station>: {tech, assistant, tech2,
+ *      place, place2}, baseVersion}]}) — "กำลังบันทึก…", toast "บันทึกเวรกลางวันแล้ว"; CONFLICT → the server's row in the
+ *      sheet again + "มีคนแก้ไปก่อนแล้ว — โหลดข้อมูลล่าสุดแล้ว ลองอีกครั้ง". Every edit sheet shows "แก้ล่าสุดโดย … · เวลา".
+ *      Without 'lunchEdit' Staff stay read-only.
+ *    · Duty owner alerts: PlanEngine.personDutyClashes of my stored duties from today to the end of next month (that range
+ *      of plan data and leaves is ensured after every getData) → banner 'duty-clash' (วันนี้ / การลา / ตารางเวร; "ไปแก้"
+ *      opens the month in กลางวัน / ภารกิจ with the day ringed, [data-focus]) and the count badge of the bar button;
+ *      core.provide('plan.dutyNotice', (date, staff, type, detail) → [text]) for the leave sheet's warning.
+ *    · R6 review fixes: Staff edit today or later only (past days are the Supervisor's — Code.gs 3.5 refuses them too);
+ *      a (re)generation keeps the stored daytime duty of a day someone else saved last (a Staff swap) and says so in the
+ *      draft banner ([data-roster-draft-kept]), and names the old weekend / holiday missions it will remove
+ *      ([data-roster-draft-cleared]); a saveDuties CONFLICT whose server row differs from the draft's base only in lunch
+ *      is rebased (server lunch + version, the draft's other parts) instead of dropped; mission "หาคนแทน" looks at the
+ *      previous / next WORKING day; the ของฉัน agenda says "— คุณลา (หาคนแทนแล้วกด แก้/แลกเวร)" on a lunch line it can
+ *      fix and " — มีคำขอลารออนุมัติ" for a pending request; the clash list is computed only while today … end of next
+ *      month is held (else the last result stays); "ไปแก้" leads to the first clash the user can fix.
  * Every async flow runs through core.spawn / core.track and re-checks core.alive() after each await.
  * ===================================================================== */
 (function () {
@@ -122,6 +147,12 @@
     dutyConflict: 'ตารางเวรบางวันถูกแก้ไขจากเครื่องอื่น',
     noProposal: 'ยังไม่มีข้อเสนอ — ตั้งคนประจำเดือนในแท็บตารางเวรก่อน'
   };
+  /** R6: the note under the stations whose order drives a rotation (the daytime IPD pool spans three stations). */
+  const ORDER_NOTE = {
+    portable: 'ลำดับนี้ใช้หมุนสาย Portable / เวรกลางวัน',
+    er: 'ลำดับนี้ใช้หมุนสาย Portable / เวรกลางวัน',
+    ipd: 'เวรกลางวัน IPD หมุนคน IPD → Portable → Supervisor ตามลำดับนี้'
+  };
   /** Tag classes (complete recipes from UiKit.cls plus complete colour literals). */
   const LEAVE_TAG_TONE = 'bg-coral-50 border-coral-200 text-coral-700';
 
@@ -141,6 +172,7 @@
     suggest: '',                 // the hint under the edit sheet's picker ("หาคนแทน" result)
     scrollToday: false,          // FIX-RO R-7: scroll today's row into view after the next render of a table
     moved: false,                // FIX-RO R-1: the plan range was widened for another month (restored on hide)
+    focus: '',                   // R6: the date "ไปแก้" of the duty-clash banner points at (ring + scrolled into view)
     list: Object.create(null)    // R4.1: segment → true while its "ดูแบบรายการ" list is open (staff; ของฉัน for everyone)
   };
   const drafts = { roster: Object.create(null), duties: Object.create(null), loaded: Object.create(null) };
@@ -148,6 +180,11 @@
   const repairOn = Object.create(null);   // date → false when the Supervisor unticked "บันทึกการแก้เวรพร้อมกัน"
   const fillNotes = Object.create(null);  // date → notes of the last "เติมเฉพาะช่องว่าง"
   const patchSet = Object.create(null);   // date → the duty patch THIS panel set (a foreign patch is never touched)
+  const BANNER_CLASH = 'duty-clash';      // R6: my lunch duty / mission on a day of my leave (core.banners)
+  const CLASH_LIST_MAX = 5;               // R6: lines listed in that banner ("และอีก N รายการ" after them)
+  const PLAN_MAX_DAYS = 186;              // plan-data's one-range limit (R2-SPEC §0.22)
+  let clashSig = null;                    // R6: what the duty-clash banner shows now (no banners.set when unchanged)
+  let lastClashes = [];                   // R6 fix L3: the last list computed on full data (kept while the range is not held)
 
   /* ---------------------------------------------------------------- small helpers */
   const U = () => core.U;
@@ -177,6 +214,18 @@
     return m >= U().addMonths(now, -2) && m <= U().addMonths(now, 12);
   }
   function canEdit() { return core.isSup() && editableMonth(ui.month); }
+  /** R6: a non-Supervisor may edit the daytime duty (Code.gs 3.5 'lunchEdit'; saved at once with saveLunch, no draft). */
+  function staffLunchEdit() { return !!core && !!core.state.user && !core.isSup() && core.serverHas('lunchEdit'); }
+  /**
+   * R6: the stored daytime duty of `date` is editable by this non-Supervisor (a stored day with lunch, editable month;
+   * R6 fix L4: today or later — past days are the Supervisor's, as Code.gs 3.5 enforces).
+   */
+  function lunchEditable(date) {
+    if (!staffLunchEdit() || !U().isValidYmd(date) || date < today() || !editableMonth(monthOf(date))) return false;
+    const p = P();
+    const d = p ? p.duty(date) : null;
+    return !!d && !!d.lunch;
+  }
   /** "0812345678" → "081-234-5678" (9 digits starting 0: "02-123-4567"); anything else as stored. */
   function phoneText(p) {
     const s = String(p || '').trim();
@@ -205,6 +254,11 @@
   }
   function leaveOf(date, name) { const m = core.leavesOn(date); return m && m[name] ? m[name] : null; }
   function absentOn(date, name) { return !!name && core.isAbsent(leaveOf(date, name)); }
+  /** R6: `name` has a pending full-day leave request on `date`. */
+  function pendingFullOn(date, name) {
+    const l = name ? leaveOf(date, name) : null;
+    return !!l && U().leaveStatus(l) === 'pending' && U().leaveKind(l.type) === 'full';
+  }
   function lunchBlocked(date, name) {
     if (!name) return false;
     const av = PE.availabilityOn(leaveRows(date), date);
@@ -289,6 +343,8 @@
     delete x.baseVersion;
     return x;
   }
+  /** R6: a duty param without lines, lunch, mission, next mission person or note (what the server never stores). */
+  function emptyDuty(x) { return !x.lines && !x.lunch && !(x.mission || []).length && !x.missionNext && !x.note; }
 
   /* ---------------------------------------------------------------- roster (editor model) */
   function emptyStations() { const o = {}; U().STATIONS.forEach(s => { o[s.id] = []; }); return o; }
@@ -377,20 +433,32 @@
     });
     return out;
   }
-  /** A lunch substitute for `date` at station s replacing `who` ('' when nobody is free); never `other` (R4: the slot's other tech). */
+  /**
+   * A lunch substitute for `date` at station s replacing `who` ('' when nobody is free); never `other` (R4: the slot's other
+   * tech). R6: the candidates are the engine's daytime pool (IPD → the IPD, Portable and Supervisor people, in that order).
+   */
   function lunchSubstitute(date, s, who, base, other) {
     const p = P();
-    const r = p.rosterFor(monthOf(date));
-    const techs = r && Array.isArray(r[s]) ? r[s] : [];
+    const techs = PE.lunchPool(p.rosterFor(monthOf(date)) || {}, s);
     if (!techs.length) return '';
     let b = techs.indexOf(base || who);
     if (b < 0) b = Math.max(0, techs.indexOf(who));
     const pick = PE.lunchPick(techs, b, 0, n => n === who || (!!other && n === other) || lunchBlocked(date, n), lunchCounts(date, s));
     return pick.tech || '';
   }
+  /** R6 fix L1: the nearest working day before (step −1) or after (step 1) `date` (missions run on working days only). */
+  function workingDayNear(date, step) {
+    const hol = P().holidays();
+    let d = date;
+    for (let i = 0; i < 31; i++) {
+      d = U().addDays(d, step);
+      if (PE.isWorkingDay(d, hol)) return d;
+    }
+    return U().addDays(date, step);
+  }
   function missionSubstitute(date, names, who) {
     const p = P();
-    const prev = p.duty(U().addDays(date, -1)), next = p.duty(U().addDays(date, 1));
+    const prev = p.duty(workingDayNear(date, -1)), next = p.duty(workingDayNear(date, 1));
     return PE.suggestMissionSubstitute({
       order: p.eligible().map(e => e.name), names, absent: who, isUnavailable: n => absentOn(date, n),
       prevNames: prev ? prev.mission : [], nextNames: next ? next.mission : []
@@ -429,8 +497,10 @@
     if (!duty) return [];
     const out = [];
     const absent = absentOn(date, name);
-    const tail = absent ? ' — แต่คุณมีวันลา' : '';
-    const tone = t => (absent ? 'danger' : t);
+    // R6: a pending full-day request turns the duty lines to the warn tone (approved keeps the danger tone)
+    const pending = !absent && pendingFullOn(date, name);
+    const tail = absent ? ' — แต่คุณมีวันลา' : pending ? ' — มีคำขอลารออนุมัติ' : '';
+    const tone = t => (absent ? 'danger' : pending ? 'warn' : t);
     const lines = sortedLines(duty.lines);
     if (lines.length) {
       const day = core.state.days && core.state.days[date];
@@ -463,6 +533,117 @@
       out.push({ icon: 'phone', tone: tone('lilac'), main: 'ภารกิจพิเศษ' + tail, sub: mate ? 'คู่กับ ' + mate : (date === today() ? 'วันนี้' : 'วันนั้น') + 'มีคุณคนเดียว', tel });
     }
     return out;
+  }
+
+  /* ---------------------------------------------------------------- R6: duty owner alerts (client only) */
+  /** Today … the end of next month: the range the duty-clash banner and badge look at. */
+  function clashRange() { const t = today(); return { from: t, to: rangeOf(U().addMonths(monthOf(t), 1)).to }; }
+  function leaveWord(type) { return type === 'พักร้อน' ? 'ลาพักร้อน' : String(type || 'ลา'); }
+  function dutyWord(x) { return x.kind === 'lunch' ? 'เวรกลางวัน ' + (LUNCH_LABEL[x.station] || x.station) : 'ภารกิจพิเศษ'; }
+  /**
+   * My lunch duties / special missions from today to the end of next month on a day of my approved or pending full-day
+   * leave (lunch also: a doctor visit over 12:00–13:00) — PlanEngine.personDutyClashes on the stored duties.
+   */
+  function myClashes(c) {
+    const p = P();
+    const me = c && c.myName();
+    if (!p || !c.state.user || !c.serverHas('plan') || !me) { lastClashes = []; return []; }
+    const r = clashRange();
+    // R6 fix L3: only while this device holds the plan data and the leaves of the whole range — browsing far from today
+    // keeps the last result (never a vanishing or a made-up "nothing clashes")
+    const known = d => { const v = c.dayView(d); return v === 'ready' || v === 'cached'; };
+    if (!p.covers(r.from, r.to) || !known(r.from) || !known(r.to)) return lastClashes;
+    lastClashes = computeClashes(p, me, r);
+    return lastClashes;
+  }
+  function computeClashes(p, me, r) {
+    const duties = Object.assign({}, p.duties(monthOf(r.from)), p.duties(monthOf(r.to)));
+    try {
+      return PE.personDutyClashes({ duties, leaves: p.leaves(r.from, r.to), name: me, from: r.from, to: r.to, lunchWindow: PE.DEFAULT_LUNCH_WINDOW });
+    } catch (e) { console.error('[roster] personDutyClashes failed:', e); return []; }
+  }
+  /** The banner 'duty-clash' (วันนี้ / การลา / ตารางเวร) follows the list; it goes away by itself once nothing clashes. */
+  function syncClashes(c) {
+    const list = myClashes(c);
+    const sig = JSON.stringify(list);
+    if (sig !== clashSig) {
+      clashSig = sig;
+      let def = null;
+      if (list.length) {
+        const lines = list.slice(0, CLASH_LIST_MAX).map(x => dayShort(x.date) + ' · ' + dutyWord(x) + ' · ' + leaveWord(x.leaveType) + (x.pending ? ' (รออนุมัติ)' : ''));
+        if (list.length > CLASH_LIST_MAX) lines.push('และอีก ' + (list.length - CLASH_LIST_MAX) + ' รายการ');
+        // R6 fix I2: "ไปแก้" leads to the first clash this user can fix; "ดูตารางเวร" when there is none
+        const fixable = list.some(x => canFixClash(c, x));
+        def = {
+          text: 'คุณมีเวร ' + list.length + ' รายการตรงกับวันลา\n' + lines.join('\n'),
+          tone: 'warn', icon: 'alert-triangle', order: 15, screens: ['station', 'leave', ID],
+          actionLabel: fixable ? 'ไปแก้' : 'ดูตารางเวร',
+          action: cc => {
+            const now = myClashes(cc);
+            const x = now.filter(y => canFixClash(cc, y))[0] || now[0];
+            if (x) goFix(cc, x);
+          }
+        };
+      }
+      c.banners.set(BANNER_CLASH, def);
+    }
+    return list.length;
+  }
+  /** R6 fix I2: the Supervisor fixes any clash of an editable month; Staff a lunch duty they may edit (today or later). */
+  function canFixClash(c, x) {
+    if (c.isSup()) return editableMonth(monthOf(x.date));
+    return x.kind === 'lunch' && lunchEditable(x.date);
+  }
+  /** "ไปแก้": ตารางเวร of that month, segment กลางวัน (a mission → ภารกิจ), the day ringed and scrolled into view. */
+  function goFix(c, x) {
+    const m = monthOf(x.date), seg = x.kind === 'mission' ? 'mission' : 'lunch';
+    if (!c.isSup()) ui.list[seg] = true;   // the day list (behind "ดูแบบรายการ" for everyone but the Supervisor)
+    ui.focus = x.date;
+    if (c.current() === ID) {
+      ui.seg = seg;
+      if (m !== ui.month) setMonth(c, m); else { ui.scrollToday = true; c.render(); }
+      return;
+    }
+    c.go(ID, { month: m, seg, date: x.date });
+  }
+  /**
+   * Plan data and leaves of today … the end of next month on this device (besides the selected date's range): the plan
+   * range is widened only while it stays one range of ≤ 186 days (plan-data's limit — never a reset of what วันนี้ shows).
+   */
+  function ensureClashRange(c) {
+    const p = P();
+    if (!p || !c.state.session || !c.state.user || !c.serverHas('plan')) return;
+    const r = clashRange();
+    if (c.dayView(r.from) === 'missing' || c.dayView(r.to) === 'missing') c.spawn(() => c.ensureRange(r.from, r.to), { quiet: true });
+    if (p.covers(r.from, r.to) || p.loading()) return;
+    const have = p.range();
+    const f = have && have.from < r.from ? have.from : r.from, t = have && have.to > r.to ? have.to : r.to;
+    if (!have || U().daysBetweenInclusive(f, t) <= PLAN_MAX_DAYS) c.spawn(() => p.ensure(r.from, r.to), { quiet: true });
+  }
+  /**
+   * The leave sheet's warning (core's use('plan.dutyNotice')): [text] when the picked leave of `staff` on `date` would leave
+   * their lunch duty (a full-day type, or a doctor visit over 12:00–13:00) or special mission (a full-day type) uncovered.
+   */
+  function dutyNotice(date, staff, type, detail) {
+    const p = P();
+    if (!core || !p || !core.serverHas('plan') || !U().isValidYmd(date) || !staff || !type) return [];
+    if (U().isPartialType(type) && !U().parseTimeRange(detail)) return [];   // a doctor visit counts once its time is picked
+    const duty = p.duty(date);
+    if (!duty) return [];
+    let list = [];
+    try {
+      list = PE.personDutyClashes({ duties: [duty], leaves: [{ date, staff, type, detail: detail || '', status: 'approved' }], name: staff, lunchWindow: PE.DEFAULT_LUNCH_WINDOW });
+    } catch (e) { return []; }
+    const self = staff === core.myName();
+    const sup = core.isSup();
+    const subj = self ? 'วันนั้นคุณ' : 'วันนั้น ' + staff + ' ';
+    return list.map(x => {
+      if (x.kind === 'lunch') {
+        return subj + 'มีเวรกลางวัน ' + (LUNCH_LABEL[x.station] || x.station) + ' — ' +
+          (sup || core.serverHas('lunchEdit') ? 'หาคนแทนแล้วแก้ในตารางเวร → กลางวัน ได้เลย' : 'หาคนแทนแล้วแจ้ง Supervisor');
+      }
+      return subj + 'มีภารกิจพิเศษ — ' + (sup ? 'หาคนแทนแล้วแก้ในตารางเวร → ภารกิจ ได้เลย' : 'แจ้ง Supervisor ให้หาคนแทน');
+    });
   }
 
   /* ---------------------------------------------------------------- screen: frame */
@@ -525,6 +706,14 @@
   /** FIX-RO R-7: the tables (and the agenda) open at today's row in the current month — once per month / segment entry. */
   function scrollToToday(el, c) {
     if (!ui.scrollToday || c.current() !== ID) return;
+    // R6: a day picked by the duty-clash banner ("ไปแก้") wins over today
+    if (ui.focus && monthOf(ui.focus) === ui.month) {
+      const fr = el.querySelector('[data-roster-table] tr[data-focus]');
+      if (!fr) { if (el.querySelector('[data-roster-table]')) ui.scrollToday = false; return; }
+      ui.scrollToday = false;
+      if (typeof fr.scrollIntoView === 'function') { try { fr.scrollIntoView({ block: 'center' }); } catch (e) { fr.scrollIntoView(); } }
+      return;
+    }
     if (ui.month !== monthOf(today())) { ui.scrollToday = false; return; }
     if (!el.querySelector('[data-roster-table], [data-roster-agenda]')) return;   // no table yet (loading / empty): later
     ui.scrollToday = false;
@@ -587,13 +776,15 @@
     const d = dutyDraft(m);
     if (d) {
       const dates = Object.keys(d.days);
-      const hol = P().holidays();
-      // FIX-RO R-7: the count matches what the tables show — say so when holiday/weekend missions are part of it
-      const offDays = dates.filter(x => !PE.isWorkingDay(x, hol)).length;
       const groups = warnGroups(Array.isArray(d.warnings) ? d.warnings : []);
+      const inDraft = list => (Array.isArray(list) ? list : []).filter(x => hasOwn.call(d.days, x)).length;
+      const keptN = inDraft(d.kept), clearedN = inDraft(d.cleared);
       html += `<div class="${k.banner} ${k.bannerWarn}" data-roster-banner="draft">${icon('pencil', 'w-5 h-5 shrink-0 mt-0.5')}` +
-        `<div class="min-w-0 flex-1"><p class="font-medium">ร่างตารางเวร — ยังไม่ได้บันทึก (${dates.length} วัน${offDays ? ' รวมภารกิจวันหยุด' : ''})</p>` +
+        `<div class="min-w-0 flex-1"><p class="font-medium">ร่างตารางเวร — ยังไม่ได้บันทึก (${dates.length} วัน)</p>` +
         `<p class="${k.textMeta}">ทุกคนจะเห็นเมื่อกดบันทึกที่แถบด้านล่าง</p>` +
+        // R6 fix M1 / L5: what the generation kept (Staff lunch swaps) and what it will remove (old weekend missions)
+        (keptN ? `<p data-roster-draft-kept="${keptN}">${esc('คงเวรกลางวันที่ Staff แก้ไว้ ' + keptN + ' วัน — แก้เองในตารางได้')}</p>` : '') +
+        (clearedN ? `<p data-roster-draft-cleared="${clearedN}">${esc('จะลบภารกิจวันหยุดที่เคยบันทึกไว้ ' + clearedN + ' วัน')}</p>` : '') +
         (groups.length ? `<details class="group mt-1" data-roster-warnings><summary class="flex items-center gap-2 min-h-[44px] cursor-pointer select-none list-none">` +
           `<span class="flex-1">ข้อควรตรวจ ${groups.length} เรื่อง</span>${icon('chevron-down', k.disclosureChevron)}</summary>` +
           `<ul class="list-disc pl-5 space-y-1">${groups.map(t => `<li>${esc(t)}</li>`).join('')}</ul></details>` : '') +
@@ -706,9 +897,28 @@
     if (sup) {
       html += table();
       if (canEdit()) html += `<p class="${k.textMeta} px-1">แตะช่องในตารางเพื่อแก้ไข — การแก้ไขเป็นร่างจนกว่าจะกดบันทึก</p>`;
-    } else html += listToggleHtml(ui.seg, table);
+    } else {
+      if (ui.seg === 'lunch') html += staffLunchHintHtml();
+      html += listToggleHtml(ui.seg, table);
+    }
     html += exportsHtml(c);
     return html;
+  }
+  /**
+   * R6: the Staff's way into editing the daytime duty next to the pictures — "แก้ไข" opens the list (whose ER / IPD cells
+   * open the edit sheet); '' when nothing of the month is editable.
+   */
+  function staffLunchHintHtml() {
+    const p = P();
+    const m = ui.month;
+    if (!staffLunchEdit() || !editableMonth(m) || !p) return '';
+    const ds = p.duties(m);
+    if (!Object.keys(ds).some(d => ds[d] && ds[d].lunch)) return '';
+    const k = K();
+    const open = !!ui.list.lunch;
+    return `<div class="flex flex-wrap items-center gap-2 px-1" data-roster-lunch-edit>` +
+      `<p class="flex-1 min-w-0 ${k.textMeta}">${esc(open ? 'แตะช่อง ER / IPD ในรายการเพื่อแก้ไข — บันทึกทันทีเมื่อกดบันทึก' : 'หาคนแทนหรือแลกเวรกลางวันกันเองได้')}</p>` +
+      (open ? '' : `<button type="button" class="${k.btn} ${k.btnTonal} ${k.btnCompact} shrink-0" data-roster-act="lunch-edit">${icon('pencil', 'w-4 h-4')}แก้ไข</button>`) + '</div>';
   }
   /** FIX-RO R-7: where assistants and the mission list are set (a link to เมนู → ตั้งค่าการจัดเวร). */
   function settingsHint() {
@@ -785,7 +995,9 @@
     const tone = wd === 0 || wd === 6 ? 'text-coral-700' : 'text-ink-800';   // R-7: Saturday like Sunday
     // R-7: today stays visible in a draft (whose cells are tinted): an accent edge and the word วันนี้
     const mark = isToday ? ' border-l-4 border-accent-400' : '';
-    return `<tr class="border-t border-brand-100 ${bg}" data-date="${esc(date)}"${isToday ? ' data-today="1"' : ''}>` +
+    // R6: the day the duty-clash banner pointed at ("ไปแก้") carries a sun ring
+    const focus = !!ui.focus && date === ui.focus;
+    return `<tr class="border-t border-brand-100 ${bg}${focus ? ' ring-2 ring-inset ring-sun-300' : ''}" data-date="${esc(date)}"${isToday ? ' data-today="1"' : ''}${focus ? ' data-focus="1"' : ''}>` +
       `<th scope="row" class="${bg}${mark} px-1.5 py-1.5 align-top text-left font-display text-sm font-medium leading-5 tabular-nums ${tone}">${esc(dateCellLabel(date))}` +
       (isToday ? '<span class="block text-xs font-medium leading-4 text-accent-700">วันนี้</span>' : '') + `${extra || ''}</th>`;
   }
@@ -876,7 +1088,7 @@
         const at = (n, pl) => nameLabel(n, act) + (pl ? ' (' + pl + ')' : '');
         const lv = n => (n && conf.has(date + '|lunch|' + s + '|' + n) ? (leaveOf(date, n) || {}).type || 'ลา' : '');
         tr += cellHtml({
-          date, cell: 'lunch:' + s, editable: edit && sup && !!duty,
+          date, cell: 'lunch:' + s, editable: (edit && sup && !!duty) || (!sup && lunchEditable(date)),   // R6: Staff too
           label: 'แก้ไข เวรกลางวัน ' + LUNCH_LABEL[s] + ' · ' + dayShort(date),
           main: tech ? at(tech, slot.place) : '', cover, sub: slot && slot.assistant ? 'ผช. ' + slot.assistant : '',
           second: tech2 ? at(tech2, slot.place2) : '', secondMine: !!tech2 && tech2 === me, secondLeave: lv(tech2),
@@ -896,10 +1108,19 @@
     const dd = draftDays(m);
     const conf = new Set(conflictsOf(m, sup).map(conflictKey));
     const edit = canEdit();
+    const hol = P().holidays();
     const rows = [];
     U().eachDate(r.from, r.to).forEach(date => {
       const duty = viewDuty(date, sup);
       const names = duty ? duty.mission || [] : [];
+      // R6: missions run on working days only — a weekend row only for a stored (ALGO 1) mission, a weekday holiday is muted
+      if (!names.length && !PE.isWorkingDay(date, hol)) {
+        const wd = weekday(date);
+        if (wd === 0 || wd === 6) return;
+        const holName = hol.get(date) || '';
+        rows.push(rowStart(date) + `<td colspan="2" class="px-2 py-2 text-[0.8125rem] leading-5 text-slate-500" data-holiday="1">${esc('วันหยุด' + (holName ? ' · ' + holName : ''))}</td></tr>`);
+        return;
+      }
       let tr = rowStart(date);
       for (let i = 0; i < 2; i++) {
         const n = names[i] || '';
@@ -949,27 +1170,36 @@
           if (i >= 0) { l = ls[i]; if (l.tech && l.tech !== me) sub = ' (แทน ' + l.tech + ')'; }
         } else l = ls.filter(x => x.tech === me)[0] || null;
       }
-      if (l) lines.push('Portable สาย ' + l.line + sub + (l.assistant ? ' · ผช. ' + l.assistant : ''));
+      if (l) lines.push({ t: 'Portable สาย ' + l.line + sub + (l.assistant ? ' · ผช. ' + l.assistant : '') });
+      // R6: "แก้/แลกเวร" on my lunch duty — the Staff's edit saves at once (saveLunch), the Supervisor's goes to the draft
+      const swap = c.isSup() ? canEdit() : lunchEditable(date);
       if (duty.lunch) LUNCH.forEach(s => {
         const sl = duty.lunch[s];
         if (!sl || !me || (sl.tech !== me && sl.tech2 !== me)) return;
         const place = sl.tech === me ? sl.place : sl.place2;   // R4: tech2 too
-        lines.push('เวรกลางวัน ' + LUNCH_LABEL[s] + (place ? ' (' + place + ')' : '') + (sl.assistant ? ' · ผช. ' + sl.assistant : ''));
+        lines.push({ t: 'เวรกลางวัน ' + LUNCH_LABEL[s] + (place ? ' (' + place + ')' : '') + (sl.assistant ? ' · ผช. ' + sl.assistant : ''), swap: swap ? 'lunch:' + s : '', lunch: true });
       });
       if ((duty.mission || []).indexOf(me) >= 0) {
         const mate = duty.mission.filter(n => n && n !== me)[0];
         const ph = mate ? phoneText(phoneOf(mate)) : '';
-        lines.push('ภารกิจพิเศษ' + (mate ? ' คู่กับ ' + mate + (ph ? ' · โทร ' + ph : '') : ''));
+        lines.push({ t: 'ภารกิจพิเศษ' + (mate ? ' คู่กับ ' + mate + (ph ? ' · โทร ' + ph : '') : '') });
       }
       if (!lines.length) return;
       // R-6: a day with my blocking leave says so on every duty line
       const away = absentOn(date, me);
+      // R6 fix L2: a pending full-day request is said too; on a 'lunchEdit' server my lunch line points at "แก้/แลกเวร"
+      const pend = !away && pendingFullOn(date, me);
+      const tailOf = x => (away ? (x.lunch && x.swap && c.serverHas('lunchEdit') ? ' — คุณลา (หาคนแทนแล้วกด แก้/แลกเวร)' : ' — คุณลา (Supervisor จะหาคนแทน)')
+        : pend ? ' — มีคำขอลารออนุมัติ' : '');
       const isToday = date === today();
       const d = U().parseYmd(date);
       const label = U().THAI_WEEKDAYS_ABBR[d.getDay()] + ' ' + d.getDate();   // the month is in the header: never wraps
-      items.push(`<li class="flex items-start gap-3 px-4 py-3${isToday ? ' bg-accent-50' : ''}" data-roster-mine="${esc(date)}"${isToday ? ' data-today="1"' : ''}${away ? ' data-leave="1"' : ''}>` +
+      const swapBtn = cell => `<button type="button" class="${k.btn} ${k.btnSecondary} ${k.btnCompact} mt-1" data-roster-edit data-roster-swap data-date="${esc(date)}" data-cell="${esc(cell)}" ` +
+        `aria-label="${esc('แก้/แลกเวร ' + editTitle(date, 'lunch', cell.slice(6)).replace(/^แก้ไข /, ''))}">${icon('pencil', 'w-4 h-4')}แก้/แลกเวร</button>`;
+      items.push(`<li class="flex items-start gap-3 px-4 py-3${isToday ? ' bg-accent-50' : ''}" data-roster-mine="${esc(date)}"${isToday ? ' data-today="1"' : ''}${away ? ' data-leave="1"' : ''}${pend ? ' data-pending="1"' : ''}>` +
         `<span class="w-14 shrink-0 whitespace-nowrap font-display text-sm font-medium leading-6 tabular-nums text-ink-800">${esc(label)}</span>` +
-        `<div class="min-w-0 flex-1 space-y-0.5">${lines.map(t => `<p class="text-sm leading-6 ${away ? 'text-coral-700' : 'text-ink-900'} ${k.wrapAnywhere}">${esc(t + (away ? ' — คุณลา (Supervisor จะหาคนแทน)' : ''))}</p>`).join('')}</div></li>`);
+        `<div class="min-w-0 flex-1 space-y-0.5">${lines.map(x => `<p class="text-sm leading-6 ${away ? 'text-coral-700' : pend ? 'text-amber-800' : 'text-ink-900'} ${k.wrapAnywhere}">${esc(x.t + tailOf(x))}</p>` +
+          (x.swap ? swapBtn(x.swap) : '')).join('')}</div></li>`);
     });
     const st = myStationText(m, me);
     const head = ro ? `<p class="px-1 text-sm font-medium leading-6 text-ink-900" data-roster-mystation>${esc(st ? 'เดือนนี้คุณประจำ: ' + st : 'เดือนนี้คุณยังไม่มี Station ประจำ')}</p>` : '';
@@ -1068,7 +1298,7 @@
       return `<section class="${k.stationCard}" data-roster-station="${st.id}"><span class="${k.stationEdge}" style="background:${st.border}" aria-hidden="true"></span>` +
         `<div class="flex flex-wrap items-center gap-x-2 gap-y-1"><span class="${k.stationChip}" style="background:${st.bg};color:${st.text}">${esc(st.name)}</span>` +
         `<span class="${k.stationNeed}" data-roster-need>${names.length} คน · ต้องการ ${core.state.stationCounts[st.id] || 0}</span></div>` +
-        (st.id === 'portable' || st.id === 'er' || st.id === 'ipd' ? `<p class="${k.textMeta} mt-1">ลำดับนี้ใช้หมุนสาย Portable / เวรกลางวัน</p>` : '') +
+        (ORDER_NOTE[st.id] ? `<p class="${k.textMeta} mt-1" data-roster-order-note="${st.id}">${esc(ORDER_NOTE[st.id])}</p>` : '') +
         `<div class="mt-1 divide-y divide-brand-50">${rows || `<p class="py-2 ${k.textMeta}">ยังไม่มีคนประจำ</p>`}</div>${avoidHtml}${add}${lunch}</section>`;
     }).join('');
     html += c.isSup() ? cards() : listToggleHtml('roster', cards);
@@ -1220,12 +1450,24 @@
       // a first generation that starts after the 1st leaves the earlier days without a duty: that is expected, no warning
       const first = !Object.keys(stored).length;
       const warnings = (res.warnings || []).filter(w => !(first && w && w.code === 'MISSING_STORED_DAY'));
-      const draft = { days: {}, base: {}, monthPlan: { month: m, config: res.config, tail: res.tail }, warnings, from: f, generated: true };
+      const draft = { days: {}, base: {}, monthPlan: { month: m, config: res.config, tail: res.tail }, warnings, from: f, generated: true, kept: [], cleared: [] };
+      const me = c.myName();
+      const hol = p.holidays();
       Object.keys(res.days).forEach(d => {
         if (d < f || !res.days[d]) return;
         const old = stored[d] || null;
         const x = plainDuty(res.days[d]);
         x.note = old ? old.note || '' : '';
+        // R6: a weekend / holiday is an empty day (no lines, lunch or mission) — nothing to save unless a stored row holds
+        // something (an ALGO 1 weekend mission), which the empty day then clears
+        if (emptyDuty(x) && (!old || emptyDuty(plainDuty(old)))) return;
+        // R6 fix L5: say so when the empty day removes a stored weekend / holiday mission
+        if (old && (old.mission || []).length && !x.mission.length && !PE.isWorkingDay(d, hol)) draft.cleared.push(d);
+        // R6 fix M1: a daytime duty someone else saved (a Staff swap, saveLunch) is kept — the Supervisor may still edit it
+        if (old && old.lunch && x.lunch && old.updatedBy && old.updatedBy !== me) {
+          const kept = plainDuty(old).lunch;
+          if (!same(kept, x.lunch)) { x.lunch = kept; draft.kept.push(d); }
+        }
         draft.days[d] = x;
         draft.base[d] = old ? old.version | 0 : 0;
       });
@@ -1248,6 +1490,9 @@
     const params = { days: dates.map(x => toDutyParam(d.days[x], d.base[x])) };
     if (d.monthPlan && p.roster(m)) params.monthPlan = clone(d.monthPlan);
     const alive = c.alive();
+    // R6 fix M1: the stored rows the draft was based on (to tell a lunch-only change on the server from any other)
+    const before = Object.create(null);
+    dates.forEach(x => { before[x] = p.duty(x); });
     ui.busy = 'duties';
     c.render();
     try {
@@ -1257,18 +1502,42 @@
       } catch (e) {
         if (!alive() || !e || e.code !== 'CONFLICT') throw e;
         // the server's current rows of those dates are applied by plan-data; the rest of the draft stays
-        const bad = (e.details && Array.isArray(e.details.dates) ? e.details.dates : []).filter(x => U().isValidYmd(x));
+        const all = (e.details && Array.isArray(e.details.dates) ? e.details.dates : []).filter(x => U().isValidYmd(x));
+        const srv = Object.create(null);
+        (e.details && Array.isArray(e.details.duties) ? e.details.duties : []).forEach(x => { if (x && U().isValidYmd(x.date)) srv[x.date] = x; });
+        // R6 fix M1: a day whose server row differs from the draft's base only in lunch (a Staff swap) is rebased — the
+        // server's lunch and version, the draft's lines / mission / note — instead of being dropped
+        const lunchOnly = x => {
+          const b = before[x], s = srv[x];
+          if (!b || !s || (b.version | 0) !== (d.base[x] | 0)) return false;
+          const strip = v => { const o = plainDuty(v); delete o.lunch; return o; };
+          return same(strip(b), strip(s));
+        };
+        const rebased = all.filter(lunchOnly);
+        const bad = all.filter(x => rebased.indexOf(x) < 0);
         const cur = dutyDraft(m);
         if (cur) {
           const next = clone(cur);
+          rebased.forEach(x => {
+            if (!next.days[x]) return;
+            next.days[x].lunch = plainDuty(srv[x]).lunch;
+            next.base[x] = srv[x].version | 0;
+            next.kept = (Array.isArray(next.kept) ? next.kept : []).filter(y => y !== x).concat([x]);
+          });
           bad.forEach(x => { delete next.days[x]; delete next.base[x]; });
           // FIX-RO R-4: the month plan (tail, config) was computed with the dropped days — it is not sent for a partial set
-          if (next.monthPlan) { next.monthPlan = null; next.planDropped = bad.slice().sort()[0] || ''; }
+          if (next.monthPlan && bad.length) { next.monthPlan = null; next.planDropped = bad.slice().sort()[0] || ''; }
           setDutyDraft(m, next);
         }
-        c.toast('⚠️ ' + MSG.dutyConflict + (bad.length ? ' (' + bad.map(x => U().thaiDateShort(x, { year: false })).join(', ') + ')' : '') +
-          ' — แสดงข้อมูลล่าสุดของวันเหล่านั้นแล้ว ส่วนอื่นของร่างยังอยู่ ตรวจแล้วกดบันทึกอีกครั้ง' +
-          (cur && cur.monthPlan && bad.length ? '\nแผนของเดือน (ต่อไปยังเดือนหน้า) จะไม่ถูกบันทึกกับร่างนี้ — สร้างใหม่ตั้งแต่วันที่ ' + U().thaiDateShort(bad.slice().sort()[0], { year: false }) + ' เพื่อบันทึกแผน' : ''), 0, { error: true });
+        const days = list => ' (' + list.map(x => U().thaiDateShort(x, { year: false })).join(', ') + ')';
+        const msgs = [];
+        if (rebased.length) msgs.push('⚠️ เวรกลางวันบางวันถูกแก้จากเครื่องอื่น' + days(rebased) + ' — ใช้เวรกลางวันล่าสุดของวันนั้นในร่างแล้ว ส่วนอื่นของร่างยังอยู่ ตรวจแล้วกดบันทึกอีกครั้ง');
+        if (bad.length || !rebased.length) {
+          msgs.push('⚠️ ' + MSG.dutyConflict + (bad.length ? days(bad) : '') +
+            ' — แสดงข้อมูลล่าสุดของวันเหล่านั้นแล้ว ส่วนอื่นของร่างยังอยู่ ตรวจแล้วกดบันทึกอีกครั้ง' +
+            (cur && cur.monthPlan && bad.length ? '\nแผนของเดือน (ต่อไปยังเดือนหน้า) จะไม่ถูกบันทึกกับร่างนี้ — สร้างใหม่ตั้งแต่วันที่ ' + U().thaiDateShort(bad.slice().sort()[0], { year: false }) + ' เพื่อบันทึกแผน' : ''));
+        }
+        c.toast(msgs.join('\n'), 0, { error: true });
         return;
       }
       if (!alive()) return;
@@ -1369,14 +1638,17 @@
   }
   function openEdit(c, date, cell) {
     const pc = parseCell(cell);
-    if (!pc || !canEdit() || monthOf(date) !== ui.month) return;
+    if (!pc || monthOf(date) !== ui.month) return;
+    // R6: a non-Supervisor edits the stored daytime duty directly (one day, saveLunch); everything else is the draft
+    const direct = !c.isSup() && pc.kind === 'lunch' && LUNCH.indexOf(pc.key) >= 0 && lunchEditable(date);
+    if (!direct && !canEdit()) return;
     const duty = viewDuty(date, true);
     if (!duty) return;
     const k = K();
     const act = activeSet();
     const cur = currentOf(duty, pc.kind, pc.key);
     const staffNames = core.staff().map(s => s.name);
-    let body = '';
+    let body = lastEditHtml(date);
     if (cur.tech && absentOn(date, cur.tech)) {
       body += `<p class="${k.banner} ${k.bannerDanger}" data-roster-edit-leave>${icon('calendar-off', 'w-5 h-5 shrink-0 mt-0.5')}<span>${esc(cur.tech + ' ลา (' + (leaveOf(date, cur.tech) || {}).type + ') ' + whenText(date))}</span></p>`;
     }
@@ -1399,11 +1671,70 @@
       body += `<div class="flex flex-wrap items-center gap-2"><button type="button" class="${k.btn} ${k.btnTonal}" data-roster-suggest>${icon('search', 'w-5 h-5')}หาคนแทน</button>` +
         `<p class="${k.textMeta} min-w-0 flex-1" data-roster-suggest-text aria-live="polite"></p></div>`;
     }
-    ui.sheet = { kind: 'edit', date, cell, key: pc.key, type: pc.kind };
+    if (direct) body += `<p class="${k.textMeta}" data-roster-edit-direct>กดบันทึกแล้วทุกคนเห็นทันที</p>`;
+    ui.sheet = { kind: 'edit', date, cell, key: pc.key, type: pc.kind, direct };
     ui.suggest = '';
     openSheet('edit', editTitle(date, pc.kind, pc.key), body,
       `<button type="button" class="${k.btn} ${k.btnSecondary} flex-1" data-sheet-close>ยกเลิก</button>` +
-      `<button type="button" class="${k.btn} ${k.btnPrimary} flex-1" data-roster-edit-ok>ตกลง</button>`);
+      `<button type="button" class="${k.btn} ${k.btnPrimary} flex-1" data-roster-edit-ok>${direct ? 'บันทึก' : 'ตกลง'}</button>`);
+    syncSheetBusy();
+  }
+  /** R6: "แก้ล่าสุดโดย <name> · <time>" of the stored duty of `date` ('' when the server did not say). */
+  function lastEditHtml(date) {
+    const p = P();
+    const d = p ? p.duty(date) : null;
+    if (!d || !d.updatedBy) return '';
+    const at = U().thaiStampShort(d.updatedAt);
+    return `<p class="${K().textMeta}" data-roster-edit-meta>${esc('แก้ล่าสุดโดย ' + d.updatedBy + (at ? ' · ' + at : ''))}</p>`;
+  }
+  /** R6: the edit sheet's "บันทึก" follows a direct save in flight (busy, disabled). */
+  function syncSheetBusy() {
+    if (!sheetEl || !ui.sheet || ui.sheet.kind !== 'edit' || !ui.sheet.direct) return;
+    const b = sheetEl.querySelector('[data-roster-edit-ok]');
+    if (!b) return;
+    const busy = ui.busy === 'lunch';
+    b.disabled = busy;
+    if (busy) b.setAttribute('aria-busy', 'true'); else b.removeAttribute('aria-busy');
+    b.textContent = busy ? 'กำลังบันทึก…' : 'บันทึก';
+  }
+  /**
+   * R6: the Staff's direct save of one day's daytime duty (saveLunch, Code.gs 3.5): only the edited station, the slot's
+   * five keys (the server keeps `base`), baseVersion = the stored version. A CONFLICT shows the server's row (plan-data
+   * applied it) in the sheet again with "มีคนแก้ไปก่อนแล้ว…"; other refusals go to core's error message (the sheet stays).
+   */
+  async function saveLunchDirect(c, date, st, slot) {
+    const p = P();
+    if (ui.busy === 'lunch') return;
+    const stored = p ? p.duty(date) : null;
+    if (!stored || !stored.lunch) { closeSheet(); c.toast('⚠️ วันนี้ยังไม่มีตารางเวรกลางวัน'); c.render(); return; }
+    const keys = s => ({ tech: (s && s.tech) || '', assistant: (s && s.assistant) || '', tech2: (s && s.tech2) || '', place: (s && s.place) || '', place2: (s && s.tech2 && s.place2) || '' });
+    const send = keys(slot);
+    if (same(send, keys(stored.lunch[st]))) { closeSheet(); c.toast('ไม่มีการเปลี่ยนแปลง'); c.render(); return; }
+    if (!c.requireInternet()) return;
+    const alive = c.alive();
+    ui.busy = 'lunch';
+    syncSheetBusy();
+    try {
+      const day = { date, baseVersion: stored.version | 0 };
+      day[st] = send;
+      try {
+        await p.saveLunch({ days: [day] });
+      } catch (e) {
+        if (!alive() || !e || e.code !== 'CONFLICT') throw e;
+        ui.busy = '';
+        c.toast('⚠️ มีคนแก้ไปก่อนแล้ว — โหลดข้อมูลล่าสุดแล้ว ลองอีกครั้ง', 0, { error: true });
+        const s = ui.sheet;
+        if (s && s.kind === 'edit' && s.date === date && lunchEditable(date)) openEdit(c, date, 'lunch:' + st);
+        else closeSheet();
+        return;
+      }
+      if (!alive()) return;
+      closeSheet();
+      c.toast('✅ บันทึกเวรกลางวันแล้ว');
+    } finally {
+      if (ui.busy === 'lunch') ui.busy = '';
+      if (alive()) { syncSheetBusy(); c.render(); }
+    }
   }
   /** R4: "จุด" of เทค 1, the picker "เทคคนที่ 2" (the tech's candidates, never the chosen tech) and its "จุด". */
   function lunch2Html(date, cur, staffNames, act) {
@@ -1444,7 +1775,7 @@
   }
   function applyEdit(c) {
     const s = ui.sheet;
-    if (!s || s.kind !== 'edit') return;
+    if (!s || s.kind !== 'edit' || ui.busy === 'lunch') return;
     const m = monthOf(s.date);
     const techSel = sheetEl.querySelector('[data-roster-edit-tech]');
     const asstSel = sheetEl.querySelector('[data-roster-edit-asst]');
@@ -1470,6 +1801,7 @@
       if (tech2 && tech2 === tech) tech2 = '';
       if (!tech2) place2 = '';
       day.lunch[s.key] = { tech, assistant: asst, base: old.base || tech, tech2, place, place2 };
+      if (s.direct) { c.spawn(() => saveLunchDirect(c, s.date, s.key, day.lunch[s.key]), { write: true }); return; }
     } else {
       const i = +s.key;
       const list = [(day.mission || [])[0] || '', (day.mission || [])[1] || ''];
@@ -2040,15 +2372,20 @@
     const t = e.target && e.target.closest ? e.target : null;
     if (!t || !c || !root) return;
     const mn = t.closest('[data-roster-month]');
-    if (mn) { setMonth(c, U().addMonths(ui.month, +mn.dataset.rosterMonth)); return; }
+    if (mn) { ui.focus = ''; setMonth(c, U().addMonths(ui.month, +mn.dataset.rosterMonth)); return; }
     const sg = t.closest('[data-roster-seg]');
-    if (sg) { ui.seg = sg.dataset.rosterSeg; ui.showConflicts = false; ui.scrollToday = true; c.render(); return; }
+    if (sg) { ui.seg = sg.dataset.rosterSeg; ui.focus = ''; ui.showConflicts = false; ui.scrollToday = true; c.render(); return; }
     const ed = t.closest('[data-roster-edit]');
     if (ed && !ed.disabled) {
       const pc = parseCell(ed.dataset.cell);
-      if (pc && ui.seg !== 'portable' && pc.kind === 'line') ui.seg = 'portable';
-      if (pc && pc.kind === 'lunch' && ui.seg !== 'lunch') ui.seg = 'lunch';
-      if (pc && pc.kind === 'mission' && ui.seg !== 'mission') ui.seg = 'mission';
+      // R6: the Staff's "แก้/แลกเวร" in ของฉัน saves directly — they stay where they are; the Supervisor's goes to the draft,
+      // shown in its segment
+      const stay = ed.hasAttribute('data-roster-swap') && !c.isSup();
+      if (!stay) {
+        if (pc && ui.seg !== 'portable' && pc.kind === 'line') ui.seg = 'portable';
+        if (pc && pc.kind === 'lunch' && ui.seg !== 'lunch') ui.seg = 'lunch';
+        if (pc && pc.kind === 'mission' && ui.seg !== 'mission') ui.seg = 'mission';
+      }
       openEdit(c, ed.dataset.date, ed.dataset.cell);
       c.render();
       return;
@@ -2065,6 +2402,7 @@
     if (!a || a.disabled) return;
     const act = a.dataset.rosterAct;
     if (act === 'list') { const sg = a.dataset.listSeg; ui.list[sg] = !ui.list[sg]; c.render(); return; }
+    if (act === 'lunch-edit') { ui.list.lunch = true; ui.scrollToday = true; c.render(); return; }   // R6 (Staff)
     if (act === 'retry') { ensureMonth(c); return; }
     if (act === 'go-roster') { ui.seg = 'roster'; c.render(); return; }
     if (act === 'gen-open') { openGen(c); return; }
@@ -2264,13 +2602,20 @@
     icon: 'table',
     nav: { place: 'bar', order: 25 },
     visible: c => c.serverHas('plan'),
+    // R6: the number of my duties on a day of my leave (today … end of next month); it also keeps the banner in step
+    badge: c => syncClashes(c),
+    badgeLabel: n => 'เวรที่ตรงกับวันลา ' + n + ' รายการ',
     init(c) {
       core = c;
       c.station.setProposer(proposer);
       c.station.addPanel({ id: 'proposal', order: 20, render: renderPanel });
       c.provide('plan.myDay', myDay);
-      c.on('role', () => { memo.clear(); });
-      c.on('logout', () => { closeSheet(); closeViewer(); });
+      c.provide('plan.dutyNotice', dutyNotice);   // R6: the leave sheet's warning
+      const clashes = () => { ensureClashRange(c); syncClashes(c); };
+      c.on('data', clashes);
+      c.on('login', () => { clashSig = null; lastClashes = []; syncClashes(c); });   // the range is ensured with the first getData answer
+      c.on('role', () => { memo.clear(); clashSig = null; syncClashes(c); });
+      c.on('logout', () => { closeSheet(); closeViewer(); clashSig = null; lastClashes = []; });
     },
     mount(el) {
       root = el;
@@ -2303,6 +2648,8 @@
       const m = typeof prm.month === 'string' && /^\d{4}-\d{2}$/.test(prm.month) ? prm.month : (ui.month || monthOf(c.selectedDate() || today()));
       if (!ui.seg) ui.seg = defaultSeg(c);
       if (prm.seg && SEGS.some(s => s.id === prm.seg)) ui.seg = prm.seg;
+      // R6: "ไปแก้" of the duty-clash banner names the day to ring
+      ui.focus = typeof prm.date === 'string' && U().isValidYmd(prm.date) && monthOf(prm.date) === m ? prm.date : '';
       ui.month = m;
       ui.scrollToday = true;
       loadDrafts(m);
@@ -2311,6 +2658,7 @@
     hide(c) {
       closeSheet();
       closeViewer();
+      ui.focus = '';
       dropAllDrafts();   // canLeave asked first (R2-SPEC §4.4)
       restoreRange(c || core);
     },
@@ -2322,7 +2670,9 @@
       if (viewerEl) { viewerEl.remove(); viewerEl = null; }
       exportMemo.clear();
       Object.keys(ui.list).forEach(k => delete ui.list[k]);
-      ui.month = ''; ui.seg = ''; ui.busy = ''; ui.showConflicts = false; ui.sheet = null; ui.suggest = ''; ui.scrollToday = false; ui.moved = false;
+      ui.month = ''; ui.seg = ''; ui.busy = ''; ui.showConflicts = false; ui.sheet = null; ui.suggest = ''; ui.scrollToday = false; ui.moved = false; ui.focus = '';
+      clashSig = null;
+      lastClashes = [];
       Object.keys(drafts.roster).forEach(k => delete drafts.roster[k]);
       Object.keys(drafts.duties).forEach(k => delete drafts.duties[k]);
       Object.keys(drafts.loaded).forEach(k => delete drafts.loaded[k]);

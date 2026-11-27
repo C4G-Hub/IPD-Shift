@@ -31,7 +31,7 @@
    *    ipd_boot_retry with the inline guard: after 2 only the "โหลดใหม่" button remains. init() clears the counter.
    * APP_BUILD = sw.js VERSION = the ?v= of index.html's scripts = js/api.js CLIENT_VERSION (tests/sw.test.js).
    */
-  const APP_BUILD = '3.4.1';
+  const APP_BUILD = '3.5.0';
   const BOOT_RETRY_KEY = 'ipd_boot_retry';
   // R1b: also a page of another release (its inline guard names its own build, e.g. a v2.9 index.html served from the HTTP cache
   // whose ?v=2.9.0 URLs now answer with these files): its markup is not this release's — the guard of that page takes over
@@ -2711,7 +2711,8 @@
   /** R2: tones of the "ของฉันวันนี้" plan lines → the list-icon recipes (complete literals, UiKit.cls). */
   const PLAN_TONE = {
     brand: Kit.cls.listIconBrand, info: Kit.cls.listIconInfo, lilac: Kit.cls.listIconLilac,
-    sun: Kit.cls.listIconSun, danger: Kit.cls.listIconDanger, neutral: Kit.cls.listIconNeutral
+    sun: Kit.cls.listIconSun, danger: Kit.cls.listIconDanger, neutral: Kit.cls.listIconNeutral,
+    warn: 'bg-sun-200 text-amber-900 ring-2 ring-sun-300'   // R6: a duty on a day with my pending full-day request
   };
   const MY_PLAN_MAX = 8;
   /**
@@ -3207,6 +3208,22 @@
       typeof use('leave.decide') === 'function';
   }
 
+  /**
+   * R6: the duty owner's warning in the leave sheet (never blocks บันทึก) — the lines come from feat-roster's
+   * use('plan.dutyNotice')(date, staff, type, detail) → [text] (a lunch duty / special mission that the pick would leave
+   * uncovered); '' without the provider or the plan feature.
+   */
+  function dutyClashNoticeHtml(sh, pick) {
+    const fn = serverHas('plan') ? use('plan.dutyNotice') : null;
+    if (typeof fn !== 'function' || !pick || !pick.type) return '';
+    let lines = [];
+    try { lines = fn(sh.date, sh.staff, pick.type, pick.detail || ''); } catch (e) { console.error('[core] plan.dutyNotice failed:', e); }
+    lines = (Array.isArray(lines) ? lines : []).filter(t => typeof t === 'string' && t);
+    if (!lines.length) return '';
+    return `<div class="${Kit.cls.banner} ${Kit.cls.bannerWarn}" data-duty-clash-notice role="status">${Kit.icon('alert-triangle', 'w-5 h-5 shrink-0 mt-0.5')}` +
+      `<div class="min-w-0 space-y-1">${lines.map(t => `<p>${esc(t)}</p>`).join('')}</div></div>`;
+  }
+
   function renderLeaveSheet() {
     const sh = ui.leaveSheet;
     if (!sh || !isShown('confirmLeaveModal')) return;
@@ -3252,6 +3269,7 @@
           (partialPick && !p.detail ? ' — เลือกช่วงเวลาด้านล่าง' : ' · กด "บันทึก" เพื่อยืนยัน') +
           `</p></div>`;
       }
+      html += dutyClashNoticeHtml(sh, p);
     }
     setHtml($('confirmLeaveText'), html);
     const note = $('leaveSheetNote');
@@ -5318,10 +5336,12 @@
    *     {slots, stored, planned, draft, proposal, editable, remark} (copies)
    *     station.addPanel({id, order, render(el, c)}) — extra card on วันนี้ (in #stationPanels)
    *   R2 services read by the core: 'plan' (js/plan-data.js) · 'plan.myDay' fn(date, name) → [{icon, tone: 'brand'|'info'|
-   *     'lilac'|'sun'|'danger'|'neutral', main, sub, tel?}] (plain text, max 8; FIX I-7: tel = a phone number, digits with
+   *     'lilac'|'sun'|'danger'|'neutral'|'warn' (R6), main, sub, tel?}] (plain text, max 8; FIX I-7: tel = a phone number, digits with
    *     an optional leading + after removing spaces/dashes, 9–15 digits — drawn as a 44 px tel: link under the line,
    *     anything else ignored) appended to "ของฉันวันนี้" while the server has
-   *     'plan'. #menuServerNote tells the Supervisor of a 3.0 / 3.1 server to update Code.gs to 3.2 (see messages above).
+   *     'plan'. R6: 'plan.dutyNotice' fn(date, staff, type, detail) → [text] — the leave sheet's warning
+   *     [data-duty-clash-notice] under the pick (a lunch duty / special mission the pick leaves uncovered; never blocks).
+   *     #menuServerNote tells the Supervisor of a 3.0 / 3.1 server to update Code.gs to 3.2 (see messages above).
    *   R5 services (Code.gs 3.4, read only while serverHas('training')): 'training.station' fn(date, slots) → {[stationId]: [names]}
    *     (js/feat-training.js: the trainees at each station on a working day — never students, nor one already in that station's slots) drawn as one muted line
    *     "ฝึกงาน: <names>" ([data-training-line="<id>"]) under the people of that station card — not a slot, never counted,
@@ -6340,18 +6360,19 @@
    * an update (never on a first-ever login on a device) unless APP_CONFIG.WHATS_NEW === false. An item with `sup: true`
    * is listed only for the Supervisor (R3 FIX-CL L-8: staff cannot open Dashboard ทีม).
    */
-  // R4.1 (WHATS_NEW 3.4.1, owner request 2026-11-27): the new item first; the items of 3.4 and 3.3 stay below for phones
-  // that skip those releases
+  // R6 (WHATS_NEW 3.5.0, owner requests 2026-11-27): the five changes of 3.5 first; the item of 3.4.1 stays last for phones
+  // that skipped it
   const WHATS_NEW = Object.freeze({
-    version: '3.4.1',
+    version: '3.5.0',
     title: 'มีอะไรใหม่',
-    subtitle: 'เวอร์ชัน 3.4.1 — รูปตารางเวรในทุกหัวข้อ',
+    subtitle: 'เวอร์ชัน 3.5.0 — แก้เวรกลางวันเองได้ และตารางฝึกงานแบบใหม่',
     items: Object.freeze([
-      { icon: 'image', title: 'รูปตารางเวรในทุกหัวข้อ', text: 'ตารางเวร: แต่ละหัวข้อแสดงรูปตารางแบบของหน่วยงาน พร้อมปุ่มบันทึกรูป PNG — แตะรูปเพื่อดูขนาดเต็ม · ของฉัน มีรูป ตารางเวรของฉัน (สาย Portable เวรกลางวัน ภารกิจพิเศษ และวันลาของคุณทั้งเดือน) · ตารางแบบรายการอยู่ใต้ปุ่ม ดูแบบรายการ' },
-      { icon: 'school', title: 'ตารางวนเทคใหม่', text: 'เมนู → ตารางฝึกงาน: ตารางวน IPD/OPD 6 เดือนของเทคใหม่ (IPD · Portable · ER) และส่งออกเป็นรูปแบบตารางของหน่วยงาน — เทคที่ฝึกอยู่ขึ้นในการ์ด Station ของวันนี้' },
-      { icon: 'users', title: 'ตารางหมุนเวียนนักศึกษาฝึกงาน', text: 'Supervisor จัดนักศึกษาหลายมหาวิทยาลัยพร้อมกัน IPD (IPD, ER, Portable) และ OPD อย่างละครึ่ง นับเฉพาะวันทำการ — ดูได้ว่าวันไหนใครอยู่ที่ไหน' },
-      { icon: 'image', title: 'ส่งออกตารางเวรเป็นรูป', text: 'ตารางเวร → ส่งออกเป็นรูป: รูปแบบตารางของหน่วยงาน 5 แบบ — ตารางรายชื่อประจำ Station, Portable, ภารกิจพิเศษ, เวรกลางวัน X-RAY IPD และ ER เป็นไฟล์ PNG' },
-      { icon: 'clock', title: 'เวรกลางวันเทค 2 คน', text: 'เวรกลางวันใส่เทคคนที่ 2 และจุดประจำได้ (เช่น ER, ภูมิ 2) — ขึ้นในตาราง กลางวัน และในเวรของฉัน' }
+      { icon: 'swap', title: 'แก้/แลกเวรกลางวันได้เอง', text: 'ตารางเวร → กลางวัน: ทุกคนแก้เวรกลางวัน ER/IPD ของวันนี้เป็นต้นไปได้เอง (กด แก้ไข หรือ แก้/แลกเวร ในของฉัน) — บันทึกชื่อผู้แก้ทุกครั้ง' },
+      { icon: 'alert-triangle', title: 'เตือนเมื่อวันลาตรงกับวันที่มีเวร', text: 'ถ้าลา (หรือขอลาที่รออนุมัติ) ตรงกับวันที่คุณมีเวรกลางวันหรือภารกิจพิเศษ แอปจะเตือนตอนลงลา และขึ้นแถบเตือนพร้อมตัวเลขที่ปุ่ม ตารางเวร จนกว่าจะหาคนแทน' },
+      { icon: 'school', title: 'ตารางฝึกงานแบบใหม่', text: 'เมนู → ตารางฝึกงาน: แถบเวลาสีตาม Station และตารางสรุปช่วง IPD / ER / Portable / OPD ของแต่ละคน · ดูได้ว่าวันไหนใครฝึกที่ไหน · ส่งออกเป็นรูปทีละรอบ/มหาวิทยาลัย' },
+      { icon: 'users', title: 'เพิ่มเทคใหม่และนักศึกษาหลายคนพร้อมกัน', text: 'Supervisor ใส่รายชื่อพร้อมชื่อเล่นและหมายเหตุ ระบบจัด IPD (IPD, ER, Portable) และ OPD อย่างละครึ่งให้อัตโนมัติ — เทคใหม่เริ่มวันไหนก็ได้ และไม่ซ้อน Station กับรอบอื่นถ้าเลี่ยงได้' },
+      { icon: 'wand', title: 'สร้างตารางเวรอัตโนมัติ', text: 'เวรกลางวัน IPD วนคน IPD + Portable + Supervisor ของเดือน · ภารกิจพิเศษจัดเฉพาะวันทำการ', sup: true },
+      { icon: 'image', title: 'รูปตารางเวรในทุกหัวข้อ', text: 'ตารางเวร: แต่ละหัวข้อแสดงรูปตารางแบบของหน่วยงาน พร้อมปุ่มบันทึกรูป PNG — แตะรูปเพื่อดูขนาดเต็ม · ของฉัน มีรูป ตารางเวรของฉัน (สาย Portable เวรกลางวัน ภารกิจพิเศษ และวันลาของคุณทั้งเดือน) · ตารางแบบรายการอยู่ใต้ปุ่ม ดูแบบรายการ' }
     ])
   });
   const WHATS_NEW_SEEN = 'whatsNewSeen';   // core.store.prefs key: the version whose notes were shown on this device

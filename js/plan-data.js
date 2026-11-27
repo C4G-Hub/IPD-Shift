@@ -75,8 +75,12 @@
  *   training() → [Person] (frozen) · trainingOn(date) → {[place]: [Person]} — TRAINEES only (students never: R5-SPEC §0),
  *                    TrainingEngine.placeOn (extras override blocks); {} without window.TrainingEngine
  *   saveTraining(p) {items: [Person without id | with id + baseVersion]} → {people} (each answered person replaces /
- *                    adds its row; CONFLICT {people}: the server's current rows are applied, an asked id the server no
- *                    longer has is removed, then it rethrows) · deleteTraining(p) {ids} → {deleted} (rows removed)
+ *                    adds its row; CONFLICT {ids, people}: the server's current rows are applied, a stale id (ids) the
+ *                    server no longer has (not in people) is removed, then it rethrows) · deleteTraining(p) {ids} → {deleted} (rows removed)
+ *   R6 (3.5, feature 'lunchEdit'): saveLunch(p) {days: [{date, er?, ipd?, baseVersion}]} → {duties, unchanged} — any logged-in
+ *                    user edits the daytime duty (lunch cells only) of stored days; the answer's duties are stored at once;
+ *                    CONFLICT / LUNCH_NO_DUTY ({dates, duties}) apply the server's current rows, then rethrow; UNKNOWN_ACTION
+ *                    without 'lunchEdit' (no request)
  *   lockedStation(name) → stationId | null — R2-SPEC §0.26(a): the station of an active person whose skills list holds
  *                    exactly ONE station id ("ประจำ <Station>"; the proposal never places them elsewhere — engine canWork);
  *                    null for not set, several or no stations, inactive or unknown names
@@ -109,6 +113,7 @@
   /** R5-SPEC §1: the places of a training block / extra. */
   const TRAINING_PLACES = Object.freeze(['ipd', 'er', 'portable', 'opd', 'us', 'or', 'cancer', 'other']);
   const NO_TRAINING_MSG = 'ต้องอัปเดต Code.gs เป็นเวอร์ชัน 3.4 ก่อน';
+  const NO_LUNCH_EDIT_MSG = 'ต้องอัปเดต Code.gs เป็นเวอร์ชัน 3.5 ก่อน';
 
   let dom = null;           // core.domain('plan')
   let want = null;          // {from, to}: the wanted range
@@ -602,6 +607,33 @@
       });
     });
   }
+  /** The server's current rows of a refused duty write ({dates, duties}): applied; an asked date without a row is removed. */
+  function applyCurrentDuties(d, det) {
+    const current = Array.isArray(det.duties) ? det.duties : [];
+    current.forEach(x => putDuty(d, x));
+    (Array.isArray(det.dates) ? det.dates : []).forEach(date => {
+      if (U.isValidYmd(date) && !current.some(x => x && x.date === date)) delete d.duties[date];
+    });
+  }
+  /**
+   * R6 (Code.gs 3.5, feature 'lunchEdit'): any logged-in user edits the daytime duty of stored days —
+   * {days: [{date, er?: Slot, ipd?: Slot, baseVersion}]} with Slot {tech, assistant, tech2, place, place2}. The answer's
+   * duties are stored at once; a CONFLICT (and a LUNCH_NO_DUTY refusal, which carries them too) applies the server's current
+   * rows, then rethrows. A server without 'lunchEdit' → UNKNOWN_ACTION (no request).
+   */
+  async function saveLunch(p) {
+    if (!C.serverHas('lunchEdit')) throw apiError('UNKNOWN_ACTION', NO_LUNCH_EDIT_MSG);
+    const alive = C.alive(), g = gen;
+    try {
+      return await write('saveLunch', p, (d, res) => {
+        (Array.isArray(res.duties) ? res.duties : []).forEach(x => putDuty(d, x));
+      }, applyCurrentDuties);
+    } catch (e) {
+      if (alive() && g === gen && e && e.code === 'VALIDATION' && e.details && typeof e.details === 'object' &&
+        Array.isArray(e.details.duties) && Array.isArray(e.details.dates)) change(d => applyCurrentDuties(d, e.details));
+      throw e;
+    }
+  }
   function setHolidays(p) {
     return write('setHolidays', p, (d, res) => {
       const year = int(res.year || (p && p.year));
@@ -654,9 +686,10 @@
     }, (d, det) => {
       const current = Array.isArray(det.people) ? det.people : [];
       current.forEach(x => putTraining(d, x));
-      const asked = (p && Array.isArray(p.items) ? p.items : []).map(x => x && x.id).filter(Boolean);
-      // an asked id the server no longer has was deleted on another device
-      d.training = d.training.filter(x => asked.indexOf(x.id) < 0 || current.some(c => c && c.id === x.id));
+      // R6 fix: only a stale id (det.ids) that the server no longer has (missing from det.people) was deleted on another
+      // device — the other asked ids were fine and stay
+      const gone = (Array.isArray(det.ids) ? det.ids : []).filter(id => !current.some(c => c && c.id === id));
+      d.training = d.training.filter(x => gone.indexOf(x.id) < 0);
     });
   }
   function deleteTraining(p) {
@@ -855,7 +888,7 @@
     refresh: () => { forceNext = true; return sync(); },
     fetchStats,
     roster, duty, duties, holidays, assistants, profiles, profile, backup, settings,
-    saveRoster, saveDuties, setHolidays, saveAssistants, setProfiles, saveBackupMsg, setPlanSettings, adoptDuty,
+    saveRoster, saveDuties, saveLunch, setHolidays, saveAssistants, setProfiles, saveBackupMsg, setPlanSettings, adoptDuty,
     engineStaff, rosterFor, assistantsFor, skillsMap, aliasesMap, eligible, leaves, linesFor, proposalInput, lockedStation,
     avoidPairs, avoidPartnersOf,
     training, trainingOn, saveTraining, deleteTraining

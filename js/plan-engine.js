@@ -1,5 +1,5 @@
 /* =====================================================================
- * js/plan-engine.js — pure scheduling engine → window.PlanEngine (ALGO_VERSION 1)
+ * js/plan-engine.js — pure scheduling engine → window.PlanEngine (ALGO_VERSION 2)
  * Specification: docs/design/DESIGN-engine.md (section numbers below refer to it).
  *
  * Rules: classic script, one IIFE, ES2019, no regex lookbehind. Pure functions only: no DOM, network,
@@ -19,7 +19,7 @@
  *
  * EXPORTS (window.PlanEngine)
  * Constants
- *   ALGO_VERSION                1
+ *   ALGO_VERSION                2   (R6: daytime IPD pool IPD → Portable → Supervisor; missions on working days only)
  *   PARTIAL_LEAVE_TYPES         ['ลาหาหมอตอนเช้า','ลาหาหมอตอนบ่าย'] — approved = still works a station
  *   PARTIAL_DEFAULT_TIMES       {type: {start,end}} used when a partial leave has no valid times (start/end, else detail)
  *   DEFAULT_LUNCH_WINDOW        {start:'12:00', end:'13:00'}
@@ -48,15 +48,23 @@
  *   resolveLines(lines, names) → {workers: string[] ('' = unfilled), extra: string[]}
  * Lunch (§3)
  *   lunchPick(techs, k, offset, isUnavailable(name), counts Map|object) → {tech, base}
+ *   lunchPool(roster, station) → string[]      R6: the daytime rotation pool; 'ipd' = roster ipd → portable → supervisor
+ *                                           (first occurrence wins, blanks dropped), other stations = roster[station]
  * Mission (§4)
  *   missionPick(order, cursor, isUnavailable(name)) → {names, next, skipped}
  *   resolveCursor(oldOrder, cursor, newOrder) → name ('' when newOrder is empty)
  *   suggestMissionSubstitute({order, names, absent, isUnavailable?, prevNames?, nextNames?}) → name|''
  * Month (§5)
  *   generateMonthDuties(input) → {month, from, days:{[date]:Duty|null}, config, tail, warnings}
+ *                                           R6: missions only on working days (weekend / holiday = empty Duty, the
+ *                                           cursor waits); MISSING_STORED_DAY only for a missing frozen working day
  *   suggestOffsets(previousTail, input) → {lines, lunch:{er, ipd}}   non-zero only for an unchanged ring
  *   dutyConflicts(duties, leaves, {lunchWindow}?) → [{date, kind:'line'|'lunch'|'mission', line?, station?, name, reason,
  *                                           second?}]   R4: second: true for a lunch slot's tech2
+ *   personDutyClashes({duties, leaves, name, from?, to?, lunchWindow?}) → [{date, kind:'lunch'|'mission', station?,
+ *                                           second?, leaveType, pending}]   R6: one person's lunch / mission duties on
+ *                                           days with their own approved or pending full-day leave (lunch also: a doctor
+ *                                           visit overlapping the lunch window); never rejected, never Portable lines
  * Proposal (§6)
  *   proposeDay(input) → {date, assignments, lines, notes, unfilled, spare, added, warnings}
  *                                           R2-SPEC §0.27: input.avoidPairs [[a, b]] — the matching never puts a pool
@@ -98,7 +106,7 @@
   const U = global.Utils;
 
   /* ------------------------------------------------------------------ constants */
-  const ALGO_VERSION = 1;
+  const ALGO_VERSION = 2;
   const PARTIAL_LEAVE_TYPES = Object.freeze(['ลาหาหมอตอนเช้า', 'ลาหาหมอตอนบ่าย']);
   const PARTIAL_DEFAULT_TIMES = Object.freeze({
     'ลาหาหมอตอนเช้า': Object.freeze({ start: '08:00', end: '12:00' }),
@@ -396,6 +404,16 @@
     }
     return { tech: best, base };
   }
+  /**
+   * R6 1.1: the people a station's daytime (lunch) duty rotates over. 'ipd' = the month roster's IPD, then Portable,
+   * then Supervisor people (that order, first occurrence wins, blanks dropped); any other station = its own roster.
+   */
+  function lunchPool(roster, station) {
+    const r = isObj(roster) ? roster : {};
+    const s = str(station);
+    if (s === 'ipd') return uniqNames([].concat(arr(r.ipd), arr(r.portable), arr(r.supervisor)));
+    return s && own(r, s) ? uniqNames(r[s]) : [];
+  }
 
   /* ================================================================== §4 mission */
   function missionPick(order, cursor, isUnavailable) {
@@ -499,7 +517,8 @@
     const R = seats.length;
     const lunchCfg = isObj(assistants.lunch) ? assistants.lunch : {};
     const lunchTechs = {}, lunchAsst = {};
-    LUNCH_STATIONS.forEach(s => { lunchTechs[s] = uniqNames(roster[s]); lunchAsst[s] = uniqNames(lunchCfg[s]); });
+    // R6 1.1: the daytime IPD pool is IPD → Portable → Supervisor (lunchPool)
+    LUNCH_STATIONS.forEach(s => { lunchTechs[s] = lunchPool(roster, s); lunchAsst[s] = uniqNames(lunchCfg[s]); });
     const offsets = normOffsets(opts.offsets);
     const win = normWindow(opts.lunchWindow);
     const order = missionOrder(input.eligible, input.staff, warnings);
@@ -522,9 +541,12 @@
       if (d < from) {
         const rec = own(existing, d) && isObj(existing[d]) ? existing[d] : null;
         days[d] = rec;
-        if (!rec) { warnings.push({ code: 'MISSING_STORED_DAY', date: d }); return; }
+        // R6 1.2: an empty non-working day is not stored, so only a missing working day is a warning
+        if (!rec) { if (wdIndex.has(d)) warnings.push({ code: 'MISSING_STORED_DAY', date: d }); return; }
         // R4: a frozen day's second lunch technologist counts for fairness like the first
         if (isObj(rec.lunch)) LUNCH_STATIONS.forEach(s => { if (isObj(rec.lunch[s])) { bump(s, cleanName(rec.lunch[s].tech)); bump(s, cleanName(rec.lunch[s].tech2)); } });
+        // R6 1.2: a frozen day without mission / missionNext (an empty weekend or holiday) leaves `raw` alone, so the
+        // cursor comes from the last frozen day that has one
         const nx = cleanName(rec.missionNext);
         if (nx) raw = nx;
         else {
@@ -551,12 +573,13 @@
           const m = lunchAsst[s].length;
           duty.lunch[s] = { tech: p.tech, base: p.base, assistant: m ? lunchAsst[s][mod(k + offsets.lunchAssistant[s], m)] : '', tech2: '', place: '', place2: '' };
         });
+        // R6 1.2: special missions on working days only; a weekend / holiday stays empty and the cursor waits
+        const mp = missionPick(order, cursor, n => av.absent.has(n));
+        cursor = mp.next;
+        duty.mission = mp.names;
+        duty.missionNext = mp.next;
+        if (order.length && mp.names.length < 2) warnings.push({ code: 'MISSION_SHORT', date: d, have: mp.names.length });
       }
-      const mp = missionPick(order, cursor, n => av.absent.has(n));
-      cursor = mp.next;
-      duty.mission = mp.names;
-      duty.missionNext = mp.next;
-      if (order.length && mp.names.length < 2) warnings.push({ code: 'MISSION_SHORT', date: d, have: mp.names.length });
       days[d] = duty;
     });
     if (cursor === null) cursor = resolveCursor(oldOrder, raw, order);
@@ -603,7 +626,7 @@
     }
     const tlu = isObj(previousTail.lunch) ? previousTail.lunch : {};
     LUNCH_STATIONS.forEach(s => {
-      const techs = uniqNames(roster[s]);
+      const techs = lunchPool(roster, s);
       const t = isObj(tlu[s]) ? tlu[s] : null;
       if (t && techs.length && sameArray(t.techs, techs)) out.lunch[s] = mod(int0(t.next), techs.length);
     });
@@ -644,6 +667,67 @@
         const n = cleanName(raw);
         if (n && av.absent.has(n)) out.push({ date: d, kind: 'mission', name: n, reason: av.absent.get(n) });
       });
+    });
+    return out;
+  }
+  /**
+   * R6 1.3: one person's daytime (lunch) duties and special missions that clash with their own leave — approved or
+   * pending (never rejected). A full-day leave clashes with both; a doctor visit only with a lunch slot whose time it
+   * overlaps (lunchWindow, default 12:00–13:00). Portable lines are never reported (the Supervisor's daily proposal
+   * handles them). Among several rows of that person on one date the strongest wins: full-day approved, full-day
+   * pending, then (lunch only) an overlapping partial approved, then pending; ties keep the first row.
+   * → [{date, kind:'lunch'|'mission', station?, second?, leaveType, pending}] sorted by date, lunch before mission,
+   * station er before ipd.
+   */
+  function personDutyClashes(o) {
+    o = isObj(o) ? o : {};
+    const name = cleanName(o.name);
+    if (!name) return [];
+    const from = isValidYmd(o.from) ? o.from : '', to = isValidYmd(o.to) ? o.to : '';
+    const win = normWindow(o.lunchWindow);
+    const mine = new Map();
+    arr(o.leaves).forEach(l => {
+      if (!isObj(l) || cleanName(l.staff) !== name) return;
+      const d = str(l.date).trim();
+      if (!d) return;
+      if (!mine.has(d)) mine.set(d, []);
+      mine.get(d).push(l);
+    });
+    const pick = (rows, test) => {
+      for (let p = 0; p < 2; p++) {
+        const want = p ? 'pending' : 'approved';
+        for (let i = 0; i < rows.length; i++) {
+          const type = str(rows[i].type).trim();
+          if (leaveStatus(rows[i]) === want && test(rows[i], type)) return { leaveType: type, pending: !!p };
+        }
+      }
+      return null;
+    };
+    const out = [], done = new Set();
+    dutyList(o.duties).forEach(duty => {
+      const d = duty.date;
+      if ((from && d < from) || (to && d > to) || done.has(d)) return;
+      done.add(d);
+      const rows = mine.get(d);
+      if (!rows) return;
+      const full = pick(rows, (l, t) => leaveKind(t) === 'full');
+      const lunchHit = full || pick(rows, (l, t) => {
+        if (leaveKind(t) !== 'partial') return false;
+        const tm = partialTimes(t, l);
+        return timeOverlaps(tm.start, tm.end, win.start, win.end);
+      });
+      if (lunchHit && isObj(duty.lunch)) {
+        LUNCH_STATIONS.forEach(s => {
+          const slot = duty.lunch[s];
+          if (!isObj(slot)) return;
+          const n1 = cleanName(slot.tech), n2 = cleanName(slot.tech2);
+          if (n1 === name) out.push({ date: d, kind: 'lunch', station: s, leaveType: lunchHit.leaveType, pending: lunchHit.pending });
+          else if (n2 === name) out.push({ date: d, kind: 'lunch', station: s, second: true, leaveType: lunchHit.leaveType, pending: lunchHit.pending });
+        });
+      }
+      if (full && arr(duty.mission).some(n => cleanName(n) === name)) {
+        out.push({ date: d, kind: 'mission', leaveType: full.leaveType, pending: full.pending });
+      }
     });
     return out;
   }
@@ -1953,9 +2037,9 @@
     holidaySet, isWorkingDay, workingDaysOfMonth, workingDayIndex, workingDaysBetween,
     leaveStatus, leaveKind, availabilityOn, timeOverlaps,
     buildSeats, portableLines, resolveLines,
-    lunchPick,
+    lunchPick, lunchPool,
     missionPick, resolveCursor, suggestMissionSubstitute,
-    generateMonthDuties, suggestOffsets, dutyConflicts,
+    generateMonthDuties, suggestOffsets, dutyConflicts, personDutyClashes,
     proposeDay, lexMatch, noteText,
     normalizeMessageText, parseThaiDate, monthFromToken, lightKey, foldName, editDistance, buildNameIndex,
     matchStaffName, parseUnitText, parseBackupMessages, parseBackupMessage,

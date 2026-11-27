@@ -18,13 +18,35 @@
  *   workingDays(from, to, h) → date[]   the working days of [from, to] (inclusive; [] when invalid)
  *   placeOn(person, date) → place | ''   the extra covering the date, else the block covering it, else ''
  *   blockOn(person, date) → place | ''   the block only (picture A's cells: extras are footnotes)
- *   traineePlan({people, start, ipdMonths = 3, opdMonths = 3, unit = 'month' | 'block4w', cohort?})
- *       → {people: [Person], warnings: [{code, text}]}
- *       the first ⌈n/2⌉ people IPD first, the others OPD first; the IPD part = ipdMonths blocks (calendar months, or for
- *       'block4w' Monday-aligned 4-week blocks from the start date, each ending on the Friday of its 4th week) with the
- *       stations ipd → portable → er rotated by the person's index within the group (block j of person i = CYCLE[(i + j)
- *       % 3]); the OPD part = ONE 'opd' block of opdMonths months (or 4·opdMonths weeks). start / end = the plan's range.
- *       Every other field of an input person (id, nickname, code, cohort, extras, note, version…) is carried over.
+ *   TRAINEE_ORDERS              the 6 station orders of a trainee's IPD part: the cyclic shifts of ipd → portable → er
+ *                               first ([ipd,portable,er], [portable,er,ipd], [er,ipd,portable]), then those of ipd → er →
+ *                               portable (index = the last tie-break)
+ *   traineePeriods(start, n, unit = 'month' | 'block4w') → [{from, to}]   R6: the first n periods of a plan from `start`
+ *       ('YYYY-MM-DD' used as is, 'YYYY-MM' = the 1st): 'month' → period k = addMonthsClamped(start, k) …
+ *       addMonthsClamped(start, k + 1) − 1 day (16 Aug → 16 Aug–15 Sep, 16 Sep–15 Oct, …; a start on the 31st clamps to
+ *       the month's end); 'block4w' → Monday-aligned 4-week blocks, the first starting on the date, each ending on the
+ *       Friday of its 4th week. [] for a bad start.
+ *   traineePlan({people, start, ipdMonths = 3, opdMonths = 3, holidays, existing, cohort?, unit = 'month', keepBefore?})
+ *       → {people: [Person], start, end, choices: [{key, ipdFirst, order}], warnings: [{code, key?, text}]}
+ *       periods from the start date (traineePeriods, no snapping to the 1st); the first ⌈n/2⌉ people (input order) IPD
+ *       first, the others OPD first (a person's own boolean `ipdFirst` overrides that — "จัดใหม่" keeps the stored side);
+ *       the IPD part = ipdMonths periods split into 3 contiguous parts (ipdMonths % 3 = 0 →
+ *       ipdMonths / 3 whole periods each; else the IPD calendar range split into thirds by days, the larger parts first;
+ *       0 → no IPD part); the OPD part = ONE 'opd' block of opdMonths periods. The station order of each person (input
+ *       order) = the TRAINEE_ORDERS entry minimising, over the person's working days (Mon–Fri minus holidays, not covered
+ *       by an own extra) of the IPD part, the histogram of (trainees already at that place that day) + 1 — the smaller
+ *       maximum, then leximax, then the lower index. Counted: every trainee of `existing` (all cohorts; kind 'trainee')
+ *       except the ones being (re)planned (same id, else same name) + the people already placed in this call; places ipd /
+ *       er / portable (OPD is not constrained), where placeOn says they are (an extra elsewhere frees the station).
+ *       Re-planned = an `existing` entry with the id of a planned person (by id only). keepBefore ('YYYY-MM-DD', for a
+ *       person that has stored blocks): an IPD part starting before it keeps the stored place of its first day (blockOn) —
+ *       only orders consistent with those parts are candidates; none consistent (or a started OPD part that was not OPD)
+ *       → the best order anyway and a PAST_CHANGED warning "ช่วงที่ผ่านมาแล้วของ <ชื่อเล่น> จะเปลี่ยน".
+ *       SHARED_STATION warning per person whose chosen order still shares a place on some working day. Extras inside
+ *       the range are kept, partly overlapping ones clipped to it; every other field (id, nickname, code, note, version, baseVersion…) is carried over;
+ *       kind 'trainee', org ''. BAD_START / NO_MONTHS → no people.
+ *   traineeMonths(person) → {ipdMonths, opdMonths}   the month counts of a stored rotation (spans of the IPD / OPD blocks
+ *       in months, rounded, 0–12, the total at most 13 = inside the 400-day limit; a person without blocks → 3 / 3) — "จัดใหม่" keeps them
  *   studentPlan({students, holidays, existing}) → {students: [Person], choices: [{key, ipdFirst, order}],
  *       warnings: [{code, key, text}]}
  *       per student (key = id, else name): the working days w of [start, end]; the first half ⌈w/2⌉ days and the second
@@ -39,17 +61,19 @@
  *       `existing`: kind 'student' only, never a student being scheduled (same id). Blocks are calendar ranges covering
  *       exactly the assigned working days (never starting or ending on a weekend / holiday). Fewer than 2 working days →
  *       a warning (FEW_DAYS; 0 days: NO_DAYS and no blocks).
- *   periodRows(people) → {monthly: bool, rows: [{from, to, label, places: [place | '' per person]}]}
- *       picture A: the elementary periods of the people's blocks (every block boundary splits the timeline; a period no
- *       block covers is left out); monthly when every period is one whole calendar month → labels "ตุลาคม (2569)", else
- *       "16 พฤศจิกายน 2569 - 11 ธันวาคม 2569"
- *   ipdOpdSummary(person) → {ipd: text, opd: text, ipdRange: {from, to} | null, opdRange}
- *       picture B: the span of the IPD blocks (ipd / er / portable) and of the OPD blocks as month text ("ตุลาคม-ธันวาคม
- *       2569"; one month "ตุลาคม 2569"; across years "พฤศจิกายน 2569-กุมภาพันธ์ 2570"); a span not on whole months →
- *       day text "16 พ.ย. 2569 - 16 ก.พ. 2570"; '' when there is no such block
+ *   R6 — the shared group view (timeline + summary table) of both segments; periodRows / ipdOpdSummary (old pictures A / B)
+ *   are gone:
+ *   placeRanges(person) → {ipd: [[from, to]], er, portable, opd, us, or, cancer, other}   the blocks per place, sorted,
+ *       touching ranges (next from = previous to + 1 day) merged
+ *   groupSpan(people) → {from, to} | null   the earliest start … the latest end (blocks / extras included)
+ *   monthTicks(from, to) → [{date, label, start?}]   the start (from, start: true) then the 1st of every month inside
+ *       (from, to], label = Thai short month ("ต.ค.");
+ *       January carries the Buddhist year's last two digits ("ม.ค. 70")
+ *   spanPct(from, to, a, b) → {left, width}   the position of [a, b] (clamped) on the timeline of [from, to], in % of it
  *   rangeText(from, to, {year = true}) → "1–5 ธ.ค. 2569" · "29 พ.ย. – 3 ธ.ค. 2569" · "29 ธ.ค. 2569 – 2 ม.ค. 2570" ·
  *       "1 ธ.ค. 2569" (year false: without the years)
- *   extraNote(person, extra) → "***(26-30 ต.ค.) <first name> ฝึก US" (first word of the name; label, else "ฝึก <place>")
+ *   extraNote(person, extra) → "*** 26–30 ต.ค. 2569 <shortName> ฝึก US" (R6: rangeText + nickname, else first name; the
+ *       label, else "ฝึก <place>")
  *   firstName(name) → the first word · shortName(person) → nickname, else the first word of the name
  *   monthName(ym) → "ตุลาคม" · monthYear(ym) → "ตุลาคม 2569"
  *   The staff account of a trainee (trainees log in as "<first name>(Trainee)"):
@@ -69,6 +93,11 @@
   const STATION_OF = Object.freeze({ ipd: 'ipd', portable: 'portable', er: 'er', us: 'us', or: 'or', cancer: 'cancer' });
   /** The trainee rotation of the IPD part (picture: IPD · Portable · ER, then Portable · ER · IPD). */
   const CYCLE = Object.freeze(['ipd', 'portable', 'er']);
+  /** R6: the six station orders of a trainee's IPD part — the cyclic shifts of CYCLE first, then those of ipd → er → portable. */
+  const TRAINEE_ORDERS = Object.freeze([
+    ['ipd', 'portable', 'er'], ['portable', 'er', 'ipd'], ['er', 'ipd', 'portable'],
+    ['ipd', 'er', 'portable'], ['er', 'portable', 'ipd'], ['portable', 'ipd', 'er']
+  ].map(Object.freeze));
   /** The six station orders of a student's IPD half (index = the last tie-break). */
   const ORDERS = Object.freeze([
     ['ipd', 'er', 'portable'], ['ipd', 'portable', 'er'], ['er', 'ipd', 'portable'],
@@ -81,6 +110,7 @@
   const YMD_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
   const YM_RE = /^(\d{4})-(\d{2})$/;
   const DAY_MS = 86400000;
+  const MAX_MONTHS = 13;   // 13 periods ≤ 397 days: inside the server's 400-day limit of a record
 
   /* ------------------------------------------------------------------ dates (UTC) */
   function pad2(n) { return (n < 10 ? '0' : '') + n; }
@@ -96,10 +126,14 @@
   function weekday(s) { return new Date(toUtc(s)).getUTCDay(); }
   function lastDay(y, m) { return new Date(Date.UTC(y, m, 0)).getUTCDate(); }   // m: 1–12
   function monthStart(y, m) { const d = new Date(Date.UTC(y, m - 1, 1)); return d.getUTCFullYear() + '-' + pad2(d.getUTCMonth() + 1) + '-01'; }
-  function monthEnd(s) { const y = +s.slice(0, 4), m = +s.slice(5, 7); return s.slice(0, 8) + pad2(lastDay(y, m)); }
-  function addMonths(s, n) { const y = +s.slice(0, 4), m = +s.slice(5, 7); return monthStart(y, m + n); }   // → the 1st
-  function isMonthStart(s) { return s.slice(8) === '01'; }
-  function isMonthEnd(s) { return s === monthEnd(s); }
+  function addMonths(s, n) { return monthStart(+s.slice(0, 4), +s.slice(5, 7) + n); }   // → the 1st of the month n later
+  /** The same day n months later, clamped to the target month's last day (2027-01-31 + 1 → 2027-02-28). */
+  function addMonthsClamped(s, n) {
+    const first = monthStart(+s.slice(0, 4), +s.slice(5, 7) + n);
+    const y = +first.slice(0, 4), m = +first.slice(5, 7);
+    return first.slice(0, 8) + pad2(Math.min(+s.slice(8), lastDay(y, m)));
+  }
+  function daysIn(from, to) { return Math.round((toUtc(to) - toUtc(from)) / DAY_MS) + 1; }
   function be(y) { return +y + 543; }
   function str(v) { return typeof v === 'string' ? v : ''; }
   function isObj(v) { return !!v && typeof v === 'object'; }
@@ -130,7 +164,6 @@
   /* ------------------------------------------------------------------ texts */
   function monthName(ym) { const m = +String(ym).slice(5, 7); return MONTHS[m - 1] || ''; }
   function monthYear(ym) { return monthName(ym) + ' ' + be(String(ym).slice(0, 4)); }
-  function dayLong(s) { return +s.slice(8) + ' ' + MONTHS[+s.slice(5, 7) - 1] + ' ' + be(s.slice(0, 4)); }
   function dayShort(s, year) { return +s.slice(8) + ' ' + MONTHS_SHORT[+s.slice(5, 7) - 1] + (year ? ' ' + be(s.slice(0, 4)) : ''); }
   /** "1–5 ธ.ค. 2569" · "29 พ.ย. – 3 ธ.ค. 2569" · "29 ธ.ค. 2569 – 2 ม.ค. 2570" · "1 ธ.ค. 2569". */
   function rangeText(from, to, opts) {
@@ -141,15 +174,6 @@
     if (from.slice(0, 7) === to.slice(0, 7)) return +from.slice(8) + '–' + +to.slice(8) + ' ' + MONTHS_SHORT[+from.slice(5, 7) - 1] + yr(from);
     if (from.slice(0, 4) === to.slice(0, 4)) return dayShort(from, false) + ' – ' + dayShort(to, false) + yr(from);
     return dayShort(from, year) + ' – ' + dayShort(to, year);
-  }
-  /** Picture B: a span as month text, else day text. */
-  function spanText(from, to) {
-    if (isMonthStart(from) && isMonthEnd(to)) {
-      const y1 = from.slice(0, 4), y2 = to.slice(0, 4);
-      if (from.slice(0, 7) === to.slice(0, 7)) return monthName(from) + ' ' + be(y1);
-      return y1 === y2 ? monthName(from) + '-' + monthName(to) + ' ' + be(y1) : monthName(from) + ' ' + be(y1) + '-' + monthName(to) + ' ' + be(y2);
-    }
-    return dayShort(from, true) + ' - ' + dayShort(to, true);
   }
   function firstName(name) { return str(name).trim().split(/\s+/)[0] || ''; }
 
@@ -207,14 +231,11 @@
     return out;
   }
   function shortName(p) { const n = isObj(p) ? str(p.nickname).trim() : ''; return n || firstName(isObj(p) ? p.name : ''); }
-  /** "***(26-30 ต.ค.) <first name> ฝึก US" (one day: "(26 ต.ค.)"; across months "(28 ต.ค.-3 พ.ย.)"). */
+  /** R6: "*** 26–30 ต.ค. 2569 <nickname | first name> ฝึก US" (the label, else "ฝึก <place>"). */
   function extraNote(person, x) {
     if (!isObj(x) || !isYmd(x.from) || !isYmd(x.to)) return '';
-    const when = x.from === x.to ? dayShort(x.from, false)
-      : x.from.slice(0, 7) === x.to.slice(0, 7) ? +x.from.slice(8) + '-' + +x.to.slice(8) + ' ' + MONTHS_SHORT[+x.from.slice(5, 7) - 1]
-        : dayShort(x.from, false) + '-' + dayShort(x.to, false);
     const what = str(x.label).trim() || 'ฝึก ' + (PLACE_LABEL[x.place] || '');
-    return '***(' + when + ') ' + firstName(isObj(person) ? person.name : '') + ' ' + what;
+    return '*** ' + rangeText(x.from, x.to) + ' ' + shortName(person) + ' ' + what;
   }
 
   /* ------------------------------------------------------------------ where is a person */
@@ -232,59 +253,141 @@
   }
   function blockOn(person, date) { return isObj(person) && isYmd(date) ? covering(person.blocks, date) : ''; }
 
-  /* ------------------------------------------------------------------ trainees */
+  /* ------------------------------------------------------------------ trainees (R6-SPEC §3.1) */
   function intIn(v, lo, hi, dflt) { const n = parseInt(v, 10); return isFinite(n) && n >= lo && n <= hi ? n : dflt; }
+  function startOf(v) { let s = str(v); if (YM_RE.test(s)) s += '-01'; return isYmd(s) ? s : ''; }
+  /** The k-th period of a plan from s ('month' from the start date, or Monday-aligned 4-week blocks). */
+  function periodFn(s, unit) {
+    if (unit === 'block4w') {
+      const mon = addDays(s, -((weekday(s) + 6) % 7));
+      return k => ({ from: k === 0 ? s : addDays(mon, 28 * k), to: addDays(mon, 28 * k + 25) });
+    }
+    return k => ({ from: addMonthsClamped(s, k), to: addDays(addMonthsClamped(s, k + 1), -1) });
+  }
+  function traineePeriods(start, n, unit) {
+    const s = startOf(start);
+    const cnt = intIn(n, 0, 60, 0);
+    if (!s) return [];
+    const f = periodFn(s, unit === 'block4w' ? 'block4w' : 'month');
+    const out = [];
+    for (let k = 0; k < cnt; k++) out.push(f(k));
+    return out;
+  }
+  /** The IPD part [from, to] split into 3 contiguous parts: whole periods when n % 3 = 0, else thirds by calendar days. */
+  function ipdParts(period, at, n) {
+    if (n <= 0) return [];
+    if (n % 3 === 0) {
+      const q = n / 3;
+      return [0, 1, 2].map(j => ({ from: period(at + j * q).from, to: period(at + j * q + q - 1).to }));
+    }
+    const from = period(at).from, to = period(at + n - 1).to;
+    const sz = thirds(daysIn(from, to));
+    const out = [];
+    let d = from;
+    sz.forEach(len => { out.push({ from: d, to: addDays(d, len - 1) }); d = addDays(d, len); });
+    return out;
+  }
+  function personKey(p, i) { return str(p.id) || str(p.name).trim() || '#' + i; }
   function traineePlan(input) {
     const o = isObj(input) ? input : {};
     const people = (Array.isArray(o.people) ? o.people : []).filter(p => isObj(p) && str(p.name).trim());
     const ipdN = intIn(o.ipdMonths, 0, 12, 3), opdN = intIn(o.opdMonths, 0, 12, 3);
     const unit = o.unit === 'block4w' ? 'block4w' : 'month';
+    const fail = (code, text) => ({ people: [], start: '', end: '', choices: [], warnings: [{ code, text }] });
+    const s = startOf(o.start);
+    if (!s) return fail('BAD_START', 'วันเริ่มไม่ถูกต้อง');
+    if (ipdN + opdN === 0) {
+      const who = people.map(p => shortName(p)).filter(Boolean).join(', ');
+      return fail('NO_MONTHS', (who ? who + ': ' : '') + 'จำนวนเดือน IPD + OPD ต้องมากกว่า 0');
+    }
+    const keep = isYmd(o.keepBefore) ? o.keepBefore : '';
+    const hs = holidaySet(o.holidays);
+    const period = periodFn(s, unit);
+    const range = { from: period(0).from, to: period(ipdN + opdN - 1).to };
     const warnings = [];
-    let s = str(o.start);
-    if (YM_RE.test(s)) s += '-01';
-    if (!isYmd(s)) return { people: [], warnings: [{ code: 'BAD_START', text: 'วันเริ่มไม่ถูกต้อง' }] };
-    if (ipdN + opdN === 0) return { people: [], warnings: [{ code: 'NO_MONTHS', text: 'จำนวนเดือนต้องมากกว่า 0' }] };
-    // the k-th period of the plan: a calendar month, or a 4-week block (Monday-aligned, ending on the 4th Friday)
-    let period;
-    if (unit === 'month') {
-      const first = s.slice(0, 8) + '01';
-      period = k => ({ from: addMonths(first, k), to: monthEnd(addMonths(first, k)) });
-    } else {
-      const mon = addDays(s, -((weekday(s) + 6) % 7));
-      period = k => ({ from: k === 0 ? s : addDays(mon, 28 * k), to: addDays(mon, 28 * k + 25) });
-    }
-    const span = (a, n) => ({ from: period(a).from, to: period(a + n - 1).to });
+    // count[place][date]: trainees at that IPD station that day (existing ones of every cohort, then the placed ones)
+    const count = Object.create(null);
+    IPD_PLACES.forEach(p => { count[p] = Object.create(null); });
+    const ids = new Set(people.map(p => str(p.id)).filter(Boolean));
+    const countPerson = p => {
+      (Array.isArray(p.blocks) ? p.blocks : []).forEach(b => {
+        if (!isObj(b) || !isYmd(b.from) || !isYmd(b.to) || IPD_PLACES.indexOf(b.place) < 0) return;
+        workingDays(b.from, b.to, hs).forEach(d => { if (placeOn(p, d) === b.place) count[b.place][d] = (count[b.place][d] || 0) + 1; });
+      });
+    };
+    (Array.isArray(o.existing) ? o.existing : []).forEach(p => {
+      if (!isObj(p) || p.kind !== 'trainee') return;
+      if (str(p.id) && ids.has(str(p.id))) return;   // R6 fix L5: by id only
+      countPerson(p);
+    });
     const half = Math.ceil(people.length / 2);
-    if (half > CYCLE.length || people.length - half > CYCLE.length) {
-      warnings.push({ code: 'SHARED_STATION', text: 'กลุ่มละมากกว่า 3 คน — บางช่วงจะมีมากกว่า 1 คนต่อ Station' });
-    }
-    const total = ipdN + opdN;
+    const choices = [];
     const out = people.map((p, idx) => {
-      const ipdFirst = idx < half;
-      const i = ipdFirst ? idx : idx - half;
-      const blocks = [];
-      const ipdAt = ipdFirst ? 0 : opdN;
-      const opdAt = ipdFirst ? ipdN : 0;
-      const ipd = [];
-      for (let j = 0; j < ipdN; j++) { const pr = period(ipdAt + j); ipd.push({ from: pr.from, to: pr.to, place: CYCLE[(i + j) % CYCLE.length] }); }
-      const opd = opdN ? [Object.assign(span(opdAt, opdN), { place: 'opd' })] : [];
-      (ipdFirst ? ipd.concat(opd) : opd.concat(ipd)).forEach(b => blocks.push(b));
-      const r = { from: period(0).from, to: period(total - 1).to };
-      const base = clone(p);
-      return Object.assign(base, {
+      const key = personKey(p, idx);
+      const ipdFirst = typeof p.ipdFirst === 'boolean' ? p.ipdFirst : idx < half;   // R6 fix H1: a stored side wins
+      const ipdAt = ipdFirst ? 0 : opdN, opdAt = ipdFirst ? ipdN : 0;
+      const parts = ipdParts(period, ipdAt, ipdN);
+      // R6 fix L6: extras partly outside the range are clipped to it (no overlap → dropped)
+      const extras = (Array.isArray(p.extras) ? clone(p.extras) : []).filter(x => isObj(x) && isYmd(x.from) && isYmd(x.to) && x.from <= x.to && x.from <= range.to && x.to >= range.from)
+        .map(x => Object.assign(x, { from: x.from < range.from ? range.from : x.from, to: x.to > range.to ? range.to : x.to }));
+      // R6 fix M2: the IPD parts that started before keepBefore keep the stored place of their first day (blockOn)
+      const stored = keep && Array.isArray(p.blocks) && p.blocks.length;
+      const fixed = stored ? parts.map(pt => (pt.from < keep ? blockOn(p, pt.from) : null)) : parts.map(() => null);
+      const opdFrom = opdN ? period(opdAt).from : '';
+      let pastChanged = !!(stored && opdFrom && opdFrom < keep && blockOn(p, opdFrom) !== 'opd');
+      // the person's working days of each IPD part (not covered by an own extra)
+      const partDays = parts.map(pt => workingDays(pt.from, pt.to, hs).filter(d => !covering(extras, d)));
+      let best = null;
+      if (parts.length) {
+        const all = TRAINEE_ORDERS.map((order, oi) => {
+          const hist = [];
+          partDays.forEach((days, j) => days.forEach(d => { const c = (count[order[j]][d] || 0) + 1; hist[c] = (hist[c] || 0) + 1; }));
+          return { oi, hist, max: Math.max(0, hist.length - 1), pref: 0, ok: fixed.every((f, j) => f === null || f === order[j]) };
+        });
+        let pool = all.filter(c => c.ok);
+        if (!pool.length) { pool = all; pastChanged = true; }
+        pool.forEach(cand => { if (!best || better(cand, best)) best = cand; });
+      }
+      const oi = best ? best.oi : 0;
+      const order = TRAINEE_ORDERS[oi];
+      const ipd = parts.map((pt, j) => ({ from: pt.from, to: pt.to, place: order[j] }));
+      const opd = opdN ? [{ from: period(opdAt).from, to: period(opdAt + opdN - 1).to, place: 'opd' }] : [];
+      const blocks = ipdFirst ? ipd.concat(opd) : opd.concat(ipd);
+      const person = Object.assign(clone(p), {
         kind: 'trainee',
         name: str(p.name).trim(),
         nickname: str(p.nickname).trim(),
         code: str(p.code).trim(),
         org: '',
         cohort: str(o.cohort !== undefined ? o.cohort : p.cohort).trim(),
-        start: r.from, end: r.to,
+        start: range.from, end: range.to,
         blocks,
-        extras: Array.isArray(p.extras) ? clone(p.extras).filter(x => isObj(x) && isYmd(x.from) && isYmd(x.to) && x.from >= r.from && x.to <= r.to) : [],
+        extras,
         note: str(p.note)
       });
+      delete person.ipdFirst;
+      if (best && best.max > 1) {
+        warnings.push({ code: 'SHARED_STATION', key, text: (shortName(person) || 'เทคใหม่') + ': บางวันอยู่ Station เดียวกับเทคใหม่คนอื่น (เลี่ยงไม่ได้)' });
+      }
+      if (pastChanged) warnings.push({ code: 'PAST_CHANGED', key, text: 'ช่วงที่ผ่านมาแล้วของ ' + (shortName(person) || 'เทคใหม่') + ' จะเปลี่ยน' });
+      countPerson(person);
+      choices.push({ key, ipdFirst, order: order.slice() });
+      return person;
     });
-    return { people: out, warnings };
+    return { people: out, start: range.from, end: range.to, choices, warnings };
+  }
+  /** The month counts of a stored rotation: the spans of its IPD and OPD blocks in months (rounded, 0–12). */
+  function traineeMonths(person) {
+    const blocks = isObj(person) && Array.isArray(person.blocks) ? person.blocks.filter(b => isObj(b) && isYmd(b.from) && isYmd(b.to) && b.from <= b.to) : [];
+    if (!blocks.length) return { ipdMonths: 3, opdMonths: 3 };
+    const months = test => {
+      let from = '', to = '';
+      blocks.forEach(b => { if (!test(b.place)) return; if (!from || b.from < from) from = b.from; if (!to || b.to > to) to = b.to; });
+      return from ? Math.max(0, Math.min(12, Math.round(daysIn(from, to) / 30.44))) : 0;
+    };
+    let ipd = months(p => IPD_PLACES.indexOf(p) >= 0), opd = months(p => p === 'opd');
+    while (ipd + opd > MAX_MONTHS) { if (ipd >= opd) ipd--; else opd--; }   // R6 fix M3: stays within 400 days
+    return { ipdMonths: ipd, opdMonths: opd };
   }
 
   /* ------------------------------------------------------------------ students */
@@ -384,50 +487,58 @@
     return a.oi < b.oi;
   }
 
-  /* ------------------------------------------------------------------ pictures */
-  function periodRows(people) {
-    const list = (Array.isArray(people) ? people : []).filter(isObj);
-    const cuts = new Set();
-    list.forEach(p => (Array.isArray(p.blocks) ? p.blocks : []).forEach(b => {
-      if (isObj(b) && isYmd(b.from) && isYmd(b.to) && b.from <= b.to) { cuts.add(b.from); cuts.add(addDays(b.to, 1)); }
-    }));
-    const pts = Array.from(cuts).sort();
-    const rows = [];
-    for (let k = 0; k + 1 < pts.length; k++) {
-      const from = pts[k], to = addDays(pts[k + 1], -1);
-      const places = list.map(p => blockOn(p, from));
-      if (places.some(Boolean)) rows.push({ from, to, label: '', places });
-    }
-    const monthly = rows.length > 0 && rows.every(r => isMonthStart(r.from) && r.to === monthEnd(r.from));
-    rows.forEach(r => {
-      r.label = monthly ? monthName(r.from) + ' (' + be(r.from.slice(0, 4)) + ')' : dayLong(r.from) + ' - ' + dayLong(r.to);
+  /* ------------------------------------------------------------------ the group view (R6-SPEC §3.2) */
+  /** {place: [[from, to]]} — the blocks per place, sorted, touching ranges merged. */
+  function placeRanges(person) {
+    const out = {};
+    PLACES.forEach(p => { out[p] = []; });
+    const blocks = (isObj(person) && Array.isArray(person.blocks) ? person.blocks : [])
+      .filter(b => isObj(b) && isYmd(b.from) && isYmd(b.to) && b.from <= b.to && PLACES.indexOf(b.place) >= 0)
+      .slice().sort((a, b) => cmp(a.from, b.from) || cmp(a.to, b.to));
+    blocks.forEach(b => {
+      const list = out[b.place];
+      const last = list[list.length - 1];
+      if (last && addDays(last[1], 1) >= b.from) { if (b.to > last[1]) last[1] = b.to; } else list.push([b.from, b.to]);
     });
-    return { monthly, rows };
+    return out;
   }
-  function spanOf(blocks, test) {
+  /** The earliest start … the latest end of a group (blocks and extras included); null when nothing is dated. */
+  function groupSpan(people) {
     let from = '', to = '';
-    (Array.isArray(blocks) ? blocks : []).forEach(b => {
-      if (!isObj(b) || !isYmd(b.from) || !isYmd(b.to) || !test(b.place)) return;
-      if (!from || b.from < from) from = b.from;
-      if (!to || b.to > to) to = b.to;
+    const take = (a, b) => { if (isYmd(a) && isYmd(b) && a <= b) { if (!from || a < from) from = a; if (!to || b > to) to = b; } };
+    (Array.isArray(people) ? people : []).forEach(p => {
+      if (!isObj(p)) return;
+      take(p.start, p.end);
+      [p.blocks, p.extras].forEach(list => (Array.isArray(list) ? list : []).forEach(b => { if (isObj(b)) take(b.from, b.to); }));
     });
     return from ? { from, to } : null;
   }
-  function ipdOpdSummary(person) {
-    const blocks = isObj(person) ? person.blocks : null;
-    const ipdRange = spanOf(blocks, p => IPD_PLACES.indexOf(p) >= 0);
-    const opdRange = spanOf(blocks, p => p === 'opd');
-    return {
-      ipd: ipdRange ? spanText(ipdRange.from, ipdRange.to) : '',
-      opd: opdRange ? spanText(opdRange.from, opdRange.to) : '',
-      ipdRange, opdRange
-    };
+  /** The 1st of every month inside (from, to] with its Thai short label (January with the year: "ม.ค. 70"). */
+  function monthTicks(from, to) {
+    if (!isYmd(from) || !isYmd(to) || from > to) return [];
+    const lab = d => { const m = +d.slice(5, 7); return MONTHS_SHORT[m - 1] + (m === 1 ? ' ' + String(be(d.slice(0, 4))).slice(2) : ''); };
+    const out = [{ date: from, label: lab(from), start: true }];   // R6 fix L8: the start month at the left edge
+    for (let d = addMonths(from, 1); d <= to; d = addMonths(d, 1)) {
+      const m = +d.slice(5, 7);
+      out.push({ date: d, label: MONTHS_SHORT[m - 1] + (m === 1 ? ' ' + String(be(d.slice(0, 4))).slice(2) : '') });
+    }
+    return out;
+  }
+  /** Where [a, b] sits on the timeline of [from, to]: {left, width} in % (clamped to the timeline). */
+  function spanPct(from, to, a, b) {
+    if (!isYmd(from) || !isYmd(to) || !isYmd(a) || !isYmd(b) || from > to) return { left: 0, width: 0 };
+    const total = daysIn(from, to);
+    const x = a < from ? from : a, y = b > to ? to : b;
+    if (x > y) return { left: 0, width: 0 };
+    const r = v => Math.round(v * 1000) / 1000;
+    return { left: r((daysIn(from, x) - 1) / total * 100), width: r(daysIn(x, y) / total * 100) };
   }
 
   global.TrainingEngine = Object.freeze({
-    PLACES, IPD_PLACES, PLACE_LABEL, STATION_OF, CYCLE, ORDERS,
+    PLACES, IPD_PLACES, PLACE_LABEL, STATION_OF, CYCLE, ORDERS, TRAINEE_ORDERS,
     holidaySet, isWorkingDay, workingDays, placeOn, blockOn,
-    traineePlan, studentPlan, periodRows, ipdOpdSummary,
+    traineePeriods, traineePlan, traineeMonths, studentPlan,
+    placeRanges, groupSpan, monthTicks, spanPct,
     rangeText, extraNote, firstName, shortName, monthName, monthYear,
     staffBase, hasTraineeTag, staffMatch, linkStaff, stationTrainees
   });

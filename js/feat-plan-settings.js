@@ -78,7 +78,7 @@
     notSetShort: 'ยังไม่ได้ตั้ง',
     notSetMeaning: 'ยังไม่ได้ตั้ง = เติมได้เฉพาะ Portable, IPD, ER',
     skillsHint: 'ใช้ตอนระบบเสนอคนลง Station — OR, US, CANCER CENTER ต้องติ๊กให้ชัดเจน ส่วน Prereview/Supervisor จัดเองเท่านั้น',
-    missionHint: 'เรียงตามลำดับการขึ้นภารกิจ — คนที่ลาวันนั้นจะถูกข้าม',
+    missionHint: 'เรียงตามลำดับการขึ้นภารกิจ — คนที่ลาวันนั้นจะถูกข้าม · จัดเฉพาะวันทำงาน (ไม่จัดเสาร์ อาทิตย์ และวันหยุด)',
     aliasHint: 'ใช้ช่วยอ่านข้อความแทนเวร',
     pairsHint: 'เห็นเฉพาะ Supervisor — ระบบจะไม่จัดคู่นี้ลง Station เดียวกันเอง',
     pairsUnsupported: 'เซิร์ฟเวอร์ยังไม่รองรับ "ห้ามอยู่คู่กัน" — อัปเดต Code.gs เป็นรุ่นล่าสุดแล้วลองอีกครั้ง',
@@ -406,7 +406,7 @@
   const HEADS = {
     skills: () => sectionHead('skills', 'users', k().listIconBrand, MSG.notSetMeaning + ' — ' + MSG.skillsHint),
     assistants: () => sectionHead('assistants', 'user', k().listIconInfo, 'ผู้ช่วยที่จับคู่กับเทค Portable และเวรกลางวัน ER/IPD'),
-    holidays: () => sectionHead('holidays', 'calendar-off', k().listIconDanger, 'วันหยุดนักขัตฤกษ์ — ไม่จัดสาย Portable และเวรกลางวัน'),
+    holidays: () => sectionHead('holidays', 'calendar-off', k().listIconDanger, 'วันหยุดนักขัตฤกษ์ — ไม่จัดสาย Portable เวรกลางวัน และภารกิจพิเศษ'),
     mission: () => sectionHead('mission', 'phone', k().listIconLilac, MSG.missionHint),
     aliases: () => sectionHead('aliases', 'message', k().listIconSun, MSG.aliasHint),
     priority: () => sectionHead('priority', 'sort', k().listIconNeutral, 'ใช้ตอนระบบเสนอคนลง Station ในแต่ละวัน'),
