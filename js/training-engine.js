@@ -80,9 +80,13 @@
  *   staffBase(staffName) → the name without a trailing "(…)", trimmed · hasTraineeTag(staffName) → ends in "(Trainee)"
  *   staffMatch(staffName, person, supervisor) → 3 full name exactly · 2 base = first name / nickname with "(Trainee)" · 1 the
  *       same without the tag · 0 no link; the Supervisor's plain name links only through the full name (or a "(Trainee)" tag)
- *   linkStaff(person, staffNames, supervisor) → the best-matching staff name | ''
- *   stationTrainees({people, date, slots, staff, supervisor}) → {[stationId]: [shortName]} — trainees only (STATION_OF of
- *       placeOn), leaving out one whose linked account already sits in that station's slots that day
+ *   linkStaff(person, staffNames, supervisor, min = 1) → the best-matching staff name of score ≥ min | ''
+ *   traineeLabel(person, staffNames, supervisor) → the trainee's own account (linkStaff min 2: the full name or a
+ *       "(Trainee)" tag — never a colleague who only shares the first name), else "<first name>(Trainee)" (no space)
+ *   stationTrainees({people, date, slots, staff, supervisor, absent}) → {[stationId]: [traineeLabel]} — 3.5.1: the names
+ *       of the วันนี้ Station cards and the day picture; trainees only (STATION_OF of placeOn), leaving out one whose
+ *       name already sits in ANY station's slots that day (the Supervisor's placement wins) and one whose account is
+ *       absent (absent: the full-day leave names — string[] | Set | {[name]: …})
  * ===================================================================== */
 (function (global) {
   'use strict';
@@ -201,32 +205,55 @@
     if (!base || !(base === firstName(full) || (nick && base === nick))) return 0;
     return tagged ? 2 : 1;
   }
-  /** The staff account linked to a training record: the best staffMatch among staffNames (first one on a tie), else ''. */
-  function linkStaff(person, staffNames, supervisor) {
+  /** The staff account linked to a training record: the best staffMatch of at least `min` (default 1) among staffNames
+   *  (first one on a tie), else ''. */
+  function linkStaff(person, staffNames, supervisor, min) {
+    const floor = min === 2 || min === 3 ? min : 1;
     let best = '', score = 0;
     (Array.isArray(staffNames) ? staffNames : []).forEach(n => {
       const sc = staffMatch(n, person, supervisor);
-      if (sc > score) { score = sc; best = str(n).trim(); }
+      if (sc >= floor && sc > score) { score = sc; best = str(n).trim(); }
     });
     return best;
   }
+  /** 3.5.1: the name a trainee goes by on วันนี้ and in the day picture — the own account (the full name or a "(Trainee)"
+   *  tag), else "<first name>(Trainee)" like the owner's accounts. */
+  function traineeLabel(person, staffNames, supervisor) {
+    const acct = linkStaff(person, staffNames, supervisor, 2);
+    if (acct) return acct;
+    const first = firstName(isObj(person) ? person.name : '');
+    return first ? first + '(Trainee)' : '';
+  }
+  /** A name set from string[] | Set | Map | {[name]: …}. */
+  function nameSet(v) {
+    const out = new Set();
+    const add = n => { const t = str(n).trim(); if (t) out.add(t); };
+    if (v instanceof Set) v.forEach(add);
+    else if (v instanceof Map) v.forEach((x, k) => add(k));
+    else if (Array.isArray(v)) v.forEach(add);
+    else if (isObj(v)) Object.keys(v).forEach(add);
+    return out;
+  }
   /**
-   * The วันนี้ "ฝึกงาน" names of one date: {[stationId]: [shortName]} for the trainees (never students) at each station, leaving
-   * out a trainee whose linked staff account is already in that station's slots ({[stationId]: [names]}) that day.
-   * o: {people, date, slots, staff: [staff names], supervisor}. The caller decides whether the date is a working day.
+   * 3.5.1: the trainee names of one date inside their Station (วันนี้ cards, the day picture): {[stationId]: [traineeLabel]}
+   * for the trainees (never students) at each station, leaving out a trainee whose name (the own account, else the label)
+   * already sits in ANY station's slots ({[stationId]: [names]}) that day, and one whose name is absent (full-day leave).
+   * o: {people, date, slots, staff: [staff names], supervisor, absent}. The caller decides whether the date is a working day.
    */
   function stationTrainees(o) {
     const x = isObj(o) ? o : {};
     const out = {};
     if (!isYmd(x.date)) return out;
-    const slots = isObj(x.slots) ? x.slots : {};
+    const placed = new Set();
+    if (isObj(x.slots)) Object.keys(x.slots).forEach(k => { if (Array.isArray(x.slots[k])) x.slots[k].forEach(n => { if (str(n)) placed.add(str(n).trim()); }); });
+    const absent = nameSet(x.absent);
     (Array.isArray(x.people) ? x.people : []).forEach(p => {
       if (!isObj(p) || p.kind !== 'trainee') return;
       const st = STATION_OF[placeOn(p, x.date)];
       if (!st) return;
-      const acct = linkStaff(p, x.staff, x.supervisor);
-      if (acct && Array.isArray(slots[st]) && slots[st].indexOf(acct) >= 0) return;
-      (out[st] || (out[st] = [])).push(shortName(p));
+      const name = traineeLabel(p, x.staff, x.supervisor);
+      if (!name || placed.has(name) || absent.has(name)) return;
+      (out[st] || (out[st] = [])).push(name);
     });
     return out;
   }
@@ -540,6 +567,6 @@
     traineePeriods, traineePlan, traineeMonths, studentPlan,
     placeRanges, groupSpan, monthTicks, spanPct,
     rangeText, extraNote, firstName, shortName, monthName, monthYear,
-    staffBase, hasTraineeTag, staffMatch, linkStaff, stationTrainees
+    staffBase, hasTraineeTag, staffMatch, linkStaff, traineeLabel, stationTrainees
   });
 })(typeof window !== 'undefined' ? window : globalThis);

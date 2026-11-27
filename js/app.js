@@ -31,7 +31,7 @@
    *    ipd_boot_retry with the inline guard: after 2 only the "โหลดใหม่" button remains. init() clears the counter.
    * APP_BUILD = sw.js VERSION = the ?v= of index.html's scripts = js/api.js CLIENT_VERSION (tests/sw.test.js).
    */
-  const APP_BUILD = '3.5.0';
+  const APP_BUILD = '3.5.1';
   const BOOT_RETRY_KEY = 'ipd_boot_retry';
   // R1b: also a page of another release (its inline guard names its own build, e.g. a v2.9 index.html served from the HTTP cache
   // whose ?v=2.9.0 URLs now answer with these files): its markup is not this release's — the guard of that page takes over
@@ -2295,7 +2295,7 @@
         act: activeSet(), me: myName(), planned: isPlannedDay(date), pairs: isSup() ? avoidPairsNow() : [], proposal: proposalActive(date),
         problem: problemCardInfo(), date };
       const slots = viewSlots(date);
-      card.training = trainingLinesNow(date, slots);   // R5: a trainee already placed in a station's slots is not repeated there
+      card.training = trainingLinesNow(date, slots);   // 3.5.1: a trainee already in any station's slots is not repeated
       setHtml(container, U.STATIONS.map(st => stationCardHtml(st, slots, card)).join(''));
     }
     renderMyDay();
@@ -2340,7 +2340,8 @@
    * One station: a white card with the station's colour as a left edge and a tinted title chip, the line
    * "ต้องการ N คน" + "(ขาด N)" (or "ครบ"), then the people (chips) or, for the Supervisor, one native picker per slot.
    * card: {sup, locked (pickers disabled), onLeave (ABSENT people: never offered), rows (every leave row: a doctor visit
-   * or a pending request is shown as a tag but never blocks), act (active names), me}.
+   * or a pending request is shown as a tag but never blocks), act (active names), me, training ({[stationId]: [names]} of
+   * trainingLinesNow: read-only trainee rows after the people, 3.5.1)}.
    */
   function stationCardHtml(st, slots, card) {
     const { sup, locked, onLeave, rows, act, me, planned, pairs, proposal, problem, date, training } = card;
@@ -2388,9 +2389,17 @@
     const foot = problemBtn || sortBtn
       ? `<div class="flex flex-wrap items-center justify-end gap-2 mt-1.5 -mb-1 -mx-1.5" data-station-foot>${sortBtn ? `<span class="mr-auto">${sortBtn}</span>` : ''}${problemBtn}</div>`
       : '';
+    // 3.5.1: the trainees training here today (never students; js/feat-training.js) — read-only name rows after the people,
+    // styled like them (no picker, no remove): not a slot, never counted in "ต้องการ N คน" / "(ขาด N)", never saved
+    const tNames = traineesAt(training, st.id);
+    const traineeRows = (sup || reorderOn) && tNames.length
+      ? '<div class="' + (reorderOn ? 'mt-2 ' : '') + 'space-y-2" data-training-line="' + st.id + '">' + tNames.map(n =>
+        `<div class="${k.slotRow}" data-trainee="${esc(n)}">${Kit.avatar(n, 'sm')}` +
+        `<span class="flex-1 min-w-0 min-h-[44px] flex items-center pl-3.5 text-base leading-6 text-ink-900 break-words">${esc(n)}</span></div>`).join('') + '</div>'
+      : '';
     let body;
     if (reorderOn) {
-      body = reorderBodyHtml(st, filled, date, locked, act);
+      body = reorderBodyHtml(st, filled, date, locked, act) + traineeRows;
     } else if (sup) {
       const pos = new Map();   // name → "stationId:index" of the slot holding it
       U.STATIONS.forEach(s => (slots[s.id] || []).forEach((n, i) => { if (n) pos.set(n, s.id + ':' + i); }));
@@ -2418,7 +2427,7 @@
         return `<div class="${k.slotRow}">${lead}` +
           `<select class="station-select ${proposal && cur ? PROPOSED_SELECT : k.select}"${proposal && cur ? ' data-proposed="1"' : ''} data-station="${st.id}" data-index="${i}" aria-label="${esc(st.name)} คนที่ ${i + 1}${proposal && cur ? ' (ข้อเสนอ ยังไม่ได้บันทึก)' : ''}"${locked ? ' disabled' : ''}>` +
           `<option value=""${cur ? '' : ' selected'}>-- เลือกคนที่ ${i + 1} --</option>${gone}${opts}</select></div>${warn}`;
-      }).join('') + '</div>' + avoidPairLines(filled, pairs);
+      }).join('') + traineeRows + '</div>' + avoidPairLines(filled, pairs);
     } else {
       body = `<div class="station-names mt-2.5 flex flex-wrap gap-2" data-station="${st.id}">` +
         (filled.length
@@ -2432,14 +2441,14 @@
               '</span>';
           }).join('')
           : `<span class="${k.personEmpty}">ยังไม่ได้จัดสรร</span>`) +
-        '</div>';
+        '</div>' +
+        (tNames.length
+          ? `<div class="mt-2 flex flex-wrap gap-2" data-training-line="${st.id}">` + tNames.map(n =>
+            `<span class="${n === me ? k.personChipMe : k.personChip}" data-trainee="${esc(n)}">${Kit.avatar(n, 'xs')}<span class="min-w-0 break-words">${esc(n)}</span></span>`).join('') + '</div>'
+          : '');
     }
-    // R5-SPEC §3.4: the trainees training here today (never students): one muted line — not a slot, never counted or saved
-    const trainees = training && Array.isArray(training[st.id]) && training[st.id].length
-      ? `<p class="mt-2 text-xs font-medium leading-5 text-slate-500 break-words" data-training-line="${st.id}">ฝึกงาน: ${training[st.id].map(esc).join(', ')}</p>`
-      : '';
     return `<div class="station-card ${k.stationCard}" data-station-card="${st.id}">` +
-      `<span class="${k.stationEdge}" style="background:${st.border}" aria-hidden="true"></span>${head}${body}${trainees}${foot}</div>`;
+      `<span class="${k.stationEdge}" style="background:${st.border}" aria-hidden="true"></span>${head}${body}${foot}</div>`;
   }
 
   /**
@@ -2584,15 +2593,24 @@
     try { const list = plan.avoidPairs(); return Array.isArray(list) ? list : []; } catch (e) { console.error('[core] avoidPairs failed:', e); return []; }
   }
   /**
-   * R5-SPEC §3.4: {[stationId]: [names]} of the trainees at each station on `date` — use('training.station')(date, slots)
-   * (js/feat-training.js: working days only, trainees only, without a trainee whose own staff account already sits in that
-   * station's slots — the slots as this card shows them) while the server has 'training'; {} otherwise or when it fails.
+   * R5-SPEC §3.4 / 3.5.1: {[stationId]: [names]} of the trainees at each station on `date` — use('training.station')(date,
+   * slots, {absent}) (js/feat-training.js: working days only, trainees only, by account name "<first name>(Trainee)",
+   * without a trainee who already sits in ANY station's slots — the slots as the card / picture shows them — or who has a
+   * full-day leave: absentLeaves) while the server has 'training'; {} otherwise or when it fails.
    */
   function trainingLinesNow(date, slots) {
     if (!serverHas('training')) return {};
     const fn = use('training.station');
     if (typeof fn !== 'function') return {};
-    try { const m = fn(date, slots || {}); return m && typeof m === 'object' ? m : {}; } catch (e) { console.error('[core] training.station failed:', e); return {}; }
+    try {
+      const m = fn(date, slots || {}, { absent: Object.keys(absentLeaves(date)) });
+      return m && typeof m === 'object' ? m : {};
+    } catch (e) { console.error('[core] training.station failed:', e); return {}; }
+  }
+  /** The trainee names of one station from a trainingLinesNow map (strings only). */
+  function traineesAt(training, stationId) {
+    const list = training && Array.isArray(training[stationId]) ? training[stationId] : [];
+    return list.filter(n => typeof n === 'string' && n);
   }
   /** A coral warning line per pair that sits in this station (draft, proposal or saved day) — a warning, never a block. */
   function avoidPairLines(names, pairs) {
@@ -3777,15 +3795,20 @@
     // R2: the shared picture never shows an unsaved proposal (only a draft the Supervisor made)
     const slots = state.user && !proposalActive(date) ? viewSlots(date) : storedSlots(date);
     const act = activeSet();
+    // 3.5.1: the trainees of the training plan (working days; not one already in these slots or on a full-day leave) follow
+    // the staff names of their station, in the same style — never counted, never saved
+    const training = state.user ? trainingLinesNow(date, slots) : {};
+    const nameSpan = (n, tr) => `<span${tr ? ' data-img-trainee="1"' : ''} style="font-size:15px; font-weight:600; line-height:22px; color:#1A2C63;">${esc(n)}</span>`;
     setHtml($('resultStations'), U.STATIONS.map(st => {
-      const arr = (slots[st.id] || []).filter(Boolean);
-      // label | names on one line at the exported width; in a narrow preview the names wrap under the label.
+      const arr = (slots[st.id] || []).filter(Boolean).map(a => nameSpan(nameLabel(a, act), false))
+        .concat(traineesAt(training, st.id).map(n => nameSpan(n, true)));
+      // label | names on one line at the exported width (3.5.1: the preview is drawn at that width too, scaled to the card).
       // 3.1.1 (owner, style C): every station chip fills the label column, so all chips have the same length, name centred
       return `<div style="display:flex; flex-wrap:wrap; align-items:flex-start; gap:4px 10px; padding:8px 10px; border-radius:16px; background:#FFFFFF; border:1.5px solid #FFE3EF;">` +
         `<div style="flex:0 0 auto; width:38%; min-width:134px; max-width:142px; display:flex; flex-wrap:wrap; align-items:center; gap:4px; padding-top:1px;">` +
           `<span style="display:block; width:100%; box-sizing:border-box; text-align:center; padding:2px 10px; border-radius:12px; background:${st.bg}; color:${st.text}; ${IMG_FONT} font-size:13px; font-weight:500; line-height:20px;">${esc(st.name).replace('/', '/<wbr>')}</span></div>` +
         `<div style="flex:1 1 150px; min-width:0; display:flex; flex-wrap:wrap; gap:2px 12px; padding-top:1px;">` +
-        (arr.length ? arr.map(a => `<span style="font-size:15px; font-weight:600; line-height:22px; color:#1A2C63;">${esc(nameLabel(a, act))}</span>`).join(' ')
+        (arr.length ? arr.join(' ')
           : '<span style="font-size:13px; line-height:22px; color:#64748b;">ยังไม่ได้จัดสรร</span>') +
         `</div></div>`;
     }).join(''));
@@ -3808,6 +3831,59 @@
     const rc = $('resultRemarkContainer');
     $('resultRemarkText').textContent = rv;
     rc.style.display = rv ? 'block' : 'none';
+    fitCapturePreview();
+  }
+
+  /**
+   * 3.5.1: the preview of the day picture looks exactly like the saved file — #captureScale lays #captureArea out at
+   * CAPTURE_WIDTH (the width html2canvas draws it at) and is scaled with a transform to the card's width (never larger than
+   * 1, centred in a wider card); #captureFit takes the scaled height. #captureArea itself is never transformed, so the
+   * staged node is drawn as is. Runs after every renderPreview, after a capture puts the node back, and when the card's
+   * width or the picture's height changes (ResizeObserver, else window resize). A hidden screen (width 0) is left alone.
+   */
+  function fitCapturePreview() {
+    const fit = $('captureFit'), box = $('captureScale');
+    if (!fit || !box) return;
+    // a new height may bring the page scrollbar (a desktop browser): measure again until the width holds
+    for (let i = 0; i < 3; i++) {
+      const w = fit.clientWidth;
+      if (!w) return;
+      const sc = Math.min(1, w / CAPTURE_WIDTH);
+      const left = Math.max(0, Math.floor((w - CAPTURE_WIDTH * sc) / 2));
+      const tf = (left ? 'translateX(' + left + 'px) ' : '') + 'scale(' + sc + ')';
+      if (box.style.transform !== tf) box.style.transform = tf;
+      const hgt = Math.ceil(box.offsetHeight * sc) + 'px';
+      if (fit.style.height !== hgt) fit.style.height = hgt;
+      fit.dataset.scale = String(Math.round(sc * 10000) / 10000);
+      if (fit.clientWidth === w) return;
+    }
+  }
+  /** Re-fits the day-picture preview when the card's width or the picture's height changes (ResizeObserver: in the next
+   *  frame, never inside the observer's delivery) and on every window resize (the screen switch fits it too: switchTo). */
+  function watchCapturePreview() {
+    const fit = $('captureFit'), box = $('captureScale');
+    if (!fit || !box) return;
+    let queued = false;
+    const later = () => {
+      if (queued) return;
+      queued = true;
+      const run = () => { queued = false; fitCapturePreview(); };
+      if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(run); else setTimeout(run, 0);
+    };
+    if (typeof window.ResizeObserver === 'function') {
+      let lastW = -1, lastH = -1;
+      try {
+        const ro = new window.ResizeObserver(() => {
+          const w = fit.clientWidth, hgt = box.offsetHeight;
+          if (w === lastW && hgt === lastH) return;
+          lastW = w; lastH = hgt;
+          later();
+        });
+        ro.observe(fit);
+        ro.observe(box);
+      } catch (e) { /* the window resize below */ }
+    }
+    window.addEventListener('resize', fitCapturePreview);   // also without the observer (and before its next frame)
   }
 
   function renderCopiedStatus() {
@@ -4859,6 +4935,7 @@
       parent.insertBefore(area, hold);
       hold.remove();
       stage.remove();
+      fitCapturePreview();   // 3.5.1: the day-picture preview is scaled again (the node itself was never transformed)
     };
   }
 
@@ -5164,7 +5241,7 @@
    * Load order (R3-SPEC §4.1, R5): config.js → utils.js → api.js → ui-kit.js → xlsx-lite.js → plan-engine.js →
    * training-engine.js → app.js → plan-data.js → feat-profile.js → feat-approval.js → feat-roster.js → feat-plan-settings.js →
    * feat-backup.js → feat-dashboard.js → feat-problems.js → feat-chat.js → feat-training.js. R5: window.TrainingEngine is NOT
-   * required by the boot guard (feat-training.js checks it; without it no training screen / วันนี้ line). A feature file registers at load time (before init) or later
+   * required by the boot guard (feat-training.js checks it; without it no training screen / trainee names on วันนี้). A feature file registers at load time (before init) or later
    * ("late registration" works the same way). window.PlanEngine (pure engine) is loaded before this file; the boot guard
    * requires it. R3: window.XlsxLite (js/xlsx-lite.js) is NOT required — a feature checks it and hides its Excel button
    * without it; Api.newId() makes the client ids of R3 writes (a photo's fileId, a chat message's cid).
@@ -5342,10 +5419,13 @@
    *     'plan'. R6: 'plan.dutyNotice' fn(date, staff, type, detail) → [text] — the leave sheet's warning
    *     [data-duty-clash-notice] under the pick (a lunch duty / special mission the pick leaves uncovered; never blocks).
    *     #menuServerNote tells the Supervisor of a 3.0 / 3.1 server to update Code.gs to 3.2 (see messages above).
-   *   R5 services (Code.gs 3.4, read only while serverHas('training')): 'training.station' fn(date, slots) → {[stationId]: [names]}
-   *     (js/feat-training.js: the trainees at each station on a working day — never students, nor one already in that station's slots) drawn as one muted line
-   *     "ฝึกงาน: <names>" ([data-training-line="<id>"]) under the people of that station card — not a slot, never counted,
-   *     never part of saveDay / the proposal / the day picture; 'training.myDay' fn(date, name) → plan lines like 'plan.myDay'
+   *   R5 services (Code.gs 3.4, read only while serverHas('training')): 'training.station' fn(date, slots, {absent}) →
+   *     {[stationId]: [names]} (js/feat-training.js: the trainees at each station on a working day by their account name
+   *     "<first name>(Trainee)" — never students, nor one already in ANY station's slots, nor one on a full-day leave
+   *     (absent: the names of absentLeaves)). 3.5.1: drawn as read-only name rows ([data-training-line="<id>"] >
+   *     [data-trainee="<name>"]) after the people of that station card and after the staff names of that station's row in
+   *     the day picture (#captureArea) — not a slot, never counted ("ต้องการ N คน" / "(ขาด N)" unchanged), never part of
+   *     saveDay / the draft / the proposal; 'training.myDay' fn(date, name) → plan lines like 'plan.myDay'
    *     ("ฝึกงาน <Station>" of a trainee linked to my account: "<first name>(Trainee)", the full name or the nickname), appended after them in "ของฉันวันนี้".
    *   R3 services: 'problems.report' fn(stationId) (js/feat-problems.js; turns the station-card button on) · 'problems'
    *     {ensure, list, openSummary} (the team dashboard reads it). saveFile(blob, filename) is unchanged; an .xlsx blob
@@ -5707,6 +5787,7 @@
     // R3 FIX-CL2 Q-2: วันนี้ (legacy) is drawn again on arrival — a domain change made while another screen was shown (e.g.
     // the problem domain behind the "ปัญหาค้าง N" pill, changed on แจ้งปัญหา) never reached its cards
     if (ui.tab === 'station' && state.user) renderStationTab();
+    if (ui.tab === 'summary') fitCapturePreview();   // 3.5.1: the preview was hidden (width 0) while it was last drawn
     try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (e) { /* ignore */ }
     return ui.tab === id;
   }
@@ -6360,19 +6441,20 @@
    * an update (never on a first-ever login on a device) unless APP_CONFIG.WHATS_NEW === false. An item with `sup: true`
    * is listed only for the Supervisor (R3 FIX-CL L-8: staff cannot open Dashboard ทีม).
    */
-  // R6 (WHATS_NEW 3.5.0, owner requests 2026-11-27): the five changes of 3.5 first; the item of 3.4.1 stays last for phones
-  // that skipped it
+  // R6b (WHATS_NEW 3.5.1, owner requests 2026-11-27): the two changes of 3.5.1 first, then the five of 3.5.0 (released the
+  // same day — most phones skip it)
   const WHATS_NEW = Object.freeze({
-    version: '3.5.0',
+    version: '3.5.1',
     title: 'มีอะไรใหม่',
-    subtitle: 'เวอร์ชัน 3.5.0 — แก้เวรกลางวันเองได้ และตารางฝึกงานแบบใหม่',
+    subtitle: 'เวอร์ชัน 3.5.1 — เทคใหม่ใน Station และแก้เวรกลางวันเองได้',
     items: Object.freeze([
+      { icon: 'school', title: 'เทคใหม่อยู่ใน Station', text: 'หน้าวันนี้และภาพตารางเวรรายวันแสดงชื่อเทคใหม่ เช่น ชื่อ(Trainee) ใน Station ที่ฝึกวันนั้นให้อัตโนมัติ — ไม่นับเป็นจำนวนคนของ Station' },
+      { icon: 'image', title: 'ตัวอย่างภาพตรงกับไฟล์จริง', text: 'รายงานและส่งออก: ตัวอย่างภาพตารางเวรรายวันวาดขนาดเดียวกับภาพที่บันทึก แล้วย่อให้พอดีจอ', sup: true },
       { icon: 'swap', title: 'แก้/แลกเวรกลางวันได้เอง', text: 'ตารางเวร → กลางวัน: ทุกคนแก้เวรกลางวัน ER/IPD ของวันนี้เป็นต้นไปได้เอง (กด แก้ไข หรือ แก้/แลกเวร ในของฉัน) — บันทึกชื่อผู้แก้ทุกครั้ง' },
       { icon: 'alert-triangle', title: 'เตือนเมื่อวันลาตรงกับวันที่มีเวร', text: 'ถ้าลา (หรือขอลาที่รออนุมัติ) ตรงกับวันที่คุณมีเวรกลางวันหรือภารกิจพิเศษ แอปจะเตือนตอนลงลา และขึ้นแถบเตือนพร้อมตัวเลขที่ปุ่ม ตารางเวร จนกว่าจะหาคนแทน' },
       { icon: 'school', title: 'ตารางฝึกงานแบบใหม่', text: 'เมนู → ตารางฝึกงาน: แถบเวลาสีตาม Station และตารางสรุปช่วง IPD / ER / Portable / OPD ของแต่ละคน · ดูได้ว่าวันไหนใครฝึกที่ไหน · ส่งออกเป็นรูปทีละรอบ/มหาวิทยาลัย' },
       { icon: 'users', title: 'เพิ่มเทคใหม่และนักศึกษาหลายคนพร้อมกัน', text: 'Supervisor ใส่รายชื่อพร้อมชื่อเล่นและหมายเหตุ ระบบจัด IPD (IPD, ER, Portable) และ OPD อย่างละครึ่งให้อัตโนมัติ — เทคใหม่เริ่มวันไหนก็ได้ และไม่ซ้อน Station กับรอบอื่นถ้าเลี่ยงได้' },
-      { icon: 'wand', title: 'สร้างตารางเวรอัตโนมัติ', text: 'เวรกลางวัน IPD วนคน IPD + Portable + Supervisor ของเดือน · ภารกิจพิเศษจัดเฉพาะวันทำการ', sup: true },
-      { icon: 'image', title: 'รูปตารางเวรในทุกหัวข้อ', text: 'ตารางเวร: แต่ละหัวข้อแสดงรูปตารางแบบของหน่วยงาน พร้อมปุ่มบันทึกรูป PNG — แตะรูปเพื่อดูขนาดเต็ม · ของฉัน มีรูป ตารางเวรของฉัน (สาย Portable เวรกลางวัน ภารกิจพิเศษ และวันลาของคุณทั้งเดือน) · ตารางแบบรายการอยู่ใต้ปุ่ม ดูแบบรายการ' }
+      { icon: 'wand', title: 'สร้างตารางเวรอัตโนมัติ', text: 'เวรกลางวัน IPD วนคน IPD + Portable + Supervisor ของเดือน · ภารกิจพิเศษจัดเฉพาะวันทำการ', sup: true }
     ])
   });
   const WHATS_NEW_SEEN = 'whatsNewSeen';   // core.store.prefs key: the version whose notes were shown on this device
@@ -6624,6 +6706,7 @@
     on('shareImgBtn', 'click', () => spawn(onShareImage));
     on('saveImgBtn', 'click', () => spawn(onSaveImage));
     on('clearDayBtn', 'click', () => spawn(onClearDay, WRITE));
+    watchCapturePreview();
 
     // navigation: every nav entry of every registered screen, wherever it sits (bottom bar, header, menu)
     document.addEventListener('click', e => {

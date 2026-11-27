@@ -4,7 +4,7 @@
  *
  * Data: core.use('plan') (js/plan-data.js: training(), trainingOn(date), saveTraining, deleteTraining, holidays(),
  * fetchStats) only. Engine: window.TrainingEngine (js/training-engine.js, pure). Everything is gated on
- * core.serverHas('training') (Code.gs 3.4): a 3.3 server shows no entry, no line on วันนี้ and sends nothing.
+ * core.serverHas('training') (Code.gs 3.4): a 3.3 server shows no entry, no trainee names on วันนี้ or in the day picture and sends nothing.
  *
  *  - Screen 'training' (เมนู → ของฉัน, order 30, "ตารางฝึกงาน", icon school; everyone views, the Supervisor edits).
  *    Segments เทคใหม่ · นักศึกษา ([data-training-seg]); both share ONE layout:
@@ -35,10 +35,13 @@
  *  - Export per group (core.shareImage(node, file, {width: 880, scale: 2}); inline styles, black / white like R4's
  *    pictures): title "ตารางฝึกงานเทคใหม่ — <รอบ>" / "ตารางฝึกงานนักศึกษา — <มหาวิทยาลัย>", the span, the summary table, the
  *    footnotes, the note line(s); never a code. File "ตารางฝึกงาน-<group>.png". The export sheet shows a scaled preview.
- *  - วันนี้ (R5-SPEC §3.4, unchanged) — services read by the core:
- *    core.provide('training.station', (date, slots) → {[stationId]: [names]}): on a working day the trainees (never students)
- *    at each station (ipd / portable / er, and us / or / cancer through an extra), nickname else first name, leaving out a
- *    trainee whose own staff account already sits in that station's slots (TrainingEngine.stationTrainees); {} otherwise.
+ *  - วันนี้ and the day picture (3.5.1) — services read by the core:
+ *    core.provide('training.station', (date, slots, {absent}) → {[stationId]: [names]}): on a working day the trainees (never
+ *    students) at each station (ipd / portable / er, and us / or / cancer through an extra) by their own staff account name
+ *    ("<first name>(Trainee)"; TrainingEngine.traineeLabel: the account linked by the full name or a "(Trainee)" tag, else
+ *    "<first name>(Trainee)"), leaving out a trainee who already sits in ANY station's slots of `slots` and one whose
+ *    account is in `absent` (the full-day leave names) — TrainingEngine.stationTrainees; {} otherwise. The core shows them
+ *    as read-only name rows inside the Station card and after the staff names in #captureArea — never counted or saved.
  *    core.provide('training.myDay', (date, name) → [{icon, tone, main}]): "ฝึกงาน <Station>" for the trainees linked to the
  *    logged-in account (TrainingEngine.linkStaff).
  * DOM hooks for tests: #tab-training [data-training-screen] (data-seg, data-state), [data-training-seg], [data-training-act]
@@ -62,7 +65,7 @@
   const App = window.App;
   if (!App || typeof App.register !== 'function' || !App.core) return;
   const TE = window.TrainingEngine;
-  if (!TE) return;   // the engine did not load: no screen (the core's วันนี้ lines stay off without the services)
+  if (!TE) return;   // the engine did not load: no screen (the core shows no trainee names without the services)
 
   const ID = 'training';
   const SEGS = [{ id: 'trainee', label: 'เทคใหม่' }, { id: 'student', label: 'นักศึกษา' }];
@@ -206,11 +209,12 @@
     if (me && list.indexOf(me) < 0) list.push(me);
     return list;
   }
-  /** {[stationId]: [names]} of the trainees training at each station on a working day, without one whose own staff account
-   *  already sits in that station's slots (slots: {[stationId]: [names]} as วันนี้ shows them). */
-  function stationLines(date, slots) {
+  /** {[stationId]: [names]} of the trainees training at each station on a working day, without one who already sits in any
+   *  station's slots (slots: {[stationId]: [names]} as the card / picture shows them) or is absent (opts.absent: names). */
+  function stationLines(date, slots, opts) {
     if (!on() || !U().isValidYmd(date) || !TE.isWorkingDay(date, holidaysNow())) return {};
-    return TE.stationTrainees({ people: P().training(), date, slots: slots || {}, staff: staffNames(''), supervisor: core.state.supervisor || '' });
+    const absent = opts && opts.absent ? opts.absent : [];
+    return TE.stationTrainees({ people: P().training(), date, slots: slots || {}, staff: staffNames(''), supervisor: core.state.supervisor || '', absent });
   }
   /** "ฝึกงาน <Station>" of the trainees whose linked staff account is me (TrainingEngine.linkStaff). */
   function myDay(date, me) {

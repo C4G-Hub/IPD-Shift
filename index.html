@@ -21,7 +21,7 @@
    BOOT_BUILD = sw.js VERSION = the ?v= of the stylesheet and the scripts = js/api.js CLIENT_VERSION (tests/sw.test.js). */
 (function () {
   'use strict';
-  var BOOT_BUILD = '3.5.0';
+  var BOOT_BUILD = '3.5.1';
   /* a class of this release's stylesheet that v2.2's did not have (any background colour counts: a theme tweak is fine;
      removing the class from every page/script would make every start look stale — tests/e2e-upgrade.test.js U9) */
   var CSS_MARK = 'bg-brand-600';
@@ -149,7 +149,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Mitr:wght@500;600&family=Sarabun:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
 <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Mitr:wght@500;600&family=Sarabun:wght@400;500;600;700&display=swap"></noscript>
-<link rel="stylesheet" href="css/tailwind.css?v=3.5.0">
+<link rel="stylesheet" href="css/tailwind.css?v=3.5.1">
 <style>
 *{-webkit-tap-highlight-color:transparent;}
 /* no double-tap zoom delay, but pinch zoom stays available (accessibility) */
@@ -900,7 +900,11 @@ summary::-webkit-details-marker{display:none;}
 
       <!-- ===== EXPORT AREA — the picture staff post in LINE. Inline styles only (html2canvas draws it; no stylesheet
            classes), colours = the theme tokens of tools/build-css.html. Exported at a fixed 420 px width × 3 (js/app.js
-           captureImage). Rows: js/app.js renderPreview. ===== -->
+           captureImage). Rows: js/app.js renderPreview. 3.5.1: the preview is laid out at the same 420 px (#captureScale)
+           and scaled to the card with a transform on #captureScale (never on #captureArea, which is drawn untransformed);
+           #captureFit takes the scaled height (js/app.js fitCapturePreview). ===== -->
+      <div id="captureFit" class="relative w-full overflow-hidden" data-capture-fit>
+      <div id="captureScale" data-capture-scale style="width:420px; transform-origin:0 0;">
       <div id="captureArea" style="background:#FFFFFF; border:2px solid #FFE3EF; border-radius:24px; padding:14px; font-family:'Sarabun','Noto Sans Thai','Leelawadee UI','Thonburi',sans-serif; color:#1A2C63; overflow-wrap:anywhere;">
         <!-- header centred (owner, 3.1.1): logo above the two title lines. The logo is an <img> (not a background image):
              html2canvas draws an <img> from the 192 px file at the export scale, while a background image is first resized
@@ -925,6 +929,8 @@ summary::-webkit-details-marker{display:none;}
           <h4 style="margin:0 0 6px 0; font-family:'Mitr','Sarabun','Noto Sans Thai','Leelawadee UI','Thonburi',sans-serif; font-size:14px; font-weight:500; line-height:22px; color:#1A2C63;">หมายเหตุ</h4>
           <p id="resultRemarkText" style="margin:0; font-size:14px; font-weight:500; line-height:23px; color:#1A2C63; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word;"></p>
         </div>
+      </div>
+      </div>
       </div>
 
       <button type="button" id="saveImgBtn" class="w-full" data-kit="btn btnSecondary"><i data-ic="image" class="w-5 h-5"></i>บันทึกภาพ JPG</button>
@@ -1009,22 +1015,22 @@ summary::-webkit-details-marker{display:none;}
 <button type="button" id="updateBanner" class="hidden fixed left-1/2 -translate-x-1/2 top-32 z-[65] bg-brand-600 active:bg-brand-700 border-b-4 border-brand-800 text-white font-display text-sm font-medium px-5 py-2.5 rounded-full shadow-lg shadow-brand-900/20 whitespace-nowrap">🔄 มีเวอร์ชันใหม่ — แตะเพื่อโหลดใหม่</button>
 
 <script src="config.js"></script>
-<script src="js/utils.js?v=3.5.0"></script>
-<script src="js/api.js?v=3.5.0"></script>
-<script src="js/ui-kit.js?v=3.5.0"></script>
-<script src="js/xlsx-lite.js?v=3.5.0"></script>
-<script src="js/plan-engine.js?v=3.5.0"></script>
-<script src="js/training-engine.js?v=3.5.0"></script>
-<script src="js/app.js?v=3.5.0"></script>
-<script src="js/plan-data.js?v=3.5.0"></script>
-<script src="js/feat-profile.js?v=3.5.0"></script>
-<script src="js/feat-approval.js?v=3.5.0"></script>
-<script src="js/feat-roster.js?v=3.5.0"></script>
-<script src="js/feat-plan-settings.js?v=3.5.0"></script>
-<script src="js/feat-backup.js?v=3.5.0"></script>
-<script src="js/feat-dashboard.js?v=3.5.0"></script>
-<script src="js/feat-problems.js?v=3.5.0"></script>
-<script src="js/feat-chat.js?v=3.5.0"></script>
-<script src="js/feat-training.js?v=3.5.0"></script>
+<script src="js/utils.js?v=3.5.1"></script>
+<script src="js/api.js?v=3.5.1"></script>
+<script src="js/ui-kit.js?v=3.5.1"></script>
+<script src="js/xlsx-lite.js?v=3.5.1"></script>
+<script src="js/plan-engine.js?v=3.5.1"></script>
+<script src="js/training-engine.js?v=3.5.1"></script>
+<script src="js/app.js?v=3.5.1"></script>
+<script src="js/plan-data.js?v=3.5.1"></script>
+<script src="js/feat-profile.js?v=3.5.1"></script>
+<script src="js/feat-approval.js?v=3.5.1"></script>
+<script src="js/feat-roster.js?v=3.5.1"></script>
+<script src="js/feat-plan-settings.js?v=3.5.1"></script>
+<script src="js/feat-backup.js?v=3.5.1"></script>
+<script src="js/feat-dashboard.js?v=3.5.1"></script>
+<script src="js/feat-problems.js?v=3.5.1"></script>
+<script src="js/feat-chat.js?v=3.5.1"></script>
+<script src="js/feat-training.js?v=3.5.1"></script>
 </body>
 </html>
