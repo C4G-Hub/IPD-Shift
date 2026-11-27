@@ -28,7 +28,8 @@
  *    Banners: draft (warnings grouped per kind), Portable-line leaves (soft), lunch/mission conflicts with leaves (coral,
  *    "ดู" lists them), holidays changed after generation, the next step after saving a roster.
  *  - Exports (everyone, stored data only): "ส่งออกเป็นรูป" (core.shareImage of an off-screen 420 px table with inline
- *    styles, ตารางเวร-<segment>-YYYY-MM.png) and "Excel (.csv)" (Utils.buildCsv: BOM, every cell quoted, formula-safe).
+ *    styles, ตารางเวร-<segment>-YYYY-MM.png) and "Excel (.xlsx)" (XlsxLite.saveTable: one sheet "ตารางเวร YYYY-MM",
+ *    ตารางเวร-YYYY-MM.xlsx; text cells can never become formulas; the button is hidden while window.XlsxLite is missing).
  *  - core.station.setProposer(date → proposeDay(plan.proposalInput(date, 'fresh')) | null): null without a roster for
  *    the month or on a non-working day; memoised on the full engine input.
  *  - Panel 'proposal' (order 20) on วันนี้, Supervisor only, today or later: the active proposal (notes, unfilled,
@@ -82,7 +83,7 @@
   const ui = {
     month: '',                   // 'YYYY-MM' shown
     seg: '',                     // current segment id
-    busy: '',                    // 'roster' | 'duties' | 'gen' | 'csv' | 'image' | ''
+    busy: '',                    // 'roster' | 'duties' | 'gen' | 'xlsx' | 'image' | ''
     showConflicts: false,
     sheet: null,                 // {kind: 'gen'} | {kind: 'edit', date, cell, key}
     suggest: '',                 // the hint under the edit sheet's picker ("หาคนแทน" result)
@@ -653,7 +654,7 @@
     const has = storedCount(ui.month) > 0;
     if (!has) return '';
     const b = (act, ic, label) => `<button type="button" class="${k.btn} ${k.btnSecondary}" data-roster-act="${act}"${ui.busy === act ? ' disabled aria-busy="true"' : ''}>${icon(ic, 'w-5 h-5')}${label}</button>`;
-    return `<div class="grid grid-cols-1 sm:grid-cols-2 gap-2" data-roster-exports>${b('image', 'image', 'ส่งออกเป็นรูป')}${b('csv', 'download', 'Excel (.csv)')}</div>` +
+    return `<div class="grid grid-cols-1 sm:grid-cols-2 gap-2" data-roster-exports>${b('image', 'image', 'ส่งออกเป็นรูป')}${window.XlsxLite ? b('xlsx', 'download', 'Excel (.xlsx)') : ''}</div>` +
       (c.isSup() && dutyDraft(ui.month) ? `<p class="${k.textMeta} px-1">ไฟล์ที่ส่งออกเป็นตารางที่บันทึกแล้วเท่านั้น (ไม่รวมร่าง)</p>` : '');
   }
 
@@ -1384,7 +1385,9 @@
     const L = lineCount(stored.filter(Boolean));
     return { L, dates: U().eachDate(r.from, r.to), stored };
   }
-  async function exportCsv(c) {
+  /** ตารางเวร → one .xlsx sheet with the columns of the former CSV (stored data only; R3-SPEC §4.4). */
+  async function exportXlsx(c) {
+    if (!window.XlsxLite) return;
     const m = ui.month;
     const ex = exportRows(m);
     const head = ['วันที่', 'วัน'];
@@ -1401,8 +1404,9 @@
       for (let n = 0; n < 2; n++) { const nm = d ? (d.mission || [])[n] || '' : ''; row.push(nm, nm ? phoneText(phoneOf(nm)) : ''); }
       rows.push(row);
     });
-    const blob = new Blob([U().buildCsv(rows)], { type: 'text/csv;charset=utf-8;' });
-    if (await c.saveFile(blob, 'ตารางเวร-' + m + '.csv')) c.toast('📥 ดาวน์โหลดตารางเวรแล้ว');
+    const columns = head.map((h, i) => (i === 0 ? { header: h, width: 12 } : { header: h }));
+    const spec = { sheets: [{ name: 'ตารางเวร ' + m, columns, rows: rows.slice(1) }] };
+    if (await window.XlsxLite.saveTable(c, 'ตารางเวร-' + m + '.xlsx', spec)) c.toast('📥 ดาวน์โหลด Excel แล้ว');
   }
   /** The picture of the current table segment: an off-screen node with inline styles only (like #captureArea). */
   function imageNode(seg, m) {
@@ -1504,7 +1508,7 @@
       });
       return;
     }
-    if (act === 'csv') { runExport(c, 'csv', exportCsv); return; }
+    if (act === 'xlsx') { runExport(c, 'xlsx', exportXlsx); return; }
     if (act === 'image') { runExport(c, 'image', exportImage); }
   }
   function onRootChange(e) {

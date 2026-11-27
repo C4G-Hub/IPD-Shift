@@ -21,7 +21,7 @@
    BOOT_BUILD = sw.js VERSION = the ?v= of the stylesheet and the scripts = js/api.js CLIENT_VERSION (tests/sw.test.js). */
 (function () {
   'use strict';
-  var BOOT_BUILD = '3.1.2';
+  var BOOT_BUILD = '3.2.0';
   /* a class of this release's stylesheet that v2.2's did not have (any background colour counts: a theme tweak is fine;
      removing the class from every page/script would make every start look stale — tests/e2e-upgrade.test.js U9) */
   var CSS_MARK = 'bg-brand-600';
@@ -149,7 +149,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Mitr:wght@500;600&family=Sarabun:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
 <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Mitr:wght@500;600&family=Sarabun:wght@400;500;600;700&display=swap"></noscript>
-<link rel="stylesheet" href="css/tailwind.css?v=3.1.2">
+<link rel="stylesheet" href="css/tailwind.css?v=3.2.0">
 <style>
 *{-webkit-tap-highlight-color:transparent;}
 /* no double-tap zoom delay, but pinch zoom stays available (accessibility) */
@@ -176,6 +176,9 @@ input,textarea,select{-webkit-user-select:text;user-select:text;font-size:16px!i
 input[type="date"],input[type="time"],input[type="datetime-local"],input[type="month"],input[type="week"]{-webkit-appearance:none;appearance:none;box-sizing:border-box;min-width:0;max-width:100%;display:flex;align-items:center;text-align:left;}
 /* the display above must not beat the hidden attribute (preflight's [hidden] rule is less specific) */
 input[hidden]{display:none!important;}
+/* R3 (I2): a search field (Dashboard ทีม's name search) never draws the engine's clear button — a cross (owner rule:
+   no plus/cross glyph in the UI); clearing works with the keyboard as in every other field */
+input[type="search"]::-webkit-search-cancel-button,input[type="search"]::-webkit-search-decoration{-webkit-appearance:none;appearance:none;display:none;}
 /* R1b FIX-CL CL-12: the "เลือกเวลา" hint of an empty time field of the leave sheet (iOS shows nothing in an empty time input);
    Chromium's own "--:--" is hidden while the hint shows, and comes back while the field has focus (typing works as before) */
 .time-hint{position:absolute;left:.875rem;top:0;bottom:0;display:none;align-items:center;pointer-events:none;color:#64748b;font-size:1rem;line-height:1.5rem;}
@@ -191,6 +194,9 @@ input::-webkit-date-and-time-value{text-align:left;margin:0;min-width:0;}
 .tab-panel{display:none;}
 .tab-panel.active{display:block;animation:fade .2s ease;}
 @keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+/* R3: screens with chrome.bottomNav false (the chat room) fade without moving: a transform would offset sticky children */
+.tab-panel.active[data-enter="opacity"]{animation-name:fade-opacity;}
+@keyframes fade-opacity{from{opacity:0}to{opacity:1}}
 @media (prefers-reduced-motion:reduce){.tab-panel.active{animation:none;}}
 .no-scrollbar::-webkit-scrollbar{display:none;}
 /* keep "hidden" effective even before / without the stylesheet */
@@ -231,17 +237,22 @@ html.no-webfont .font-display{font-weight:600;}
 /* keyboard focus on the header date (the transparent picker) is drawn around the date lines (ink, offset) */
 #headerMain:has(#currentDate:focus-visible),#headerMain.kbd-focus{outline:2px solid #1A2C63;outline-offset:2px;border-radius:.75rem;}
 /* the header date never shrinks (C-M1): js/app.js fitHeader() steps the sync pill down instead — data-fit full (dot +
-   label) → short (dot + short label) → icon (state icon + dot; the label only for screen readers) → tight (also no chevron) */
+   label) → short (dot + short label) → icon (state icon + dot; the label only for screen readers) → tight (also no chevron)
+   → nopill (no pill, date .9375rem) → mini (R3, the extreme: date .8125rem and, as a last resort, "…" inside its column) */
 #syncStatus [data-role="icon"],#syncStatus [data-role="short"]{display:none;}
 #syncStatus[data-fit="short"] [data-role="short"]{display:inline;}
 #syncStatus[data-fit="short"] [data-role="label"]{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;}
 #syncStatus[data-fit="icon"],#syncStatus[data-fit="tight"]{padding-left:.5rem;padding-right:.5rem;}
-#syncStatus[data-fit="nopill"]{display:none;}
+#syncStatus[data-fit="nopill"],#syncStatus[data-fit="mini"]{display:none;}
 #syncStatus[data-fit="icon"] [data-role="icon"],#syncStatus[data-fit="tight"] [data-role="icon"]{display:inline-flex;}
 #syncStatus[data-fit="icon"] [data-role="label"],#syncStatus[data-fit="tight"] [data-role="label"]{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;}
 #syncStatus[data-fit="icon"] [data-role="dot"],#syncStatus[data-fit="tight"] [data-role="dot"]{margin-left:-.5rem;align-self:flex-start;font-size:.625rem;line-height:.75rem;}
-#headerMain[data-fit="tight"] #headerDateLine>svg,#headerMain[data-fit="nopill"] #headerDateLine>svg{display:none;}
+#headerMain[data-fit="tight"] #headerDateLine>svg,#headerMain[data-fit="nopill"] #headerDateLine>svg,#headerMain[data-fit="mini"] #headerDateLine>svg{display:none;}
 #headerMain[data-fit="nopill"] #headerDate{font-size:.9375rem;}
+#headerMain[data-fit="mini"] #headerDateLine{max-width:100%;}
+#headerMain[data-fit="mini"] #headerDate{font-size:.8125rem;min-width:0;overflow:hidden;text-overflow:ellipsis;}
+/* R3 FIX-CL L-10: at the last level the "X-RAY IPD" wordmark steps out instead of being cut to "X-R…" */
+#headerMain[data-fit="mini"] #headerCaption[data-wordmark]{display:none;}
 
 /* วันนี้ in DOM (= reading) order: #stationLead ("ของฉันวันนี้" + extra panels) → #stationMain (the stations) → #stationSide
    (leaves, remark, audit). One column on phones and tablets / narrow PC windows; from lg: stations on the left, the lead
@@ -290,7 +301,7 @@ summary::-webkit-details-marker{display:none;}
     <div data-kit="sheetGrabber" aria-hidden="true"></div>
     <div data-kit="sheetHead">
       <h2 id="setupTitle" class="flex-1 outline-none" data-kit="sheetTitle" data-sheet-title tabindex="-1">ตั้งค่าการเชื่อมต่อฐานข้อมูล</h2>
-      <button type="button" id="setupCloseBtn" class="hidden" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="x" class="w-5 h-5"></i></button>
+      <button type="button" id="setupCloseBtn" class="hidden" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="chevron-down" class="w-5 h-5"></i></button>
     </div>
     <div data-kit="sheetScroll">
       <p data-kit="textMeta">เชื่อมต่อแอปกับ Google Sheets ผ่าน Google Apps Script Web App</p>
@@ -364,7 +375,7 @@ summary::-webkit-details-marker{display:none;}
     <div data-kit="sheetGrabber" aria-hidden="true"></div>
     <div data-kit="sheetHead">
       <h2 id="pwTitle" class="flex-1 outline-none" data-kit="sheetTitle" data-sheet-title tabindex="-1">เปลี่ยนรหัสผ่าน</h2>
-      <button type="button" id="pwCloseBtn" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="x" class="w-5 h-5"></i></button>
+      <button type="button" id="pwCloseBtn" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="chevron-down" class="w-5 h-5"></i></button>
     </div>
     <div data-kit="sheetScroll">
       <p id="pwDesc" data-kit="textMeta"></p>
@@ -397,7 +408,7 @@ summary::-webkit-details-marker{display:none;}
     <div data-kit="sheetGrabber" aria-hidden="true"></div>
     <div data-kit="sheetHead">
       <h2 id="transferTitle" class="flex-1 outline-none" data-kit="sheetTitle" data-sheet-title tabindex="-1">โอนสิทธิ์ Supervisor</h2>
-      <button type="button" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="x" class="w-5 h-5"></i></button>
+      <button type="button" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="chevron-down" class="w-5 h-5"></i></button>
     </div>
     <div data-kit="sheetScroll">
       <div data-kit="banner bannerWarn"><i data-ic="alert-triangle" class="w-5 h-5 shrink-0 mt-0.5"></i><p class="min-w-0">เลือกคนที่จะเป็น Supervisor แทนคุณ — หลังโอนแล้ว คุณจะจัดเวรและจัดการรายชื่อไม่ได้อีก</p></div>
@@ -423,7 +434,7 @@ summary::-webkit-details-marker{display:none;}
     <div data-kit="sheetGrabber" aria-hidden="true"></div>
     <div data-kit="sheetHead">
       <h2 id="confirmLeaveTitle" class="flex-1 outline-none" data-kit="sheetTitle" data-sheet-title tabindex="-1">บันทึกการลา</h2>
-      <button type="button" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="x" class="w-5 h-5"></i></button>
+      <button type="button" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="chevron-down" class="w-5 h-5"></i></button>
     </div>
     <div data-kit="sheetScroll">
       <div id="confirmLeaveText" class="space-y-3">-</div>
@@ -470,7 +481,7 @@ summary::-webkit-details-marker{display:none;}
     <div data-kit="sheetGrabber" aria-hidden="true"></div>
     <div data-kit="sheetHead">
       <h2 id="stationCountsTitle" class="flex-1 outline-none" data-kit="sheetTitle" data-sheet-title tabindex="-1">จำนวนคนแต่ละ Station</h2>
-      <button type="button" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="x" class="w-5 h-5"></i></button>
+      <button type="button" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="chevron-down" class="w-5 h-5"></i></button>
     </div>
     <div data-kit="sheetScroll">
       <p data-kit="textMeta">มีผลกับทุกวัน • วันที่จัดคนไว้เกินจำนวนใหม่จะไม่ถูกลบรายชื่อ</p>
@@ -489,7 +500,7 @@ summary::-webkit-details-marker{display:none;}
     <div data-kit="sheetGrabber" aria-hidden="true"></div>
     <div data-kit="sheetHead">
       <h2 id="diagTitle" class="flex-1 outline-none" data-kit="sheetTitle" data-sheet-title tabindex="-1">ตรวจสอบการเชื่อมต่อ</h2>
-      <button type="button" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="x" class="w-5 h-5"></i></button>
+      <button type="button" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="chevron-down" class="w-5 h-5"></i></button>
     </div>
     <div data-kit="sheetScroll">
       <p data-kit="textMeta">ตรวจทีละขั้นว่าเครื่องนี้ติดต่อเซิร์ฟเวอร์ได้หรือไม่</p>
@@ -513,7 +524,7 @@ summary::-webkit-details-marker{display:none;}
         <h2 id="dayToolsTitle" class="outline-none" data-kit="sheetTitle" data-sheet-title tabindex="-1">เครื่องมือของวันนี้</h2>
         <p id="dayToolsDate" data-kit="textMeta">-</p>
       </div>
-      <button type="button" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="x" class="w-5 h-5"></i></button>
+      <button type="button" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="chevron-down" class="w-5 h-5"></i></button>
     </div>
     <div data-kit="sheetScroll">
       <!-- the labels name the selected day: "วันนี้" only when it is today (js/app.js renderDayTools) -->
@@ -541,7 +552,7 @@ summary::-webkit-details-marker{display:none;}
         <h2 id="whatsNewTitle" class="outline-none" data-kit="sheetTitle" data-sheet-title tabindex="-1">มีอะไรใหม่</h2>
         <p id="whatsNewVersion" data-kit="textMeta">-</p>
       </div>
-      <button type="button" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="x" class="w-5 h-5"></i></button>
+      <button type="button" data-kit="iconBtn" data-sheet-close aria-label="ปิด"><i data-ic="chevron-down" class="w-5 h-5"></i></button>
     </div>
     <div data-kit="sheetScroll">
       <ul id="whatsNewList" class="space-y-4 py-1"></ul>
@@ -674,13 +685,15 @@ summary::-webkit-details-marker{display:none;}
           <button type="button" id="calNextBtn" data-cal="next" aria-label="เดือนถัดไป" data-kit="iconBtn"><i data-ic="chevron-right" class="w-5 h-5"></i></button>
         </div>
         <div id="leaveCalendar" aria-label="ปฏิทินจำนวนผู้ลาในแต่ละวัน"></div>
+        <!-- R3 F-1: the Supervisor's holidays of the month shown (hidden when there are none); FIX-CL2 Q-4: one per line -->
+        <div id="calHolidays" class="hidden text-[0.8125rem] leading-5 font-medium text-coral-700" data-cal-holidays></div>
         <p id="calStatus" class="hidden flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.8125rem] leading-5 text-slate-600"></p>
         <div class="flex flex-wrap items-center gap-1.5 text-xs leading-4 text-slate-500">
           <span>จำนวนผู้ลา</span>
           <span class="inline-flex items-center justify-center min-w-[24px] h-6 px-1.5 rounded-lg border bg-rose-50 border-rose-200 text-rose-900">1</span>
           <span class="inline-flex items-center justify-center min-w-[24px] h-6 px-1.5 rounded-lg border bg-rose-100 border-rose-300 text-rose-900">2</span>
           <span class="inline-flex items-center justify-center min-w-[24px] h-6 px-1.5 rounded-lg border bg-rose-200 border-rose-300 text-rose-900">3</span>
-          <span class="inline-flex items-center justify-center min-w-[24px] h-6 px-1.5 rounded-lg border bg-rose-300 border-rose-400 text-rose-900">4+</span>
+          <span class="inline-flex items-center justify-center min-w-[24px] h-6 px-1.5 rounded-lg border bg-rose-300 border-rose-400 text-rose-900">≥4</span>
           <span class="ml-1">· แตะวันที่เพื่อดูรายชื่อ</span>
         </div>
         <!-- R1b: markers of days with a doctor visit / a pending request (shown when the server has the new leave types) -->
@@ -996,16 +1009,20 @@ summary::-webkit-details-marker{display:none;}
 <button type="button" id="updateBanner" class="hidden fixed left-1/2 -translate-x-1/2 top-32 z-[65] bg-brand-600 active:bg-brand-700 border-b-4 border-brand-800 text-white font-display text-sm font-medium px-5 py-2.5 rounded-full shadow-lg shadow-brand-900/20 whitespace-nowrap">🔄 มีเวอร์ชันใหม่ — แตะเพื่อโหลดใหม่</button>
 
 <script src="config.js"></script>
-<script src="js/utils.js?v=3.1.2"></script>
-<script src="js/api.js?v=3.1.2"></script>
-<script src="js/ui-kit.js?v=3.1.2"></script>
-<script src="js/plan-engine.js?v=3.1.2"></script>
-<script src="js/app.js?v=3.1.2"></script>
-<script src="js/plan-data.js?v=3.1.2"></script>
-<script src="js/feat-profile.js?v=3.1.2"></script>
-<script src="js/feat-approval.js?v=3.1.2"></script>
-<script src="js/feat-roster.js?v=3.1.2"></script>
-<script src="js/feat-plan-settings.js?v=3.1.2"></script>
-<script src="js/feat-backup.js?v=3.1.2"></script>
+<script src="js/utils.js?v=3.2.0"></script>
+<script src="js/api.js?v=3.2.0"></script>
+<script src="js/ui-kit.js?v=3.2.0"></script>
+<script src="js/xlsx-lite.js?v=3.2.0"></script>
+<script src="js/plan-engine.js?v=3.2.0"></script>
+<script src="js/app.js?v=3.2.0"></script>
+<script src="js/plan-data.js?v=3.2.0"></script>
+<script src="js/feat-profile.js?v=3.2.0"></script>
+<script src="js/feat-approval.js?v=3.2.0"></script>
+<script src="js/feat-roster.js?v=3.2.0"></script>
+<script src="js/feat-plan-settings.js?v=3.2.0"></script>
+<script src="js/feat-backup.js?v=3.2.0"></script>
+<script src="js/feat-dashboard.js?v=3.2.0"></script>
+<script src="js/feat-problems.js?v=3.2.0"></script>
+<script src="js/feat-chat.js?v=3.2.0"></script>
 </body>
 </html>

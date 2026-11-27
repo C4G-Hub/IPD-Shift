@@ -61,6 +61,7 @@
   const PHONE_RE = /^\+?\d{9,15}$/;
   // the skills sheet's summary when the choice locks the person to one station (FIX-PS P-1: coral; the text says "(ล็อก)")
   const LOCKED_NOTE = 'flex items-start gap-2.5 p-3 rounded-2xl bg-coral-50 border-2 border-coral-200 text-sm font-medium leading-6 text-coral-700';
+  const MSG_SAME_NAME = 'ชื่อเดียวกับพนักงาน — ระบบถือเป็นคนละคน';   // R3 FIX-CL L-16
   const LIMITS = { pairs: 50, items: 50, assistants: 50, assistantNote: 100, holidays: 60, holidayName: 60, aliases: 10, alias: 30 };
   const MSG = {
     oldServer: 'เซิร์ฟเวอร์ยังเป็นรุ่นเก่า (Code.gs 3.0) — วาง Code.gs รุ่น 3.1 แล้ว Deploy เวอร์ชันใหม่ เพื่อเปิดระบบจัดเวร',
@@ -459,11 +460,15 @@
     const c = k(), list = assistantsList(), marked = errNames('assistants');
     const activeNames = list.map(a => a.name);
     const removed = plan().assistants().filter(a => activeNames.indexOf(a.name) < 0).map(a => a.name);
+    const staff = staffNames();
+    // R3 FIX-CL L-16: staff and assistant names are separate namespaces — an assistant with a staff member's name is another
+    // person (a grey note says so); the avatar never takes the staff member's picture (picture: false)
     const rows = list.map(a =>
-      `<li class="flex items-center gap-3 py-2" data-ps-row="${esc(a.name)}">` + C.Kit.avatar(a.name, 'sm') +
+      `<li class="flex items-center gap-3 py-2" data-ps-row="${esc(a.name)}">` + C.Kit.avatar(a.name, 'sm', { picture: false }) +
       `<div class="min-w-0 flex-1"><p class="text-sm font-medium leading-6 text-ink-900 break-words">${esc(a.name)}` +
       (marked.indexOf(a.name) >= 0 ? ' <span class="text-coral-700">(ซ้ำ)</span>' : '') + `</p>` +
-      (a.note ? `<p class="${c.textMeta} break-words">${esc(a.note)}</p>` : '') + `</div>` +
+      (a.note ? `<p class="${c.textMeta} break-words">${esc(a.note)}</p>` : '') +
+      (staff.indexOf(a.name) >= 0 ? `<p class="${c.textCaption}" data-ps-same-name>${esc(MSG_SAME_NAME)}</p>` : '') + `</div>` +
       `<button type="button" class="${c.rowAction}" data-ps-act="asst-remove" data-name="${esc(a.name)}" aria-label="${esc('นำ ' + a.name + ' ออกจากรายชื่อผู้ช่วย')}">` +
       `${icon('trash')}<span>นำออก</span></button></li>`).join('');
     return (rows ? `<ul class="divide-y divide-brand-100">${rows}</ul>` : `<p class="${c.textMeta}" data-ps-empty="assistants">ยังไม่มีรายชื่อผู้ช่วย</p>`) +
@@ -729,7 +734,6 @@
     let msg = '';
     if (!name) msg = 'กรุณากรอกชื่อผู้ช่วย';
     else if (err) msg = err.replace('ชื่อพนักงาน', 'ชื่อผู้ช่วย');
-    else if (staffNames().indexOf(name) >= 0) msg = 'ชื่อผู้ช่วยซ้ำกับชื่อพนักงาน: "' + name + '"';
     else if (list.some(a => a.name === name)) msg = 'มี "' + name + '" ในรายชื่อผู้ช่วยแล้ว';
     else if (list.length >= LIMITS.assistants) msg = 'รายชื่อผู้ช่วยมีได้ไม่เกิน ' + LIMITS.assistants + ' คน';
     st.addError.assistants = msg;
@@ -946,9 +950,7 @@
     }
     if (card === 'assistants') {
       if (!assistantsDirty()) return null;
-      const list = assistantsList().map(a => ({ name: a.name, note: norm(a.note) }));
-      const clash = list.filter(a => staffNames().indexOf(a.name) >= 0).map(a => a.name);
-      if (clash.length) return { error: 'ชื่อผู้ช่วยซ้ำกับชื่อพนักงาน: ' + clash.map(n => '"' + n + '"').join(', '), names: clash };
+      const list = assistantsList().map(a => ({ name: a.name, note: norm(a.note) }));   // L-16: a staff name is allowed
       return { send: () => p.saveAssistants({ assistants: list }), ok: () => SAVED.assistants };
     }
     if (card === 'holidays') {

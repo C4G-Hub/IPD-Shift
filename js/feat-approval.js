@@ -24,7 +24,7 @@
  *    The provider exists only while the user is the Supervisor on a server with 'approval'.
  *  - Banners (core.banners): 'approval-pending' on วันนี้ and การลา for the Supervisor while requests wait (action opens
  *    the inbox); 'approval-rejected' on การลา for anyone else whose own request was rejected (date and reason; action opens
- *    that day's leave sheet; its ✕ (core.banners' dismiss option) hides it for that request — remembered per user in
+ *    that day's leave sheet; its "ซ่อน" (core.banners' dismiss option) hides it for that request — remembered per user in
  *    core.store.draft 'approval-dismissed', which the core removes at logout).
  *
  * Every async flow runs through core.spawn / core.track and re-checks core.alive() (and the role) after each await, so
@@ -133,7 +133,7 @@
    */
   function askReason(c, date, staff) {
     const p = c.prompt('เหตุผล (ไม่บังคับ ไม่เกิน ' + NOTE_MAX + ' ตัวอักษร) — ผู้ขอจะเห็นข้อความนี้ในแอป', '', {
-      title: 'ไม่อนุมัติคำขอพักร้อน', okLabel: 'ไม่อนุมัติ', cancelLabel: 'ยกเลิก', danger: true, icon: 'x',
+      title: 'ไม่อนุมัติคำขอพักร้อน', okLabel: 'ไม่อนุมัติ', cancelLabel: 'ยกเลิก', danger: true, icon: 'calendar-off',
       placeholder: 'เช่น วันนั้นคนไม่พอ', maxLength: NOTE_MAX, multiline: true, detail: who(date, staff, 'danger'),
       data: { approvalDialog: 'reject', date, staff }
     });
@@ -457,7 +457,7 @@
       const on = sending && b.decision === decision;
       return `<button type="button" class="${k.btn} ${look} flex-1 min-w-0" data-approval-act="${decision}"` +
         `${b ? ' disabled' : ''}${on ? ' aria-busy="true"' : ''} aria-label="${esc(label + what)}">` +
-        (on ? 'กำลังบันทึก…' : c.Kit.icon(icon, 'w-5 h-5') + `<span class="truncate">${esc(label)}</span>`) + '</button>';
+        (on ? 'กำลังบันทึก…' : (icon ? c.Kit.icon(icon, 'w-5 h-5') : '') + `<span class="truncate">${esc(label)}</span>`) + '</button>';
     };
     return `<div class="approval-row px-4 py-3 space-y-3" data-date="${esc(r.date)}" data-staff="${esc(r.staff)}"` +
         `${b ? ' data-busy="' + esc(b.phase === 'send' ? b.decision : 'ask') + '"' : ''}>` +
@@ -473,7 +473,7 @@
           `${c.Kit.icon('alert-triangle', 'w-4 h-4 shrink-0 mt-0.5')}<span class="min-w-0">อยู่ใน ${esc(stations.join(', '))} — อนุมัติแล้วจะถูกนำออก</span></p>`
         : '') +
       // full width on a phone; from 640 px a compact pair at the right (the same order as the leave sheet's buttons)
-      `<div class="flex gap-2 ml-auto sm:max-w-[16rem]">${btn('rejected', k.btnSecondary, 'x', 'ไม่อนุมัติ')}${btn('approved', k.btnPrimary, 'check', 'อนุมัติ')}</div>` +
+      `<div class="flex gap-2 ml-auto sm:max-w-[16rem]">${btn('rejected', k.btnSecondary, '', 'ไม่อนุมัติ')}${btn('approved', k.btnPrimary, 'check', 'อนุมัติ')}</div>` +
       '</div>';
   }
 

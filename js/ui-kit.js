@@ -53,6 +53,7 @@
  *                                      (first + last word).
  * UiKit.avatarTone(name)               → index 0..5 of the tint (stable hash of the normalised name)
  * UiKit.avatar(name, size, opts)       → '<span class="AVATAR SIZE TINT" data-initials="ส" data-avatar="NAME" aria-hidden="true">[<img>]</span>'
+ *                                        (R3: opts.picture === false → initials only, data-avatar-plain instead of data-avatar)
  *                                      size: 'xs'|'sm'|'md'|'lg'|'xl' (default 'sm' = 32 px). Initials are drawn by
  *                                      a ::before rule from data-initials, so they are NOT part of textContent
  *                                      (exact-text test assertions keep holding). When UiKit.avatars.get(name)
@@ -223,7 +224,8 @@
  * ---------------------------------------------------------------- CLS keys
  * Type:     titleScreen titleCard textBody textMeta textCaption sectionLabel (menu section heading) label
  * Surfaces: card cardInfo (sky ring) cardLilac (lilac ring) list listRow divider
- * Buttons:  btn btnPrimary btnSecondary btnTonal btnDanger btnGhost btnLg iconBtn iconBtnRound (white sticker circle)
+ * Buttons:  btn btnPrimary btnSecondary btnTonal btnDanger btnGhost btnGhostDanger (R3: destructive action in a sheet body)
+ *           btnLg iconBtn iconBtnRound (white sticker circle)
  * Inputs:   input select textarea
  * Chips:    chip chipOn chipOff         Option tiles: tile tileOn tileOff
  * Status:   pill pillOk pillPending pillDanger pillPartial pillNeutral   badge
@@ -237,7 +239,7 @@
  *           dayWeekend (week strip; dayWeekend keeps text-rose-600 — a test contract, see the THEME report) ·
  *           listIcon listIconBrand listIconInfo listIconLilac listIconSun listIconDanger listIconNeutral listChevron
  *           (pastel circles that lead a row) · saveBar · sheetFrame sheetHead sheetScroll sheetActions (app sheets: a
- *           flex column whose body scrolls between a title row with ✕ and a fixed action row; UiKit's own dialogs
+ *           flex column whose body scrolls between a title row with its close button (chevron-down) and a fixed action row; UiKit's own dialogs
  *           keep sheetPanel/sheetFooter)
  * Loading:  skeleton  Empty state: empty emptyIcon emptyTitle emptyHint
  * Deco:     decoStar decoHeart decoSparkle (colours for UiKit.deco glyphs)
@@ -311,6 +313,9 @@
     btnTonal: 'bg-brand-50 border-2 border-b-4 border-brand-100 text-brand-700 text-sm active:bg-brand-100',
     btnDanger: 'bg-coral-600 border-b-4 border-coral-700 text-white text-sm active:bg-coral-700',
     btnGhost: 'bg-transparent text-ink-700 text-sm active:bg-ink-50',
+    // R3 FIX-CL L-9: THE destructive action inside a sheet body (ลบเรื่องนี้, ลบรูปนี้, ล้างยอด): coral text, no fill — the
+    // confirmation dialog that follows is the only filled coral button
+    btnGhostDanger: 'bg-transparent text-coral-700 text-sm active:bg-coral-50',
     btnLg: 'h-12 text-base w-full',
     iconBtn: 'inline-flex items-center justify-center w-11 h-11 shrink-0 rounded-full text-ink-700 active:bg-brand-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 disabled:opacity-50',
     iconBtnRound: 'inline-flex items-center justify-center w-11 h-11 shrink-0 rounded-full bg-white border-2 border-b-4 border-ink-200 text-ink-700 active:bg-ink-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2 disabled:opacity-50',
@@ -598,7 +603,8 @@
     'search': '<circle cx="11" cy="11" r="7"/><path d="m21 21-5-5"/>',
     'filter': '<path d="M22 3H2l8 9.46V19l4 2v-8.54z"/>',
     'sort': '<path d="m21 16-4 4-4-4M17 20V4M3 8l4-4 4 4M7 4v16"/>',
-    'wand': '<path d="M15 4V2M15 16v-2M8 9h2M20 9h2M17.8 11.8 19 13M15 9h.01M17.8 6.2 19 5M3 21l9-9M12.2 6.2 11 5"/>',
+    // R3 FIX-CL2: without the four short straight ticks (M15 4V2 M15 16v-2 M8 9h2 M20 9h2) that read as a broken "+"
+    'wand': '<path d="M17.8 11.8 19 13M15 9h.01M17.8 6.2 19 5M3 21l9-9M12.2 6.2 11 5"/>',
     'swap': '<path d="M8 3 4 7l4 4M4 7h16M16 21l4-4-4-4M20 17H4"/>',
     'more': '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
     'log-out': '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
@@ -813,10 +819,13 @@
     const ini = initials(n) || '?';
     const extra = opts.cls ? ' ' + esc(opts.cls) : '';
     const a11y = opts.label ? ' role="img" aria-label="' + esc(n) + '"' : ' aria-hidden="true"';
-    const url = avatarUrl(n);
+    // R3 FIX-CL L-16: opts.picture === false → initials only, never a registered picture (an assistant who shares a staff
+    // member's name is another person); no data-avatar either, so refresh() never patches one in
+    const plain = opts.picture === false;
+    const url = plain ? '' : avatarUrl(n);
     const img = url ? '<img src="' + esc(url) + '" alt="" data-uk-avatar-img="1" draggable="false">' : '';
     return '<span class="' + cls.avatar + ' ' + sizeCls + ' ' + tint + extra + '" data-initials="' + esc(ini) + '"' +
-      ' data-avatar="' + esc(n) + '"' + a11y + '>' + img + '</span>';
+      (plain ? ' data-avatar-plain="1"' : ' data-avatar="' + esc(n) + '"') + a11y + '>' + img + '</span>';
   }
 
   /* ---------------------------------------------------------------- small markup helpers */

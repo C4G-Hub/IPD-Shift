@@ -30,9 +30,19 @@
  *   ensure(from, to) → Promise<bool>   widen the wanted range (≤ 186 days, else reset) and fetch it if needed; true when
  *                         [from, to] is covered afterwards (never rejects)
  *   refresh() → Promise<bool>  fetch the wanted range again (no knownVersion)
+ *   R3 fetchStats(from, to) → Promise<{duties: {[date]: Duty}, holidays: Map, version}>  a statistics period (≤ 400 days,
+ *                         else VALIDATION) read with ONE getPlan{from, to} beside the wanted range: memory only (never
+ *                         persisted, never the domain), memoised per 'from|to' + plan version, fetched again (knownVersion)
+ *                         when the heartbeat's versions.plan differs, empty without the 'plan' feature / with versions.plan
+ *                         '' (no request), wiped at logout; rejects with the request's ApiError (callers show their state)
  *   roster(month) → Roster|null · duty(date) → Duty|null · duties(month) → {[date]: Duty} (frozen, ascending dates)
  *   holidays() → Map date→name · assistants() → [Assistant] (every row; active flag) · profiles() → Map name→Profile ·
  *   profile(name) → Profile|null · backup(date) → Backup|null · settings() → {priority: [7 ids], slotOrder}
+ *   R3-SPEC §3.1: a Profile also holds the personal fields vacBalance, cePoints, ceTarget (number | null), vacAsof,
+ *   licenceExpiry ('' | YYYY-MM-DD) — only the keys the answer carried (Code.gs 3.2 sends them for the caller's own row,
+ *   every row for the Supervisor; a 3.1 server never): read them with `'vacBalance' in profile`. setProfiles passes the
+ *   personal keys of a patch through unchanged and applies the answer's profiles. A role change refetches the plan without
+ *   knownVersion; a former Supervisor drops everyone else's personal fields (and the avoid pairs) at once.
  *   Writes (core.userCall; throw ApiError to the caller; the answer is applied before they resolve; a CONFLICT applies
  *   the server's current rows from its details, then rethrows):
  *   saveRoster(p) · saveDuties(p) · setHolidays(p) · saveAssistants(p) · setProfiles(p) · saveBackupMsg(p) ·
@@ -73,6 +83,13 @@
   /** R2-SPEC §0.26(b): stations never auto-filled by people whose skills are not set (their roster station excepted). */
   const PROPOSAL_RESTRICTED = Object.freeze(['supervisor', 'or', 'us', 'cancer']);
   const NO_PLAN_MSG = 'ต้องอัปเดต Code.gs เป็นเวอร์ชันล่าสุดก่อน';
+  /** R3-SPEC §2.2 / §3.1: the personal profile fields (numbers or null; dates or ''). */
+  const PERSONAL_NUM = Object.freeze(['vacBalance', 'cePoints', 'ceTarget']);
+  const PERSONAL_DATE = Object.freeze(['vacAsof', 'licenceExpiry']);
+  const PERSONAL_KEYS = Object.freeze(PERSONAL_NUM.concat(PERSONAL_DATE));
+  const STATS_MAX_DAYS = 400;             // R3-SPEC §4.3: fetchStats ranges (the server's getPlan limit)
+  const STATS_MEMO_MAX = 12;              // memoised fetchStats ranges kept in memory (oldest dropped first)
+  const STATS_RANGE_MSG = 'ช่วงวันที่ต้องไม่เกิน 400 วัน';
   const EMPTY = Object.freeze({ range: null, rosters: Object.freeze({}), duties: Object.freeze({}), holidays: Object.freeze({}),
     holidayYears: Object.freeze([]), assistants: Object.freeze([]), profiles: Object.freeze({}), backup: Object.freeze({}),
     avoidPairs: Object.freeze([]) });
@@ -93,6 +110,9 @@
   let lastError = null;
   let gen = 0;              // bumps on reset (logout / new login): late answers of the old session are dropped
   let memo = { data: null, holidays: null, profiles: null };
+  // R3 fetchStats: memory only (never persisted, never the domain) — key 'from|to' → {version, duties, holidays}; wiped at reset
+  let statsMemo = new Map();
+  let statsInflight = new Map();          // key → the getPlan promise in flight for it
 
   /* ------------------------------------------------------------------ helpers */
   const hasOwn = Object.prototype.hasOwnProperty;
@@ -181,7 +201,7 @@
     const n = name(p && p.name);
     if (!n) return null;
     const order = p.missionOrder === null || p.missionOrder === undefined || p.missionOrder === '' ? null : parseInt(p.missionOrder, 10);
-    return {
+    const out = {
       name: n,
       phone: str(p.phone),
       skills: Array.isArray(p.skills) ? p.skills.filter(id => STATION_IDS.indexOf(id) >= 0) : null,
@@ -189,6 +209,24 @@
       missionOrder: isFinite(order) ? order : null,
       aliases: names(p.aliases)
     };
+    // R3-SPEC §3.1: the personal fields reach a 3.2 client for its own row (every row for the Supervisor); a key the answer
+    // does not carry stays absent (a 3.1 server, or another person's row) — readers tell "not delivered" from "empty"
+    PERSONAL_NUM.forEach(k => { if (own(p, k)) out[k] = personalNum(p[k]); });
+    PERSONAL_DATE.forEach(k => { if (own(p, k)) out[k] = U.isValidYmd(p[k]) ? p[k] : ''; });
+    return out;
+  }
+  function personalNum(v) {
+    if (v === null || v === undefined || v === '') return null;
+    const x = typeof v === 'number' ? v : Number(v);
+    return isFinite(x) ? x : null;
+  }
+  /** Whether a normalised profile holds any personal field. */
+  function hasPersonal(p) { return !!p && PERSONAL_KEYS.some(k => own(p, k)); }
+  /** A copy of a normalised profile without the personal fields. */
+  function withoutPersonal(p) {
+    const out = {};
+    Object.keys(p).forEach(k => { if (PERSONAL_KEYS.indexOf(k) < 0) out[k] = p[k]; });
+    return out;
   }
   function normBackup(b) {
     if (!b || typeof b !== 'object' || !U.isValidYmd(b.date)) return null;
@@ -361,6 +399,61 @@
     const r = clampRange(from, to);
     want = widened(r.from, r.to);
     return sync().then(() => covers(data().range, r.from, r.to), () => false);
+  }
+
+  /* ------------------------------------------------------------------ statistics ranges (R3-SPEC §4.3) */
+  function statsView(e) { return Object.freeze({ duties: e.duties, holidays: new Map(e.holidays), version: e.version }); }
+  function statsEmpty() { return statsView({ duties: Object.freeze({}), holidays: new Map(), version: '' }); }
+  /** A getPlan answer → the memo entry: normalised frozen duties (ascending dates) and the holidays it lists. */
+  function statsEntry(res, version) {
+    const duties = {}, list = [], hol = new Map();
+    (Array.isArray(res.duties) ? res.duties : []).forEach(x => { const v = normDuty(x); if (v) list.push(v); });
+    list.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0)).forEach(v => { duties[v.date] = v; });
+    (Array.isArray(res.holidays) ? res.holidays : []).filter(h => h && U.isValidYmd(h.date))
+      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0)).forEach(h => { if (!hol.has(h.date)) hol.set(h.date, str(h.name)); });
+    return { version, duties: deepFreeze(duties), holidays: hol };
+  }
+  function statsRemember(key, entry) {
+    statsMemo.delete(key);
+    statsMemo.set(key, entry);
+    while (statsMemo.size > STATS_MEMO_MAX) statsMemo.delete(statsMemo.keys().next().value);
+  }
+  /**
+   * fetchStats(from, to) → Promise<{duties: {[date]: Duty}, holidays: Map date→name, version}> — the plan duties and holidays
+   * of a statistics period (≤ 400 days), read with ONE getPlan{from, to} next to the wanted range: memory only (never
+   * persisted, never touches the domain), memoised per 'from|to' + plan version, fetched again (knownVersion = the memo's
+   * version) when the heartbeat's versions.plan differs; empty (no request) while the server lacks 'plan', reports no plan
+   * rows (versions.plan ''), nobody is logged in or a password change is forced; wiped at logout. Rejects with the ApiError
+   * of the request (VALIDATION for a bad range).
+   */
+  function fetchStats(from, to) {
+    if (!U.isValidYmd(from) || !U.isValidYmd(to) || from > to || days(from, to) > STATS_MAX_DAYS) {
+      return Promise.reject(apiError('VALIDATION', STATS_RANGE_MSG));
+    }
+    const st = C.state;
+    if (!dom || !st.session || !st.user || st.user.mustChangePassword || !C.serverHas('plan')) return Promise.resolve(statsEmpty());
+    if (heard && !dom.remote) return Promise.resolve(statsEmpty());   // versions.plan '': no plan rows at all
+    const key = from + '|' + to;
+    const hit = statsMemo.get(key);
+    if (hit && (!heard || hit.version === dom.remote)) return Promise.resolve(statsView(hit));
+    if (statsInflight.has(key)) return statsInflight.get(key);
+    const alive = C.alive(), g = gen;
+    const params = { from, to };
+    if (hit && hit.version) params.knownVersion = hit.version;
+    const p = C.track(C.call('getPlan', params).then(res => {
+      if (statsInflight.get(key) === p) statsInflight.delete(key);
+      if (!alive() || g !== gen) return statsEmpty();   // an answer of a session that ended: kept nowhere
+      const r = res && typeof res === 'object' ? res : {};
+      const v = typeof r.planVersion === 'string' ? r.planVersion : '';
+      const entry = r.unchanged === true && hit ? { version: v, duties: hit.duties, holidays: hit.holidays } : statsEntry(r, v);
+      statsRemember(key, entry);
+      return statsView(entry);
+    }, e => {
+      if (statsInflight.get(key) === p) statsInflight.delete(key);
+      throw e;
+    }));
+    statsInflight.set(key, p);
+    return p;
   }
 
   /* ------------------------------------------------------------------ events */
@@ -659,6 +752,7 @@
     covers: (from, to) => covers(data().range, from, to),
     ensure,
     refresh: () => { forceNext = true; return sync(); },
+    fetchStats,
     roster, duty, duties, holidays, assistants, profiles, profile, backup, settings,
     saveRoster, saveDuties, setHolidays, saveAssistants, setProfiles, saveBackupMsg, setPlanSettings, adoptDuty,
     engineStaff, rosterFor, assistantsFor, skillsMap, aliasesMap, eligible, leaves, linesFor, proposalInput, lockedStation,
@@ -680,11 +774,21 @@
       // version — so a role change fetches the range again; a former Supervisor's copy loses the pairs at once
       c.on('role', p => {
         if (!c.state.session || !dom) return;
-        if (valid(dom.data) && (dom.data.pairsSup === true || (Array.isArray(dom.data.avoidPairs) && dom.data.avoidPairs.length))) {
-          // the pairs held were read under the other role: a former Supervisor drops them, a new one must not trust them
-          dom.touch(d => deepFreeze(sortKeys(Object.assign(editable(d), { avoidPairs: p && p.isSup ? (d.avoidPairs || []) : [], pairsSup: false }))));
+        const me = c.myName();
+        const others = !(p && p.isSup) && valid(dom.data) &&
+          Object.keys(dom.data.profiles).some(n => n !== me && hasPersonal(dom.data.profiles[n]));
+        if (others || (valid(dom.data) && (dom.data.pairsSup === true || (Array.isArray(dom.data.avoidPairs) && dom.data.avoidPairs.length)))) {
+          // the pairs held were read under the other role: a former Supervisor drops them, a new one must not trust them;
+          // R3: a former Supervisor also drops everyone else's personal fields at once (R3-SPEC §3.1 visibility)
+          dom.touch(d => {
+            const x = Object.assign(editable(d), { avoidPairs: p && p.isSup ? (d.avoidPairs || []) : [], pairsSup: false });
+            if (others) Object.keys(x.profiles).forEach(n => { if (n !== me && hasPersonal(x.profiles[n])) x.profiles[n] = withoutPersonal(x.profiles[n]); });
+            return deepFreeze(sortKeys(x));
+          });
         }
-        needFull = true;   // RV-1: fresh() and avoidPairsKnown() stay false until a full answer of this role arrives
+        // RV-1: fresh() and avoidPairsKnown() stay false until a full answer of this role arrives; R3-SPEC §4.3: the refetch goes
+        // without knownVersion (the Supervisor's answer carries everyone's personal fields and the avoid pairs)
+        needFull = true;
         confirmed = false;
         forceNext = true;
         sync();
@@ -704,6 +808,8 @@
       confirmed = false;
       lastError = null;
       memo = { data: null, holidays: null, profiles: null };
+      statsMemo = new Map();      // R3: the statistics ranges are wiped at logout
+      statsInflight = new Map();
     }
   });
 })();

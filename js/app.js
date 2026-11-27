@@ -31,7 +31,7 @@
    *    ipd_boot_retry with the inline guard: after 2 only the "โหลดใหม่" button remains. init() clears the counter.
    * APP_BUILD = sw.js VERSION = the ?v= of index.html's scripts = js/api.js CLIENT_VERSION (tests/sw.test.js).
    */
-  const APP_BUILD = '3.1.2';
+  const APP_BUILD = '3.2.0';
   const BOOT_RETRY_KEY = 'ipd_boot_retry';
   // R1b: also a page of another release (its inline guard names its own build, e.g. a v2.9 index.html served from the HTTP cache
   // whose ?v=2.9.0 URLs now answer with these files): its markup is not this release's — the guard of that page takes over
@@ -156,7 +156,9 @@
     oldServer: 'เซิร์ฟเวอร์ (Code.gs) ยังเป็นเวอร์ชันเก่า กรุณาอัปเดตตามคู่มือ',
     updateCodeGs: 'ต้องอัปเดต Code.gs เป็นเวอร์ชันล่าสุดก่อน',
     serverV3: 'เซิร์ฟเวอร์ (Code.gs) ยังเป็นรุ่นก่อน 3.0 — อัปเดต Code.gs ตามคู่มือเพื่อเปิดใช้การลาหาหมอแบบระบุเวลา การอนุมัติลาพักร้อน และรูปโปรไฟล์',
-    serverV31: 'เซิร์ฟเวอร์ (Code.gs) ยังเป็นรุ่น 3.0 — อัปเดต Code.gs เป็น 3.1 ตามคู่มือเพื่อเปิดใช้ระบบจัดเวร',   // R2-SPEC §3.3
+    // R3-SPEC §4.2: the เมนู note of the Supervisor — a 3.0 server (features without 'plan'), a 3.1 server ('plan' but no 'chat')
+    serverV31: 'เซิร์ฟเวอร์ (Code.gs) ยังเป็นรุ่น 3.0 — อัปเดต Code.gs เป็น 3.2 ตามคู่มือเพื่อเปิดใช้ระบบจัดเวร Dashboard แจ้งปัญหา และแชท',
+    serverV32: 'เซิร์ฟเวอร์ (Code.gs) ยังเป็นรุ่น 3.1 — อัปเดต Code.gs เป็น 3.2 ตามคู่มือเพื่อเปิดใช้ Dashboard แจ้งปัญหา และแชท',
     leaveRequested: '📨 ส่งคำขอแล้ว — รอ Supervisor อนุมัติ',
     requestDeleted: '🗑️ ลบคำขอแล้ว',
     requestCancelled: '🗑️ ยกเลิกคำขอแล้ว',
@@ -210,7 +212,7 @@
   /** Fixed width of the shared image (#captureArea) when it is drawn: the JPG looks the same from every screen. */
   const CAPTURE_WIDTH = 420;
   const ERROR_TOAST_MS = 6000;         // an error toast stays at least this long (≥ 5 s, C-M6) unless tapped away
-  const DIAG_ICON = { ok: '✅', warn: '⚠️', fail: '❌', skip: '➖', run: '⏳' };
+  const DIAG_ICON = { ok: '✅', warn: '⚠️', fail: '⛔', skip: '➖', run: '⏳' };   // R3 FIX-CL L-8: no cross glyph
   /** R2: the fill order of the daily proposal when the server announced none (PlanEngine.DEFAULT_PRIORITY). */
   const DEFAULT_PLAN_PRIORITY = Object.freeze(window.PlanEngine.DEFAULT_PRIORITY.slice());
   const PLAN_SLOT_ORDERS = ['coverage', 'priority'];
@@ -252,6 +254,7 @@
     tab: 'station',           // id of the current screen (a registered feature, see the registry section)
     tabParams: undefined,     // params of the last core.go() to the current screen
     shownTab: '',             // screen whose show() ran last (hide()/show() follow ui.tab in renderTabs)
+    screenTitle: null,        // R3: {tab, text} — core.setScreenTitle(): the header title of that screen until it changes
     dateAsking: false,        // setSelectedDate is asking whether to drop unsaved station edits
     epoch: 0,                 // bumps on login/logout → late responses from an old session are dropped
     pending: 0,               // tracked async flows (for App.idle)
@@ -275,6 +278,9 @@
     diag: null,               // {running, at, rows:[{key, label, status, ms, note, code}], verdict:{tone, text}}
     dayBusy: null,            // date whose Day write (save / paste / clear) is in flight: its editor is locked
     calMonth: '',             // 'YYYY-MM' shown by the leave calendar ('' = the selected date's month)
+    calPlanMonth: '',         // R3 F-1: the month whose holidays the calendar last asked use('plan').ensure for
+    calPlanMoved: false,      // R3 F-1: that ensure widened the plan range past the selected date's window (restored on leaving)
+    reorder: null,            // R3 F-2: {date, station} — the station card of วันนี้ in "จัดลำดับ" mode (Supervisor)
     cacheLoaded: [],          // ranges present in the offline cache (display only)
     cacheSavedAt: null,
     apiUrlSource: '',         // 'config' | 'local' | ''
@@ -398,13 +404,13 @@
   /**
    * The toast (C-M6): centred under the header (below the update notice when that shows), as wide as its text up to
    * min(28rem, 100vw − 2rem). An error stays at least 5 s; any toast closes when tapped.
-   * opts.error marks an error (also detected: a text starting with ⚠️ / ❌ / "เกิดข้อผิดพลาด").
+   * opts.error marks an error (also detected: a text starting with ⚠️ / ⛔ / "เกิดข้อผิดพลาด").
    */
   function toast(msg, ms, opts) {
     const t = $('toast');
     if (!t) return;
     const text = String(msg == null ? '' : msg);
-    const error = !!(opts && opts.error) || /^(⚠️|❌|เกิดข้อผิดพลาด)/.test(text);
+    const error = !!(opts && opts.error) || /^(⚠️|⛔|เกิดข้อผิดพลาด)/.test(text);
     t.textContent = text;
     t.toggleAttribute('data-long', text.length > 40 || text.indexOf('\n') >= 0);
     t.dataset.tone = error ? 'error' : 'info';
@@ -996,6 +1002,9 @@
     // a new session starts on today (header date, week strip, leave calendar month)
     state.selectedDate = U.todayStr();
     ui.calMonth = '';
+    ui.calPlanMonth = '';
+    ui.calPlanMoved = false;
+    ui.reorder = null;
     resetUserUi();
     resetCore();   // registered features: reset(), domains, ipd_dom:* / ipd_draft:*, banners, badges, chat media
   }
@@ -1014,6 +1023,8 @@
     setHtml($('leaveCalendar'), '');
     setHtml($('calDayDetail'), '');
     setHtml($('calMonthTotal'), '');
+    setHtml($('calHolidays'), '');
+    setVisible($('calHolidays'), false);
     ui.calMonth = '';
     $('transferTargetSelect').innerHTML = '<option value="">-- เลือกผู้รับสิทธิ์ --</option>';
     renderTransferBtn();   // "โอนสิทธิ์ให้ {ชื่อ}" names a person
@@ -1849,24 +1860,31 @@
   /**
    * C-M1: the header date (or title) never gives way. When the row is too tight the sync pill steps down instead:
    * full (dot + label) → short (dot + short label) → icon (state icon + dot; the label stays for screen readers) →
-   * tight (also without the chevron) → nopill (the extreme: 320 px at a large text size; the pill steps out of the row —
-   * a non-online state is still shown by the line / banner under the header, and the connection check stays in เมนู).
-   * Measured once per width / text / state / font (memo), so render() stays cheap.
+   * tight (also without the chevron) → nopill (narrow phones; the pill steps out of the row and the date is one step
+   * smaller — a non-online state is still shown by the line / banner under the header, and the connection check stays
+   * in เมนู) → mini (R3: the extreme, 320 px at a large text size with the chat icon in the header: the date one more
+   * step smaller, and as a last resort it ends in "…" inside its column — it never runs under the header icons; the
+   * "X-RAY IPD" wordmark caption is hidden rather than cut — R3 FIX-CL L-10). The wordmark must fit at every level too.
+   * Measured once per width / text / state / font / header entries (memo), so render() stays cheap.
    */
-  const FIT_LEVELS = ['full', 'short', 'icon', 'tight', 'nopill'];
+  const FIT_LEVELS = ['full', 'short', 'icon', 'tight', 'nopill', 'mini'];
   let fitMemo = Object.create(null), fitMemoSize = 0;
   function fitHeader() {
-    const main = $('headerMain'), pill = $('syncStatus'), dateLine = $('headerDateLine'), title = $('headerTitle');
+    const main = $('headerMain'), pill = $('syncStatus'), dateLine = $('headerDateLine'), title = $('headerTitle'), cap = $('headerCaption');
     if (!main || !pill || !dateLine || !title) return;
     const dated = !dateLine.classList.contains('hidden');
     const line = dated ? dateLine : title;
     const root = document.documentElement;
     const key = [window.innerWidth, root.classList.contains('no-webfont'), getComputedStyle(root).fontSize, dated,
-      line.textContent, pill.dataset.state, isShown('headerBackBtn'), ($('headerNav') || {}).childElementCount].join('|');
+      line.textContent, cap ? cap.textContent : '', pill.dataset.state, isShown('headerBackBtn'), isShown('headerNav'),
+      document.querySelectorAll('#headerNav > .nav-btn:not(.hidden)').length].join('|');
     const apply = lv => { if (pill.dataset.fit !== lv) pill.dataset.fit = lv; if (main.dataset.fit !== lv) main.dataset.fit = lv; };
     if (fitMemo[key]) { apply(fitMemo[key]); return; }
     if (!main.clientWidth) { apply('full'); return; }   // not laid out (e.g. no stylesheet yet): nothing to measure
-    const fits = () => (dated ? dateLine.offsetWidth <= main.clientWidth - 4 + 0.5 : title.scrollWidth <= title.clientWidth + 0.5);
+    // R3 FIX-CL L-10: the wordmark caption counts too — it is never cut to "X-R…": the pill steps out first, and at mini the
+    // wordmark is hidden (index.html: #headerMain[data-fit="mini"] #headerCaption[data-wordmark])
+    const capFits = () => !cap || !cap.dataset.wordmark || !cap.offsetWidth || cap.scrollWidth <= cap.clientWidth + 0.5;
+    const fits = () => (dated ? dateLine.offsetWidth <= main.clientWidth - 4 + 0.5 : title.scrollWidth <= title.clientWidth + 0.5) && capFits();
     let lv = FIT_LEVELS[0];
     for (let i = 0; i < FIT_LEVELS.length; i++) {
       lv = FIT_LEVELS[i];
@@ -2020,7 +2038,30 @@
     if (hasMarkup(HEADER_IDS)) renderHeader();
     if (hasMarkup(['weekStrip', 'weekDays'])) renderWeekStrip();
     if (hasMarkup(['saveBar'])) renderSaveBar();
+    renderBottomNav();
     syncHistory();
+  }
+
+  /**
+   * R3-SPEC §4.2: a screen with chrome.bottomNav false (the chat room, whose composer sits at the bottom) hides the phone's
+   * bottom bar (#navDock below md:; the left rail of wider screens stays) and with it the space kept for it (syncLayout).
+   */
+  function renderBottomNav() {
+    const dock = $('navDock');
+    if (!dock) return;
+    const f = featById[ui.tab];
+    const off = !!f && f.chrome.bottomNav === false;
+    if (dock.classList.contains('max-md:hidden') === off) return;
+    dock.classList.toggle('max-md:hidden', off);
+    if (off) dock.dataset.bottomNav = 'off'; else delete dock.dataset.bottomNav;
+    syncLayout();
+  }
+
+  /** R3: core.setScreenTitle(text | null) — the header title of the current screen until the screen changes. */
+  function setScreenTitle(text) {
+    const t = typeof text === 'string' ? text.trim() : '';
+    ui.screenTitle = t ? { tab: ui.tab, text: t } : null;
+    if (hasMarkup(HEADER_IDS)) renderHeader();
   }
 
   /**
@@ -2043,9 +2084,11 @@
     // the caption is the wordmark "X-RAY IPD" (display font, letter-spaced) except on dated screens other than
     // วันนี้, where it names the screen (Thai text is never letter-spaced)
     const screenCaption = dated && f && f.id !== 'station';
-    $('headerCaption').textContent = screenCaption ? f.title : 'X-RAY IPD';
+    const custom = ui.screenTitle && ui.screenTitle.tab === ui.tab ? ui.screenTitle.text : '';   // R3: core.setScreenTitle
+    $('headerCaption').textContent = screenCaption ? custom || f.title : 'X-RAY IPD';
     $('headerCaption').classList.toggle('tracking-[0.12em]', !screenCaption);
-    setText($('headerTitle'), f ? f.title : 'เวร IPD');
+    if (screenCaption) delete $('headerCaption').dataset.wordmark; else $('headerCaption').dataset.wordmark = '1';
+    setText($('headerTitle'), custom || (f ? f.title : 'เวร IPD'));
     fitHeader();
   }
 
@@ -2198,10 +2241,12 @@
     const note = $('menuServerNote');
     if (note) {
       const sup = !!state.user && isSup();
-      // R2-SPEC §3.3: a 3.0 server (features without 'plan') gets its own line: the plan screens stay hidden until 3.1
-      const msg = !sup ? '' : ui.serverMode === 'old' ? MSG.serverV3 : ui.serverMode === 'v3' && !serverHas('plan') ? MSG.serverV31 : '';
+      // R2-SPEC §3.3 / R3-SPEC §4.2: a 3.0 server (features without 'plan') and a 3.1 server ('plan' but no 'chat') get their own
+      // line: the screens of the newer features stay hidden until Code.gs 3.2
+      const v3 = ui.serverMode === 'v3';
+      const msg = !sup ? '' : ui.serverMode === 'old' ? MSG.serverV3 : v3 && !serverHas('plan') ? MSG.serverV31 : v3 && !serverHas('chat') ? MSG.serverV32 : '';
       setHtml(note, msg ? `${Kit.icon('alert-triangle', 'w-5 h-5 shrink-0 mt-0.5 text-amber-700')}<span class="min-w-0">${esc(msg)}</span>` : '');
-      note.dataset.server = msg === MSG.serverV31 ? '3.0' : msg ? 'old' : '';
+      note.dataset.server = msg === MSG.serverV31 ? '3.0' : msg === MSG.serverV32 ? '3.1' : msg ? 'old' : '';
       setVisible(note, !!msg);
     }
   }
@@ -2245,8 +2290,10 @@
     else if (view === 'loading') setHtml(container, LOADING_HTML);
     else if (view === 'missing') setHtml(container, missingHtml(date));
     else {
+      if (ui.reorder && (ui.reorder.date !== date || !isSup())) ui.reorder = null;   // R3 F-2: the mode belongs to one date
       const card = { sup: isSup(), locked: !canEditDay(date), onLeave: absentLeaves(date), rows: activeLeaves(date),
-        act: activeSet(), me: myName(), planned: isPlannedDay(date), pairs: isSup() ? avoidPairsNow() : [], proposal: proposalActive(date) };
+        act: activeSet(), me: myName(), planned: isPlannedDay(date), pairs: isSup() ? avoidPairsNow() : [], proposal: proposalActive(date),
+        problem: problemCardInfo(), date };
       const slots = viewSlots(date);
       setHtml(container, U.STATIONS.map(st => stationCardHtml(st, slots, card)).join(''));
     }
@@ -2295,7 +2342,7 @@
    * or a pending request is shown as a tag but never blocks), act (active names), me}.
    */
   function stationCardHtml(st, slots, card) {
-    const { sup, locked, onLeave, rows, act, me, planned, pairs, proposal } = card;
+    const { sup, locked, onLeave, rows, act, me, planned, pairs, proposal, problem, date } = card;
     const soft = n => {   // a non-blocking leave of n: {text (option / tag), tone 'partial'|'pending'} or null
       const info = rows && rows[n] ? U.leaveInfo(rows[n]) : null;
       if (!info || info.blocking) return null;
@@ -2308,9 +2355,17 @@
     const filled = list.filter(Boolean);
     const need = required(st.id);
     const short = need - filled.length;
+    // R3 FIX-CL L-1: "ปัญหาค้าง N" (the already-loaded problem domain, no request) beside the title chip — tap → แจ้งปัญหา
+    // of this station; the "แจ้งปัญหา" chip itself sits at the card's bottom-right, below the slots (never by the pills)
+    const open = problem && problem.open ? problem.open[st.id] || 0 : 0;
+    const openPill = open > 0
+      ? `<button type="button" class="${PROBLEM_OPEN_BTN}" data-problem-open="${st.id}" aria-label="${esc('ปัญหาค้าง ' + open + ' เรื่อง — ' + st.name)}">` +
+        `<span class="${k.pill} ${k.pillPending}">ปัญหาค้าง ${open}</span></button>`
+      : '';
     const head =
       `<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5">` +
         `<h3 class="${k.stationChip}" style="background:${st.bg};color:${st.text}">${esc(st.name)}</h3>` +
+        openPill +
         `<span class="ml-auto inline-flex items-center gap-1.5">` +
           `<span class="station-need ${k.stationNeed}">ต้องการ ${need} คน</span>` +
           (short > 0   // coral only for a SAVED day that is short; a day nobody planned yet is neutral (Minor 7)
@@ -2318,8 +2373,24 @@
             : `<span class="${k.pill} ${k.pillOk}">${Kit.icon('check', 'w-3.5 h-3.5')}ครบ</span>`) +
         `</span>` +
       `</div>`;
+    // R3 F-2: "จัดลำดับ" (Supervisor, ≥ 2 people, editable day) switches this card into the reorder mode; "เสร็จ" back
+    const reorderOn = !!(sup && ui.reorder && ui.reorder.date === date && ui.reorder.station === st.id && filled.length >= 2);
+    const sortBtn = !sup || filled.length < 2 || (locked && !reorderOn) ? ''
+      : reorderOn
+        ? `<button type="button" class="${REORDER_DONE_BTN}" data-reorder-done="${st.id}" aria-label="${esc('เสร็จ — จัดลำดับ ' + st.name)}">เสร็จ</button>`
+        : `<button type="button" class="${REORDER_BTN}" data-reorder-start="${st.id}" aria-label="${esc('จัดลำดับ ' + st.name)}">` +
+          `${Kit.icon('sort', 'w-4 h-4 shrink-0')}จัดลำดับ</button>`;
+    const problemBtn = problem
+      ? `<button type="button" class="${PROBLEM_BTN}" data-problem-station="${st.id}" aria-label="${esc('แจ้งปัญหา ' + st.name)}">` +
+        `${Kit.icon('inbox', 'w-4 h-4 shrink-0')}แจ้งปัญหา</button>`
+      : '';
+    const foot = problemBtn || sortBtn
+      ? `<div class="flex flex-wrap items-center justify-end gap-2 mt-1.5 -mb-1 -mx-1.5" data-station-foot>${sortBtn ? `<span class="mr-auto">${sortBtn}</span>` : ''}${problemBtn}</div>`
+      : '';
     let body;
-    if (sup) {
+    if (reorderOn) {
+      body = reorderBodyHtml(st, filled, date, locked, act);
+    } else if (sup) {
       const pos = new Map();   // name → "stationId:index" of the slot holding it
       U.STATIONS.forEach(s => (slots[s.id] || []).forEach((n, i) => { if (n) pos.set(n, s.id + ':' + i); }));
       body = '<div class="mt-2.5 space-y-2">' + list.map((cur, i) => {
@@ -2363,7 +2434,138 @@
         '</div>';
     }
     return `<div class="station-card ${k.stationCard}" data-station-card="${st.id}">` +
-      `<span class="${k.stationEdge}" style="background:${st.border}" aria-hidden="true"></span>${head}${body}</div>`;
+      `<span class="${k.stationEdge}" style="background:${st.border}" aria-hidden="true"></span>${head}${body}${foot}</div>`;
+  }
+
+  /**
+   * R3 F-2: the reorder mode of one station card — one row per assigned person (avatar, name; on Portable the line this order
+   * gives them, "สาย N") with 44 px move buttons ขึ้น / ลง (disabled at the ends and while the day is locked). Empty slots
+   * are not listed: they stay after the people.
+   */
+  function reorderBodyHtml(st, people, date, locked, act) {
+    const k = Kit.cls;
+    const lines = st.id === 'portable' ? portableLinesOf(date, people) : null;
+    const move = (dir, n, off) => `<button type="button" class="${k.iconBtnRound}" data-reorder-move="${dir}" data-reorder-station="${st.id}" data-name="${esc(n)}"` +
+      ` aria-label="${esc('ย้าย ' + n + (dir === 'up' ? ' ขึ้น' : ' ลง'))}"${off ? ' disabled' : ''}>${Kit.icon(dir === 'up' ? 'chevron-up' : 'chevron-down', 'w-5 h-5')}</button>`;
+    return `<ol class="mt-2.5 space-y-2" data-reorder="${st.id}">` + people.map((n, i) => {
+      const line = lines ? lines.get(n) : 0;
+      return `<li class="${k.slotRow}" data-reorder-row="${esc(n)}">${Kit.avatar(n, 'sm')}` +
+        `<span class="flex-1 min-w-0 flex flex-wrap items-center gap-x-2 gap-y-1"><span class="min-w-0 font-medium text-ink-900 break-words">${esc(nameLabel(n, act))}</span>` +
+        (line ? `<span class="${k.pill} ${k.pillNeutral}" data-reorder-line="${line}">สาย ${line}</span>` : '') + `</span>` +
+        `<span class="shrink-0 inline-flex items-center gap-1.5">${move('up', n, locked || i === 0)}${move('down', n, locked || i === people.length - 1)}</span></li>`;
+    }).join('') + '</ol>';
+  }
+  /**
+   * R3 F-2: Portable people in this order → the line each one works (name → line number; not listed = no line): planned line
+   * techs keep their lines whatever the order, substitutes take the vacant lines in order (PlanEngine.resolveLines on
+   * use('plan').linesFor(date) — the stored duty's lines, else the month's plan). null without plan data.
+   */
+  function portableLinesOf(date, people) {
+    const plan = serverHas('plan') ? use('plan') : null;
+    const PE = window.PlanEngine;
+    if (!plan || typeof plan.linesFor !== 'function' || !PE || typeof PE.resolveLines !== 'function') return null;
+    let lines = null;
+    try { lines = plan.linesFor(date); } catch (e) { console.error('[core] linesFor failed:', e); return null; }
+    const sorted = (Array.isArray(lines) ? lines : []).filter(l => l && Number.isInteger(l.line) && l.line >= 1).slice().sort((a, b) => a.line - b.line);
+    if (!sorted.length) return null;
+    const workers = PE.resolveLines(sorted, people).workers;
+    const out = new Map();
+    workers.forEach((n, i) => { if (n) out.set(n, sorted[i].line); });
+    return out;
+  }
+  /** R3 F-2: "จัดลำดับ" — a ghost chip like "แจ้งปัญหา"; "เสร็จ" — the tonal button of the same height. */
+  const REORDER_BTN = Kit.cls.btn + ' ' + Kit.cls.btnGhost + ' ' + Kit.cls.btnCompact + ' gap-1.5 px-3';
+  const REORDER_DONE_BTN = Kit.cls.btn + ' ' + Kit.cls.btnTonal + ' ' + Kit.cls.btnCompact;
+
+  /** R3 FIX-CL L-1: a labelled ghost chip (ink text, a small inbox icon, 44 px tall) at the card's bottom-right. */
+  const PROBLEM_BTN = Kit.cls.btn + ' ' + Kit.cls.btnGhost + ' ' + Kit.cls.btnCompact + ' gap-1.5 px-3';
+  /** The "ปัญหาค้าง N" pill as a 44 px target; -my-1.5 keeps the card head as tall as the station chip. */
+  const PROBLEM_OPEN_BTN = 'inline-flex items-center h-11 -my-1.5 shrink-0 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400';
+  /** R3-SPEC §4.2: the station cards carry the "แจ้งปัญหา" button while the server has 'problem' and a feature provides
+   *  'problems.report' (js/feat-problems.js). */
+  function problemButtonOn() { return serverHas('problem') && typeof use('problems.report') === 'function'; }
+  /** The station cards' problem payload: false (no button), else {open: {stationId: n}} from the already-loaded domain. */
+  function problemCardInfo() {
+    if (!problemButtonOn()) return false;
+    const svc = use('problems');
+    let open = {};
+    try { open = svc && typeof svc.openSummary === 'function' ? (svc.openSummary() || {}).byStation || {} : {}; } catch (e) { open = {}; }
+    return { open };
+  }
+
+  /**
+   * R3 F-2: "จัดลำดับ" / "เสร็จ" / ขึ้น / ลง. A move edits the draft exactly like a picker change (ensureDraft; the people of
+   * the station in the new order, empty slots after them; the sticky save bar shows it as unsaved; nothing is sent until
+   * บันทึก). Focus stays on the same control (or its partner once it is disabled at an end).
+   */
+  function onReorderClick(btn) {
+    if (!state.user || !isSup() || btn.disabled) return;
+    const date = state.selectedDate;
+    const container = $('stationsContainer');
+    let focus = [];
+    if (btn.hasAttribute('data-reorder-start')) {
+      const sid = btn.getAttribute('data-reorder-start');
+      if (!U.stationById(sid) || !canEditDay(date)) return;
+      ui.reorder = { date, station: sid };
+      focus = ['[data-reorder-done="' + sid + '"]'];
+    } else if (btn.hasAttribute('data-reorder-done')) {
+      const sid = btn.getAttribute('data-reorder-done');
+      ui.reorder = null;
+      focus = ['[data-reorder-start="' + sid + '"]'];
+    } else {
+      const sid = btn.getAttribute('data-reorder-station') || '';
+      const name = btn.getAttribute('data-name') || '';
+      const dir = btn.getAttribute('data-reorder-move') === 'up' ? 'up' : 'down';
+      if (!moveInStation(date, sid, name, dir === 'up' ? -1 : 1)) return;
+      const sel = d => '[data-reorder-move="' + d + '"][data-reorder-station="' + sid + '"][data-name="' + cssAttr(name) + '"]';
+      focus = [sel(dir), sel(dir === 'up' ? 'down' : 'up')];
+    }
+    container._html = null;
+    renderStationTab();
+    renderPreview();
+    for (let i = 0; i < focus.length; i++) {
+      const el = container.querySelector(focus[i]);
+      if (el && !el.disabled) { try { el.focus({ preventScroll: true }); } catch (e) { el.focus(); } break; }
+    }
+  }
+  /** A value quoted for a [attr="…"] selector. */
+  function cssAttr(v) { return String(v).replace(/["\\]/g, '\\$&'); }
+  /** R3 F-2: moves `name` one place up (-1) / down (+1) among the people of station `sid` in the draft. → bool (moved) */
+  function moveInStation(date, sid, name, step) {
+    const st = U.stationById(sid);
+    if (!st || !name || !canEditDay(date)) return false;
+    const shown = viewSlots(date)[st.id].filter(Boolean);
+    const i = shown.indexOf(name);
+    if (i < 0 || i + step < 0 || i + step >= shown.length) return false;
+    const draft = ensureDraft(date);
+    draft.assignments = viewSlots(date);   // the slots as shown (fitted to the current counts), like a picker change
+    const slots = draft.assignments[st.id];
+    const order = slots.filter(Boolean);
+    const a = order.indexOf(name), b = a + step;
+    if (a < 0 || b < 0 || b >= order.length) return false;
+    order[a] = order[b];
+    order[b] = name;
+    draft.assignments[st.id] = order.concat(slots.map(() => '')).slice(0, Math.max(slots.length, order.length));
+    dropCleanDraft();
+    return true;
+  }
+
+  /** A tap on a station card's "แจ้งปัญหา" button → use('problems.report')(stationId) (needs a network, like every write). */
+  function onStationClick(e) {
+    const ro = e.target && e.target.closest ? e.target.closest('[data-reorder-start], [data-reorder-done], [data-reorder-move]') : null;
+    if (ro) { onReorderClick(ro); return; }
+    const pill = e.target && e.target.closest ? e.target.closest('[data-problem-open]') : null;
+    if (pill && state.user) {
+      const sid = pill.getAttribute('data-problem-open');
+      if (U.STATIONS.some(st => st.id === sid) && problemButtonOn()) spawn(() => go('problems', { station: sid, status: 'open' }));
+      return;
+    }
+    const btn = e.target && e.target.closest ? e.target.closest('[data-problem-station]') : null;
+    if (!btn || !state.user) return;
+    const id = btn.getAttribute('data-problem-station');
+    const report = problemButtonOn() ? use('problems.report') : null;
+    if (!report || !U.STATIONS.some(st => st.id === id) || !requireInternet()) return;
+    spawn(() => report(id));
   }
 
   /**
@@ -2790,7 +2992,7 @@
     const r = rank ? ` · คนที่ ${rank}` : '';
     // CL-22: one tone per status everywhere — rejected soft coral, pending sun, partial-day accent; CL-24: a time range
     // always ends with "น."
-    if (info.rejected) return p(info.type + ' · ไม่อนุมัติ', 'rejected', 'x');
+    if (info.rejected) return p(info.type + ' · ไม่อนุมัติ', 'rejected', 'calendar-off');
     if (info.pending) return p(info.type + r + ' · รออนุมัติ', 'pending', 'clock');
     if (info.partial) return p(info.type + (info.timeText ? ' ' + info.timeText : ''), 'partial', 'stethoscope');
     return p(info.type + r, 'danger', 'calendar-off');
@@ -2863,7 +3065,7 @@
       const said = info.type + ' ' + U.thaiDate(r.date) + ' — ' + (info.rejected ? 'ไม่อนุมัติ' + (r.note ? ' เหตุผล: ' + r.note : '') : 'รออนุมัติ');
       return `<button type="button" class="request-row ${k.leaveRow}" data-date="${esc(r.date)}" data-staff="${esc(r.staff)}" data-request-status="${info.status}" ` +
           `aria-label="${esc(said)}">` +
-        `<span class="${k.listIcon} ${info.rejected ? k.listIconDanger : k.listIconSun}">${Kit.icon(info.rejected ? 'x' : 'clock', 'w-5 h-5')}</span>` +
+        `<span class="${k.listIcon} ${info.rejected ? k.listIconDanger : k.listIconSun}">${Kit.icon(info.rejected ? 'calendar-off' : 'clock', 'w-5 h-5')}</span>` +
         `<span class="min-w-0 flex-1">` +
           `<span class="flex flex-wrap items-center gap-x-2 gap-y-1"><span class="font-medium text-ink-900 whitespace-nowrap">${esc(when)}</span>` +
           `${leaveStatusPill(r, 0)}</span>` +
@@ -3083,20 +3285,20 @@
     const btn = (key, look, icon, label) => {
       const on = ui.leaveBusy === key;
       return `<button type="button" class="${k.btn} ${look} flex-1 min-w-0" data-leave-act="${key}"${busy ? ' disabled' : ''}${on ? ' aria-busy="true"' : ''}>` +
-        (on ? 'กำลังบันทึก…' : Kit.icon(icon, 'w-5 h-5') + `<span class="truncate">${label}</span>`) + '</button>';
+        (on ? 'กำลังบันทึก…' : (icon ? Kit.icon(icon, 'w-5 h-5') : '') + `<span class="truncate">${label}</span>`) + '</button>';
     };
     if (info.pending) {
       const decide = sheetIsDecision(sh, leave);
       const own = !decide && sh.staff === myName() && !sh.locked;
-      const acts = decide ? `<div class="flex gap-2 pt-2">${btn('rejected', k.btnSecondary, 'x', 'ไม่อนุมัติ')}${btn('approved', k.btnPrimary, 'check', 'อนุมัติ')}</div>`
-        : own ? `<div class="flex gap-2 pt-2">${btn('cancel', k.btnSecondary, 'x', 'ยกเลิกคำขอ')}</div>` : '';
+      const acts = decide ? `<div class="flex gap-2 pt-2">${btn('rejected', k.btnSecondary, '', 'ไม่อนุมัติ')}${btn('approved', k.btnPrimary, 'check', 'อนุมัติ')}</div>`
+        : own ? `<div class="flex gap-2 pt-2">${btn('cancel', k.btnSecondary, '', 'ยกเลิกคำขอ')}</div>` : '';
       return box(k.statusBoxPending, 'clock', k.listIconSun, isSup() ? 'รอคุณอนุมัติ' : 'รอ Supervisor อนุมัติ',
         (leave.recordedAt ? 'ส่งคำขอเมื่อ ' + `<span class="whitespace-nowrap">${esc(U.thaiStamp(leave.recordedAt))}</span>` + ' · ' : '') + esc(MSG.pendingNote), acts, 'pending');
     }
     if (info.rejected) {
       const own = sh.staff === myName() && !sh.locked;
       const acts = own ? `<div class="flex gap-2 pt-2">${btn('delete', k.btnSecondary, 'trash', 'ลบคำขอ')}${btn('rerequest', k.btnPrimary, 'refresh', 'ขอใหม่')}</div>` : '';
-      return box(k.statusBoxRejected, 'x', k.listIconDanger, 'ไม่อนุมัติ', by(leave.decidedBy, leave.decidedAt), reason + acts, 'rejected');
+      return box(k.statusBoxRejected, 'calendar-off', k.listIconDanger, 'ไม่อนุมัติ', by(leave.decidedBy, leave.decidedAt), reason + acts, 'rejected');
     }
     if (info.partial) {
       return box(k.statusBoxPartial, 'stethoscope', k.listIconInfo, esc(info.type) + (info.timeText ? ` <span class="whitespace-nowrap">${esc(info.timeText)}</span>` : ''),
@@ -3174,6 +3376,61 @@
 
   function calMonth() { return ui.calMonth || U.monthKey(state.selectedDate); }
 
+  /**
+   * R3 F-1: the Supervisor's holidays (ตั้งค่าการจัดเวร → วันหยุด) for the leave calendar — use('plan').holidays() (Map
+   * date → name; the persisted plan domain, so the offline copy too; empty on a server without 'plan', which wipes it).
+   */
+  function calHolidays() {
+    const plan = use('plan');
+    if (!plan || typeof plan.holidays !== 'function') return new Map();
+    try { const m = plan.holidays(); return m instanceof Map ? m : new Map(); } catch (e) { console.error('[core] holidays failed:', e); return new Map(); }
+  }
+  /**
+   * R3 F-1: the shown month's holidays come with the plan data — use('plan').ensure(monthStart, monthEnd) once per shown
+   * month, only while the server has 'plan' and the plan range does not cover that month yet (no new action; ensure never
+   * rejects and redraws when its answer is applied). A far month may reset the plan range (≤ 186 days): leaving การลา puts
+   * it back around the selected date (restoreCalPlanRange, as ตารางเวร does — FIX-RO R-1).
+   * R3 FIX-CL2 Q-1: plan.covers() alone decides — the selected date's month ± 1 is NOT always held (a far month resets the
+   * range), so a month of that window that is not covered asks for the whole window back (วันนี้ reads it too); any other
+   * month asks for itself.
+   */
+  function ensureCalHolidays(month) {
+    if (!state.session || !serverHas('plan') || ui.calPlanMonth === month) return;
+    const plan = use('plan');
+    if (!plan || typeof plan.ensure !== 'function') return;
+    ui.calPlanMonth = month;
+    const r = U.monthRange(month);
+    try { if (typeof plan.covers === 'function' && plan.covers(r.from, r.to)) return; } catch (e) { return; }
+    const sel = U.monthKey(state.selectedDate);
+    const lo = U.addMonths(sel, -1), hi = U.addMonths(sel, 1);
+    if (month >= lo && month <= hi) {
+      track(Promise.resolve(plan.ensure(lo + '-01', U.monthRange(hi).to)).catch(() => false));
+      return;
+    }
+    ui.calPlanMoved = true;
+    track(Promise.resolve(plan.ensure(r.from, r.to)).catch(() => false));
+  }
+  function restoreCalPlanRange() {
+    const plan = use('plan');
+    if (!ui.calPlanMoved || !plan || typeof plan.ensure !== 'function' || !state.session) return;
+    ui.calPlanMoved = false;
+    ui.calPlanMonth = '';
+    const m = U.monthKey(state.selectedDate);
+    track(Promise.resolve(plan.ensure(U.addMonths(m, -1) + '-01', U.monthRange(U.addMonths(m, 1)).to)).catch(() => false));
+  }
+  /** R3 F-1: the holiday marker of a calendar cell (a short bar: unlike the circle / diamond of the leave markers). */
+  const CAL_HOLIDAY_MARK = 'block w-2.5 h-1 rounded-full bg-coral-600';
+  const CAL_HOLIDAY_MARK_SEL = 'block w-2.5 h-1 rounded-full bg-white';
+  const CAL_HOLIDAY_LEGEND = 'inline-block align-middle mr-1.5 w-2.5 h-1 rounded-full bg-coral-600';
+  /**
+   * R3 FIX-CL2 Q-4: a holiday name for the month list — every space-separated part an inline-block (moved to the next line
+   * whole instead of being cut by the Thai line breaker, which does not know names such as "ชนกาธิเบศร"; a part longer
+   * than the whole line still wraps inside, never overflows).
+   */
+  function calHolidayName(name) {
+    return String(name).split(/\s+/).filter(Boolean).map(p => `<span class="inline-block max-w-full">${esc(p)}</span>`).join(' ');
+  }
+
   /** leaveList(date) limited to the group filter of the leave tab (queue ranks stay those of everyone). */
   function filteredLeaveList(date) {
     return filteredLines(date).absent;
@@ -3197,6 +3454,9 @@
 
     let loading = false, missing = false, knownDays = 0, total = 0, partials = 0, pendings = 0;
     const byType = nameMap();
+    ensureCalHolidays(month);
+    const hol = calHolidays();
+    const monthHol = [];
     const cells = U.monthGrid(month).flat().map((date, i) => {
       if (!date) return '<div class="h-14" aria-hidden="true"></div>';
       const view = dayView(date);
@@ -3210,12 +3470,27 @@
       total += list.length;
       partials += lines.partial.length;
       pendings += lines.pending.length;
+      const holiday = hol.has(date) ? String(hol.get(date) || '') : null;
+      if (holiday !== null) monthHol.push([date, holiday]);
       return calDayHtml(date, known ? list.length : null, i % 7 === 0, date === today, date === state.selectedDate,
-        { partial: lines.partial.length, pending: lines.pending.length });
+        { partial: lines.partial.length, pending: lines.pending.length, holiday });
     });
     const head = U.THAI_WEEKDAYS_SHORT.map((d, i) =>
       `<div class="text-xs font-medium leading-6 ${i === 0 ? 'text-coral-600' : 'text-slate-500'}">${d}</div>`).join('');
     setHtml(box, `<div class="grid grid-cols-7 gap-1 text-center">${head}${cells.join('')}</div>`);
+    // R3 F-1: the heading "วันหยุดเดือนนี้" under the calendar (hidden without holidays); its leading mark is the cells'
+    // holiday marker, so the heading is also the marker's legend. FIX-CL2 Q-4: one holiday per line ("5 ธ.ค. <name>"): the
+    // date never wraps, the name only breaks at its spaces (each space-separated part is kept whole when it fits)
+    const holEl = $('calHolidays');
+    setHtml(holEl, monthHol.length
+      ? `<p><span class="${CAL_HOLIDAY_LEGEND}" data-cal-holiday-legend aria-hidden="true"></span>วันหยุดเดือนนี้</p>` +
+        `<ul class="mt-0.5 space-y-0.5" data-cal-holiday-list>` +
+        monthHol.map(h => `<li class="flex items-baseline gap-x-1.5" data-cal-holiday-item="${h[0]}">` +
+          `<span class="shrink-0 whitespace-nowrap tabular-nums" data-cal-holiday-date="${h[0]}">${esc(U.thaiDateShort(h[0], { year: false }))}</span>` +
+          (h[1] ? ' <span class="min-w-0" data-cal-holiday-name>' + calHolidayName(h[1]) + '</span>' : '') + '</li>').join('') +
+        `</ul>`
+      : '');
+    setVisible(holEl, monthHol.length > 0);
 
     const status = $('calStatus');
     setHtml(status, loading ? `${Kit.icon('clock', 'w-4 h-4 shrink-0')}<span>กำลังโหลดข้อมูลของเดือนนี้…</span>`
@@ -3254,19 +3529,24 @@
     const ex = extra || {};
     // CL-13: a doctor visit is a circle, a pending request a diamond (shape and colour), in their own row under the number;
     // white on the selected (brand-600) day
-    const marks = (ex.partial ? `<span class="${selected ? k.calMarkPartialSel : k.calMarkPartial}" data-mark="partial"></span>` : '') +
+    // R3 F-1: a holiday's short bar leads the markers' row (it never sits on the number, even at 320 px)
+    const marks = (typeof ex.holiday === 'string' ? `<span class="${selected ? CAL_HOLIDAY_MARK_SEL : CAL_HOLIDAY_MARK}" data-cal-holiday data-mark="holiday"></span>` : '') +
+      (ex.partial ? `<span class="${selected ? k.calMarkPartialSel : k.calMarkPartial}" data-mark="partial"></span>` : '') +
       (ex.pending ? `<span class="${selected ? k.calMarkPendingSel : k.calMarkPending}" data-mark="pending"></span>` : '');
     const said = [ex.partial ? `ลาบางช่วง ${ex.partial} คน` : '', ex.pending ? `รออนุมัติ ${ex.pending} คำขอ` : ''].filter(Boolean).join(' · ');
+    // R3 F-1: a holiday (ex.holiday = its name, '' when unnamed; null = none) — the number in the Sunday tone, a short bar
+    // marker in the markers' row, and "วันหยุด: <name>" in the cell's label
+    const holiday = typeof ex.holiday === 'string';
     const i = count === null ? -1 : Math.min(count, CAL_HEAT_BG.length - 1);
     const bg = i < 0 ? 'bg-cream-50 border-dashed' : CAL_HEAT_BG[i];
     const border = isToday && !selected ? k.calCellToday : i < 0 ? 'border-ink-200' : CAL_HEAT_BORDER[i];
     // CL-13: a Sunday number on a strongly tinted day (3+ people) sits on a white chip (AA for 12 px text)
-    const num = k.calNum + ' ' + (selected ? k.calNumSel : isToday ? k.calNumToday : sunday ? (i >= 3 ? k.calNumSundayTint : k.calNumSunday) : 'text-ink-700');
-    const label = U.thaiDate(date) + (isToday ? ' (วันนี้)' : '') +
+    const num = k.calNum + ' ' + (selected ? k.calNumSel : isToday ? k.calNumToday : sunday || holiday ? (i >= 3 ? k.calNumSundayTint : k.calNumSunday) : 'text-ink-700');
+    const label = U.thaiDate(date) + (isToday ? ' (วันนี้)' : '') + (holiday ? ' · วันหยุด' + (ex.holiday ? ': ' + ex.holiday : '') : '') +
       (count === null ? ' — ยังไม่มีข้อมูล' : count ? ` — ลา ${count} คน` : ' — ไม่มีผู้ลา') + (said ? ' · ' + said : '');
     return `<button type="button" class="${k.calCell} ${bg} ${border}" ` +
         `data-date="${date}" data-count="${count === null ? '' : count}" aria-pressed="${selected ? 'true' : 'false'}"` +
-        `${isToday ? ' aria-current="date" data-today="1"' : ''} aria-label="${esc(label)}" title="${esc(label)}">` +
+        `${isToday ? ' aria-current="date" data-today="1"' : ''}${holiday ? ' data-holiday="1"' : ''} aria-label="${esc(label)}" title="${esc(label)}">` +
       (selected ? `<span class="${k.calSelFill}" data-cal-selected aria-hidden="true"></span>` : '') +
       `<span class="${num}">${Number(date.slice(8))}</span>` +
       // CL-13: below 360 px the cell shows only the number of people ("คน" is in the cell's label)
@@ -3285,8 +3565,13 @@
       return;
     }
     const title = `<p class="font-display text-sm font-medium leading-6 text-ink-900">${esc(U.thaiDate(date))}`;
+    // R3 F-1: the selected day's holiday as its own line under the day header ("วันหยุด: <name>")
+    const hol = calHolidays();
+    const holLine = hol.has(date)
+      ? `<p class="text-[0.8125rem] font-medium leading-5 text-coral-700 break-words" data-cal-holiday-line>${esc('วันหยุด' + (hol.get(date) ? ': ' + hol.get(date) : ''))}</p>`
+      : '';
     if (!dayKnown(date)) {
-      setHtml(el, title + '</p>' + muted('ยังไม่มีข้อมูลในเครื่อง'));
+      setHtml(el, title + '</p>' + holLine + muted('ยังไม่มีข้อมูลในเครื่อง'));
       return;
     }
     const lines = filteredLines(date);
@@ -3296,7 +3581,7 @@
       ? '</p><p class="text-[0.8125rem] font-medium leading-5 text-slate-600" data-cal-counts>' +
         leaveCountsText(lines).split(' · ').map(t => `<span class="whitespace-nowrap">${esc(t)}</span>`).join(' · ') + '</p>'
       : ` — <span data-cal-counts>ลา ${lines.absent.length} คน</span></p>`;
-    setHtml(el, title + counts +
+    setHtml(el, title + counts + holLine +
       (lines.absent.length + lines.partial.length + lines.pending.length ? linesHtml(lines) : muted('ไม่มีผู้ลา')));
   }
 
@@ -3304,6 +3589,7 @@
   function showCalMonth(month) {
     if (!month) return;
     ui.calMonth = month;
+    ui.calPlanMonth = '';   // R3 F-1: ask the plan for this month's holidays again (also on โหลดอีกครั้ง)
     renderLeaveCalendar();
     if (!state.session) return;
     const r = U.monthRange(month);
@@ -4824,10 +5110,12 @@
   /* ------------------------------------------------------------------ */
   /*
    * DEVELOPER NOTE (R1a-B1, apiLevel 1) — the only surface feature files (js/feat-*.js, loaded after this file) use.
-   * Load order (R2-SPEC §4.1): config.js → utils.js → api.js → ui-kit.js → plan-engine.js → app.js → plan-data.js →
-   * feat-profile.js → feat-approval.js → feat-roster.js → feat-plan-settings.js → feat-backup.js. A feature file registers
-   * at load time (before init) or later ("late registration" works the same way). window.PlanEngine (pure engine) is
-   * loaded before this file; the boot guard requires it.
+   * Load order (R3-SPEC §4.1): config.js → utils.js → api.js → ui-kit.js → xlsx-lite.js → plan-engine.js → app.js →
+   * plan-data.js → feat-profile.js → feat-approval.js → feat-roster.js → feat-plan-settings.js → feat-backup.js →
+   * feat-dashboard.js → feat-problems.js → feat-chat.js. A feature file registers at load time (before init) or later
+   * ("late registration" works the same way). window.PlanEngine (pure engine) is loaded before this file; the boot guard
+   * requires it. R3: window.XlsxLite (js/xlsx-lite.js) is NOT required — a feature checks it and hides its Excel button
+   * without it; Api.newId() makes the client ids of R3 writes (a photo's fileId, a chat message's cid).
    *
    * App.register(def) → true, or false (rejected: invalid/duplicate id, or def.needs > core.apiLevel — then the
    * "มีเวอร์ชันใหม่" banner is shown). def fields (all optional except id):
@@ -4838,6 +5126,11 @@
    *   nav        { place: 'bar'|'menu'|'header'|'none' (default 'none'), section: 'mine'|'sup'|'system'|…, order }
    *              → <button class="nav-btn" data-tab="ID" data-nav-place="…"> in #bottomNav / #menuNav /
    *              #headerNav (none: reachable through core.go only). Lower order first (legacy 10–40, default 100).
+   *              R3 (I2): a header entry is a 44 × 44 px icon button (px, like the avatar and ↻ — never wider at a large
+   *              text size); the header row (C-M1, fitHeader) makes room for it by stepping the sync pill down: full →
+   *              short → icon → tight → nopill (also a smaller date) → mini (the extreme: a smaller date still, which
+   *              ends in "…" inside its column rather than running under the icons). The chat icon (order 10) is the
+   *              one header entry of R3; with it the pill leaves the row on narrow phones (≈ 320 px; ≤ 375 px at 130 %).
    *              The bar holds วันนี้ (10), การลา (20), R2 ตารางเวร (25, only while the server has 'plan') and เมนู (90);
    *              keep the bar at 3–4 entries.
    *              place 'menu' → a row in the เมนู screen, in the list of nav.section: 'mine' (ของฉัน), 'sup'
@@ -4847,17 +5140,26 @@
    *   parent     screen core.back() returns to (default 'station'). Give a screen opened from เมนู parent: 'menu':
    *              the header then shows ← (any screen that is not in the bar does) and เมนู stays highlighted.
    *   chrome     { date: bool, weekStrip: bool } (default both false): the header shows the selected date (tap =
-   *              date picker) instead of the screen title; the week strip shows under the header (วันนี้ only)
+   *              date picker) instead of the screen title; the week strip shows under the header (วันนี้ only).
+   *              R3: bottomNav: false hides the phone's bottom bar (#navDock below md:, data-bottom-nav="off"; the left
+   *              rail of md: and up stays) and the space kept for it while the screen is current (the chat room);
+   *              R3 (I2): such a screen enters with an opacity-only fade (data-enter="opacity") instead of the shared
+   *              translateY fade, so its sticky children (the composer) are in place from the first frame
    *   visible(c) → bool: role/capability gate (default true). A current screen that turns invisible falls back to
    *              'station' at the next render; its nav entry is hidden.
    *   badge(c)   → number shown on the nav entry (else the value of core.badges.set(id, n))
+   *   badgeLabel(n) → R3 FIX-CL L-13: the count badge's spoken name (aria-label), default "N รายการ"
    *   init(c)    once, when the app starts (or at registration when it already started)
    *   mount(root, c)   once before the first render/show (again after a logout when the feature has no reset)
    *   render(root, c)  on every app render while the screen is current (only the current feature renders)
    *   show(c, params)  when the screen becomes current (also on core.go(id, params) to the current screen)
    *   hide(c)    when another screen becomes current
    *   canLeave(c) → true | a message (asked with UiKit.confirm before leaving) | false (stay)
-   *   reset(c)   on logout and before a new login (clearDataState): drop memory and DOM written for the old user.
+   *   back(c)    → R3 F-3: true when the screen handled a "back" itself (an inner view closed: the team person view returns
+   *              to its list); anything else → the usual back to `parent`. Called (sync, only while the screen is current)
+   *              by core.back() — i.e. the header ←, Android/browser back (after an open sheet closed) and features
+   *              calling c.back(). Never navigate inside it; keep it cheap.
+   *   reset(c)  on logout and before a new login (clearDataState): drop memory and DOM written for the old user.
    *              Without reset the registry empties the root and mounts again later.
    *   Isolation: every hook (and visible/badge) runs in try/catch; a returned Promise is tracked (App.idle) and its
    *   rejection caught. A failure marks the feature broken for this page load: its root shows an error card
@@ -4868,12 +5170,16 @@
    * App.core (frozen):
    *   apiLevel 1 · U (Utils) · Api · Kit (UiKit) · state (App.state — READ ONLY for features)
    *   isSup() · myName() · staff() (copy of the active staff [{name, group}]) · serverHas(name) (R1b: the `features` of
-   *     the last getData / ping answer: 'leave2', 'approval', 'avatar', 'password', R2 'plan' (Code.gs 3.1); all false on
-   *     a Code.gs older than 3.0)
+   *     the last getData / ping answer: 'leave2', 'approval', 'avatar', 'password', R2 'plan' (Code.gs 3.1), R3 'stats'
+   *     (personal profile fields + both dashboards), 'problem', 'chat' (Code.gs 3.2); all false on a Code.gs older than 3.0)
+   *     — an R3 screen is shown (and an R3 request sent) only while its flag is present
    *     · serverMode() → '' (not known yet) | 'v3' | 'old'
    *   spawn(fn, opts) (run + track + handleError) · track(promise) · alive() → () => bool (session still the same)
    *     — every async flow goes through these so App.idle() sees it
    *   call(action, params, opts) (Api.call) · userCall(…) (same, with the "server slow, retrying" toast) ·
+   *     R3 (I2): opts.requestId — the caller's own requestId ([A-Za-z0-9_-]{16,64}, e.g. Api.newId()) to send the SAME
+   *     write again in a later call (the server replays a write by requestId for 600 s: e.g. a problem report whose
+   *     answer was lost is not stored twice); anything else → a fresh id ·
    *     withBusy(btn, label, fn) · requireInternet() · handleError(e, opts) · toast(msg, ms)
    *   confirm(msg, opts) → Promise<bool> · prompt(msg, default, opts) → Promise<string|null> — UiKit.confirm/prompt
    *     (sheets; window.confirm/prompt with APP_CONFIG.NATIVE_DIALOGS) that do not keep App.idle() busy while open;
@@ -4886,7 +5192,37 @@
    *   ensureRange(from, to, opts) · dayView(date) → 'ready'|'cached'|'loading'|'missing' · leavesOn(date) ·
    *     leaveList(date) → [{name, type, rank}] of the ABSENT people · leaveLines(date) → {absent, partial, pending} lines
    *     [{name, type, rank, leave, info}] · isAbsent(leave) (= Utils.isAbsent) · saveFile(blob, filename) → Promise<bool>
-   *   R2 FIX I-8: messages.serverV31 — the one wording of the 3.0-server notice (เมนู note; use it for other screens too)
+   *   R2 FIX I-8: messages.serverV31 — the one wording of the 3.0-server notice (เมนู note; use it for other screens too);
+   *     R3: its text now names Code.gs 3.2, and messages.serverV32 is the 3.1-server notice ('plan' but no 'chat': "…ยังเป็น
+   *     รุ่น 3.1 — อัปเดต Code.gs เป็น 3.2 … Dashboard แจ้งปัญหา และแชท"). #menuServerNote (Supervisor, a v3 server) shows
+   *     serverV31 with data-server="3.0" or serverV32 with data-server="3.1"; nothing on a server with 'chat'.
+   *   R3: setScreenTitle(text | null) — the header title of the CURRENT screen (instead of def.title) until the screen
+   *     changes (core.go to another screen, or to the same one with params, clears it before show() runs); null restores
+   *     def.title. E.g. the chat room: setScreenTitle(peer) in show().
+   *   R3: the station cards of วันนี้ carry a "แจ้งปัญหา" chip (R3 FIX-CL L-1: a labelled ghost button with a small inbox
+   *     icon, 44 px tall, aria-label "แจ้งปัญหา <Station>", data-problem-station="<id>", in its own row at the card's
+   *     bottom-right below the slots — never next to the need/short pills; the h3's first child stays the name text node)
+   *     while serverHas('problem') AND use('problems.report') is a function; a tap (logged in, online — requireInternet())
+   *     runs use('problems.report')(stationId) through spawn(). With use('problems').openSummary() (the already-loaded
+   *     domain, no request) a station with open problems also shows the pill "ปัญหาค้าง N" beside its title chip
+   *     ([data-problem-open="<id>"], 44 px target) → go('problems', {station, status: 'open'}).
+   *   R3 F-2 (Supervisor): a station card with ≥ 2 people on an editable day has "จัดลำดับ" ([data-reorder-start="<id>"],
+   *     icon sort, bottom-left of the card's last row [data-station-foot]); it switches THAT card (ui.reorder = {date,
+   *     station}; ends on another date / role / logout) into a reorder list [data-reorder="<id>"] — one row per person
+   *     ([data-reorder-row="<name>"]) with 44 px ขึ้น / ลง ([data-reorder-move="up|down"][data-reorder-station][data-name],
+   *     aria-label "ย้าย <name> ขึ้น|ลง", disabled at the ends and while locked) and "เสร็จ" ([data-reorder-done]) back to the
+   *     pickers. A move edits the draft like a picker change (ensureDraft → viewSlots → the station's people in the new order,
+   *     empty slots after them; dirty save bar; saved only by บันทึก) — the saved order is what the picture, the staff chips
+   *     and the pickers show. On Portable each row shows the line that order gives ("สาย N", [data-reorder-line]):
+   *     PlanEngine.resolveLines(use('plan').linesFor(date), people) — planned line techs keep their lines, substitutes
+   *     take the vacant lines in order. .station-select[data-station][data-index] and data-station-card are unchanged.
+   *   R3 F-1: the leave calendar shows use('plan').holidays() for everyone — the number in the Sunday tone, a short bar
+   *     marker first in the markers' row (.cal-day[data-holiday] [data-cal-holiday]), "วันหยุด: <name>" in the cell's
+   *     label and the selected day's detail ([data-cal-holiday-line]), and #calHolidays: the heading "วันหยุดเดือนนี้" and
+   *     one holiday per line ([data-cal-holiday-item="<date>"] "5 ธ.ค. <name>", FIX-CL2 Q-4; hidden when none). A shown
+   *     month the plan range does not cover asks use('plan').ensure once (server 'plan' only, no new action; offline = the
+   *     cached plan domain): the selected date's month ± 1 window when the month is inside it (FIX-CL2 Q-1: a far month may
+   *     have reset the range), else that month; leaving การลา restores the plan range around the selected date (as ตารางเวร does).
    *   R2 (I2): openStationCounts() — the station-counts sheet (Supervisor) · refresh() → Promise<bool> — a heartbeat now
    *     (getData of the selected date's window; never rejects; e.g. after a write whose new plan version must be learnt)
    *   R2: shareImage(node, filename) → Promise<bool> — node drawn by html2canvas at 420 px (staged off-screen; a node not in
@@ -4950,10 +5286,13 @@
    *     'lilac'|'sun'|'danger'|'neutral', main, sub, tel?}] (plain text, max 8; FIX I-7: tel = a phone number, digits with
    *     an optional leading + after removing spaces/dashes, 9–15 digits — drawn as a 44 px tel: link under the line,
    *     anything else ignored) appended to "ของฉันวันนี้" while the server has
-   *     'plan'. #menuServerNote tells the Supervisor of a 3.0 server (features without 'plan') to update Code.gs to 3.1.
+   *     'plan'. #menuServerNote tells the Supervisor of a 3.0 / 3.1 server to update Code.gs to 3.2 (see messages above).
+   *   R3 services: 'problems.report' fn(stationId) (js/feat-problems.js; turns the station-card button on) · 'problems'
+   *     {ensure, list, openSummary} (the team dashboard reads it). saveFile(blob, filename) is unchanged; an .xlsx blob
+   *     (XlsxLite.build) has the type application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.
    *   banners.set(id, {text, tone: 'info'|'ok'|'warn'|'danger', icon, order, screens: [ids], actionLabel,
    *     action(c), dismissLabel, onDismiss(c)} | null) — shown in #bannerSlot above the screens; with dismissLabel AND
-   *     onDismiss a ✕ (aria-label = dismissLabel, [data-banner-dismiss]) sits next to the action and calls onDismiss only
+   *     onDismiss a text button "ซ่อน" (aria-label = dismissLabel, [data-banner-dismiss]; R3 L-8: no cross glyph) sits next to the action and calls onDismiss only
    *     (remembering the dismissal is the feature's job) · badges.set(id, n) · badges.get(id)
    *   confirm / prompt opts (UiKit 1.5): detail {title, text, avatar, tone} (framed block above the message), maxLength
    *     (prompt: limit + live counter), data {key: value} (data-* on the dialog, e.g. to find and close it)
@@ -4962,7 +5301,8 @@
    *   url) — every avatar on the page is patched in place (UiKit.avatars.refresh), no render needed.
    *
    * Shell (R1a-B2): Android/browser back (APP_CONFIG.HISTORY_NAV !== false) closes the top sheet, then goes to the
-   * current screen's parent (core.back()); App.shell.onPopState / App.shell.handleBack expose that logic to tests.
+   * current screen's parent (core.back(); R3 F-3: def.back(c) of the screen first); App.shell.onPopState /
+   * App.shell.handleBack expose that logic to tests.
    * "มีอะไรใหม่" is the WHATS_NEW structure below (edit it every release); it opens once per version after an
    * update (APP_CONFIG.WHATS_NEW !== false; the seen version is core.store.prefs 'whatsNewSeen').
    * Sheets: give a feature's own sheet the markup of the index.html modals (wrapper + [data-sheet-panel] +
@@ -4980,7 +5320,9 @@
   /** Nav entries of registered features (the legacy entries are in index.html with the same look). */
   const NAV_BTN = {
     bar: Kit.cls.navItem + ' ' + Kit.cls.navItemRail + ' ' + Kit.cls.navOff,
-    header: 'nav-btn relative ' + Kit.cls.hdrIconBtn,
+    // R3 (I2): 44 px like #headerAvatarBtn / #refreshBtn (UiKit's hdrIconBtn is w-11 = 2.75rem, 57 px at 130 % text,
+    // which pushed the header date under the chat icon at 320 px — C-M1)
+    header: 'nav-btn relative inline-flex items-center justify-center w-[44px] h-[44px] shrink-0 rounded-full text-ink-900 active:bg-white/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-800 disabled:opacity-60',
     menu: 'nav-btn ' + Kit.cls.listRow
   };
   /** Where a nav entry's count badge sits: next to the bar icon, on the header icon's corner, inline in a menu row. */
@@ -4989,7 +5331,8 @@
     // where icon and label stand side by side
     bar: 'absolute -top-1.5 -right-1 pointer-events-none',
     barDot: 'absolute -top-0.5 right-1 pointer-events-none',
-    header: 'absolute top-0.5 right-0.5 pointer-events-none',
+    // R3 FIX-CL L-10: on the button's corner, so the 20 px icon's outline stays visible (like the เมนู badge in the bar)
+    header: 'absolute -top-1 -right-1 pointer-events-none',
     menu: 'shrink-0 pointer-events-none'
   };
   const LEGACY_SCREENS = [
@@ -5052,7 +5395,8 @@
       parent: typeof def.parent === 'string' ? def.parent : '',
       chrome: {
         date: !!(def.chrome && def.chrome.date),             // the header shows the selected date (else the title)
-        weekStrip: !!(def.chrome && def.chrome.weekStrip)    // the week strip under the header
+        weekStrip: !!(def.chrome && def.chrome.weekStrip),   // the week strip under the header
+        bottomNav: !(def.chrome && def.chrome.bottomNav === false)   // R3: false hides the phone's bottom bar (chat room)
       },
       root: null, navBtn: null, started: false, mounted: false, error: null
     };
@@ -5087,6 +5431,9 @@
     root.id = 'tab-' + f.id;
     root.className = 'tab-panel space-y-3';
     root.dataset.feature = f.id;
+    // R3 (I2): a screen without the bottom bar (the chat room: a sticky composer) enters with an opacity-only fade —
+    // the shared translateY fade would offset its sticky children while it runs (index.html .tab-panel[data-enter])
+    if (!f.chrome.bottomNav) root.dataset.enter = 'opacity';
     const main = $('appMain');
     main.insertBefore(root, $('menuNav') && $('menuNav').parentNode === main ? $('menuNav') : null);
     f.root = root;
@@ -5202,7 +5549,9 @@
     const prev = featById[ui.shownTab];
     const next = featById[ui.tab];
     ui.shownTab = ui.tab;
+    ui.screenTitle = null;   // R3: a title set with core.setScreenTitle() belongs to the screen that set it (show() may set it again)
     if (prev && prev.id === 'leave' && isShown('confirmLeaveModal')) closeConfirmLeave();   // the sheet belongs to การลา
+    if (prev && prev.id === 'leave') restoreCalPlanRange();   // R3 F-1: the plan range back around the selected date
     if (prev && !prev.legacy && typeof prev.def.hide === 'function') callHook(prev, 'hide', () => prev.def.hide(core));
     if (next && !next.legacy) {
       mountFeature(next);
@@ -5226,7 +5575,8 @@
       const vis = featureVisible(f);
       setVisible(b, vis);
       if (vis && f.place === 'header') header++;
-      renderNavBadge(b, vis ? featureBadge(f) : 0, f.place, vis ? dotLabels[f.id] || '' : '');
+      const n = vis ? featureBadge(f) : 0;
+      renderNavBadge(b, n, f.place, vis ? dotLabels[f.id] || '' : '', n ? featureBadgeLabel(f, n) : '');
     });
     // the bar is a grid-flow-col grid (UiKit.cls.navInner): one equal column per visible entry, nothing to count
     setVisible($('headerNav'), header > 0);   // a class, not the hidden attribute: .flex would override [hidden]
@@ -5234,7 +5584,12 @@
   }
 
   /** A count badge (n > 0), or a dot (dot = its spoken label) when there is no count; nothing otherwise. */
-  function renderNavBadge(btn, n, place, dot) {
+  /** R3 FIX-CL L-13: def.badgeLabel(n) → the badge's spoken name (e.g. "ข้อความที่ยังไม่อ่าน 4 ข้อความ"); '' = "N รายการ". */
+  function featureBadgeLabel(f, n) {
+    if (typeof f.def.badgeLabel !== 'function' || f.error) return '';
+    try { const v = f.def.badgeLabel(n); return typeof v === 'string' ? v.trim() : ''; } catch (e) { featureFailed(f, 'badgeLabel', e); return ''; }
+  }
+  function renderNavBadge(btn, n, place, dot, label) {
     let el = btn.querySelector('[data-nav-badge]');
     if (!n && !dot) { if (el) el.remove(); return; }
     const kind = n ? 'count' : 'dot';
@@ -5255,6 +5610,8 @@
       }
     }
     setHtml(el, n ? Kit.badge(n) : `<span class="${Kit.cls.navDot}" role="status" aria-label="${esc(dot)}"></span>`);
+    const inner = n && label ? el.firstElementChild : null;
+    if (inner && inner.getAttribute('aria-label') !== label) inner.setAttribute('aria-label', label);
   }
 
   /**
@@ -5287,15 +5644,29 @@
     renderChrome();
     renderBanners();
     renderCurrentFeature();
+    // R3 FIX-CL2 Q-2: วันนี้ (legacy) is drawn again on arrival — a domain change made while another screen was shown (e.g.
+    // the problem domain behind the "ปัญหาค้าง N" pill, changed on แจ้งปัญหา) never reached its cards
+    if (ui.tab === 'station' && state.user) renderStationTab();
     try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (e) { /* ignore */ }
     return ui.tab === id;
   }
 
-  /** To the current screen's parent (default station). → Promise<boolean>; false on station. */
+  /**
+   * To the current screen's parent (default station). → Promise<boolean>; false on station.
+   * R3 F-3: the current screen's def.back(c) runs first (the header ←, Android/browser back and core.back() all come here);
+   * when it returns true the screen handled the back itself (e.g. the team person view returns to its list) and nothing
+   * else happens.
+   */
   function back() {
     const f = featById[ui.tab];
+    if (screenBack(f)) return Promise.resolve(true);
     const parent = f && f.parent && featById[f.parent] ? f.parent : 'station';
     return parent === ui.tab ? Promise.resolve(false) : go(parent);
+  }
+  /** R3 F-3: def.back(c) of a registered screen → true only when it returned exactly true (a throw marks it broken). */
+  function screenBack(f) {
+    if (!f || f.legacy || f.error || typeof f.def.back !== 'function') return false;
+    try { return f.def.back(core) === true; } catch (e) { featureFailed(f, 'back', e); return false; }
   }
 
   /* ---------- events and services ---------- */
@@ -5380,9 +5751,9 @@
         return `<div class="${Kit.cls.banner} ${tone}${act ? ' sm:items-center' : ''}" data-banner="${esc(b.id)}" role="status">` +
           `${icon}<div class="flex-1 min-w-0 whitespace-pre-line">${esc(d.text)}</div>${act}</div>`;
       }
-      // R1b: with a ✕ the row wraps on a phone — the text keeps at least 9.5rem; the action and the ✕ stay together at the right
-      const x = `<button type="button" class="${Kit.cls.iconBtn} -mr-2" data-banner-dismiss="${esc(b.id)}" aria-label="${esc(d.dismissLabel)}" ` +
-        `title="${esc(d.dismissLabel)}">${Kit.icon('x', 'w-5 h-5')}</button>`;
+      // R1b: with a dismiss the row wraps on a phone — the text keeps at least 9.5rem; the action and the dismiss stay together
+      // at the right. R3 FIX-CL L-8: the dismiss is the text button "ซ่อน" (no cross glyph); dismissLabel stays its spoken name
+      const x = `<button type="button" class="${Kit.cls.btn} ${Kit.cls.btnGhost} ${Kit.cls.btnCompact} -mr-1.5" data-banner-dismiss="${esc(b.id)}" aria-label="${esc(d.dismissLabel)}">ซ่อน</button>`;
       return `<div class="${Kit.cls.banner} ${tone} flex-wrap" data-banner="${esc(b.id)}" role="status">` +
         `${icon}<div class="flex-1 min-w-0 basis-[9.5rem] whitespace-pre-line">${esc(d.text)}</div>` +
         `<div class="flex items-center gap-2 ml-auto shrink-0">${act}${x}</div></div>`;
@@ -5559,7 +5930,7 @@
         d.error = null;
         persistDomain(d);
         emit('data', { domain: d.name });
-        renderForDomain();
+        renderForDomain(d.name);
         return true;
       },
       touch(fn) {
@@ -5569,7 +5940,7 @@
           if (r !== undefined) d.data = r;
         }
         persistDomain(d);
-        renderForDomain();
+        renderForDomain(d.name);
       },
       load(fetchFn) {
         if (d.loadingP) return d.loadingP;
@@ -5616,11 +5987,13 @@
    * and their badges, banners and the current registered screen. The four legacy screens never read a domain, and pictures
    * reach every avatar through UiKit.avatars.refresh, so no full render() (no replaced pickers, no lost focus or scroll).
    */
-  function renderForDomain() {
+  function renderForDomain(name) {
     if (!coreStarted) return;
     renderNav();
     renderBanners();
     renderCurrentFeature();
+    // R3 FIX-CL L-1: the station cards' "ปัญหาค้าง N" follows the problem domain while วันนี้ (a legacy screen) is shown
+    if (name === 'problem' && ui.tab === 'station' && state.user) renderStationTab();
   }
 
   function persistDomain(d) {
@@ -5924,20 +6297,23 @@
 
   /**
    * "มีอะไรใหม่" — edit this one structure for every release. Shown from เมนู at any time, and once per version after
-   * an update (never on a first-ever login on a device) unless APP_CONFIG.WHATS_NEW === false.
+   * an update (never on a first-ever login on a device) unless APP_CONFIG.WHATS_NEW === false. An item with `sup: true`
+   * is listed only for the Supervisor (R3 FIX-CL L-8: staff cannot open Dashboard ทีม).
    */
-  // R2-SPEC §4.7 + decisions 26–28 (final wording, I2)
+  // R3-SPEC §4.8 (WHATS_NEW 3.2.0, I2)
   const WHATS_NEW = Object.freeze({
-    version: '3.1.0',
+    version: '3.2.0',
     title: 'มีอะไรใหม่',
-    subtitle: 'เวอร์ชัน 3.1 — ระบบจัดเวร',
+    subtitle: 'เวอร์ชัน 3.2 — Dashboard · แจ้งปัญหา · แชท',
     items: Object.freeze([
-      { icon: 'table', title: 'ตารางเวร', text: 'แถบล่างมีปุ่มใหม่: ดูสาย Portable เวรกลางวัน ER/IPD และภารกิจพิเศษทั้งเดือน พร้อมเบอร์โทร (แตะเบอร์เพื่อโทร)' },
-      { icon: 'calendar-check', title: 'ของฉันวันนี้', text: 'บอกสาย Portable เวรกลางวัน และภารกิจพิเศษของคุณในวันนั้นด้วย' },
-      { icon: 'phone', title: 'เบอร์โทรของฉัน', text: 'ใส่เบอร์ของตัวเองได้ที่ เมนู → แตะชื่อของคุณ (โปรไฟล์) — ทุกคนในทีมเห็นเบอร์นี้ในตารางภารกิจพิเศษ' },
-      { icon: 'users', title: 'ทีมแทนเวรวันนี้', text: 'หน้าวันนี้บอกว่าใครมาช่วยหน่วยเรา — Supervisor วางข้อความจาก LINE ระบบอ่านชื่อให้ตรวจก่อนบันทึก' },
-      { icon: 'wand', title: 'ข้อเสนอจัดคนรายวัน (Supervisor)', text: 'วันที่ยังไม่ได้จัด ระบบเสนอคนลง Station พร้อมเหตุผล ตรวจแก้แล้วกดบันทึก' },
-      { icon: 'sliders', title: 'ตั้งค่าการจัดเวร (Supervisor)', text: 'เมนู → งานหัวหน้า: Station ที่แต่ละคนอยู่ได้ (เลือก Station เดียว = ประจำ) ผู้ช่วย วันหยุด ภารกิจพิเศษและเบอร์ ชื่อเรียกอื่น ลำดับการเติมคน และคนที่ห้ามอยู่ Station เดียวกัน' }
+      { icon: 'bar-chart', title: 'Dashboard ของฉัน', text: 'เมนู → ของฉัน: พักร้อนคงเหลือ คะแนนใบประกอบ สถิติการลาและการอยู่ Station จำนวนเวร และเวร 7 วันข้างหน้า' },
+      { icon: 'alert-triangle', title: 'แจ้งปัญหา', text: 'แจ้งปัญหาของแต่ละ Station พร้อมรูปไม่เกิน 3 รูป ติดตามสถานะ ยังไม่แก้/แก้แล้ว และส่งออก Excel' },
+      { icon: 'message', title: 'แชทส่วนตัว', text: 'ไอคอนแชทที่หัวแอป คุยกันแบบ 1 ต่อ 1 — ข้อความเก็บใน Google Sheet ของหน่วย ห้ามส่งข้อมูลผู้ป่วย' },
+      { icon: 'users', title: 'Dashboard ทีม (Supervisor)', sup: true, text: 'ตารางทุกคน การลารายเดือน ความเท่าเทียมของเวร วันที่คนไม่ครบ ปัญหาค้าง และ Excel' },
+      { icon: 'table', title: 'ตารางเวรเป็นไฟล์ Excel', text: 'ปุ่ม Excel ในตารางเวรได้ไฟล์ .xlsx แล้ว' },
+      // R3 track F (owner requests F-1, F-2)
+      { icon: 'calendar', title: 'วันหยุดในปฏิทินการลา', text: 'วันหยุดที่ Supervisor ลงไว้ขึ้นในปฏิทินหน้า การลา แล้ว' },
+      { icon: 'sort', title: 'จัดลำดับคนใน Station', sup: true, text: 'Supervisor กด จัดลำดับ บนการ์ด Station เพื่อเลื่อนลำดับคนขึ้นลง แล้วกด บันทึก' }
     ])
   });
   const WHATS_NEW_SEEN = 'whatsNewSeen';   // core.store.prefs key: the version whose notes were shown on this device
@@ -5946,10 +6322,10 @@
     $('whatsNewTitle').textContent = WHATS_NEW.title;
     $('whatsNewVersion').textContent = WHATS_NEW.subtitle;
     const tones = [Kit.cls.listIconBrand, Kit.cls.listIconInfo, Kit.cls.listIconLilac, Kit.cls.listIconSun];
-    setHtml($('whatsNewList'), WHATS_NEW.items.map((it, i) =>
+    setHtml($('whatsNewList'), WHATS_NEW.items.filter(it => !it.sup || isSup()).map((it, i) =>
       `<li class="flex items-start gap-3"><span class="${Kit.cls.listIcon} ${tones[i % tones.length] || ''}">${Kit.icon(it.icon, 'w-5 h-5')}</span>` +
       `<div class="min-w-0 flex-1"><p class="font-display text-[0.9375rem] font-medium leading-6 text-ink-900">${esc(it.title)}</p>` +
-      `<p class="text-sm leading-6 text-slate-600">${esc(it.text)}</p></div></li>`).join(''));
+      `<p class="text-sm leading-6 text-slate-600">${esc(it.text).split('Google Sheet ของหน่วย').join('<span class="whitespace-nowrap">Google Sheet ของหน่วย</span>').split('ข้อมูลผู้ป่วย').join('<span class="whitespace-nowrap">ข้อมูลผู้ป่วย</span>')}</p></div></li>`).join(''));
     showModal('whatsNewModal');
   }
 
@@ -6047,7 +6423,9 @@
     // R2 (I2): the station-counts sheet (Supervisor; the same routine as วันนี้'s button) and a heartbeat now (the window of
     // the selected date is read again: versions → domains such as 'plan' refetch) → Promise<bool>, never rejects
     // R2 FIX I-8: the one wording of the 3.0-server notice (เมนู's note; the settings empty state uses the same text)
-    messages: Object.freeze({ serverV31: MSG.serverV31 }),
+    // R3: serverV32 — the 3.1-server notice (features with 'plan' but without 'chat'); both name Code.gs 3.2
+    messages: Object.freeze({ serverV31: MSG.serverV31, serverV32: MSG.serverV32 }),
+    setScreenTitle,
     openStationCounts: () => openStationCountsModal(),
     refresh: () => refresh({ silent: true }),
     // R2: setPlanSettings' answer ({planPriority, planSlotOrder}) → state.rules (and the offline copy); → changed?
@@ -6115,7 +6493,7 @@
     on('menuDiagBtn', 'click', openDiag);
     on('menuWhatsNewBtn', 'click', openWhatsNew);
     on('whatsNewOkBtn', 'click', () => hideModal('whatsNewModal'));
-    // the ✕ of a sheet's title row: dismisses the top sheet exactly like Escape (its own close routine)
+    // the close button (chevron-down) of a sheet's title row: dismisses the top sheet exactly like Escape (its own close routine)
     document.addEventListener('click', e => {
       if (e.target && e.target.closest && e.target.closest('[data-sheet-close]')) Kit.sheet.closeTop();
     });
@@ -6145,6 +6523,7 @@
 
     // station tab
     on('stationsContainer', 'change', onStationChange);
+    on('stationsContainer', 'click', onStationClick);   // R3: the station card's "แจ้งปัญหา" button
     on('dailyRemark', 'input', onRemarkInput);
     on('dailyRemark', 'change', onRemarkInput);
     on('stationSaveBtn', 'click', () => spawn(onSaveStation, WRITE));

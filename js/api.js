@@ -7,7 +7,12 @@
  *      opts.timeoutMs        per attempt (default: reads 40 s, writes 45 s)
  *      opts.attempts         at most this many attempts (default: reads 2, writes 3)
  *      opts.onRetry(n)       called before attempt n (2, 3) when a transient failure is retried
+ *      opts.requestId        R3 (I2): the caller's own requestId ([A-Za-z0-9_-]{16,64}, e.g. from Api.newId()) — keep
+ *                            it to send the SAME write again later (a new call after the first one failed): the server
+ *                            replays a write by requestId (Code.gs REPLAY_SECONDS_ = 600 s), so it runs once. Anything
+ *                            else (missing, too short, other characters) → a fresh id, as without the option
  *  Api.isTransient(err)      NETWORK, BAD_RESPONSE, GOOGLE_ERROR or BUSY — worth trying again later
+ *  Api.newId()               R3: a fresh 22-character [A-Za-z0-9_-] id (CSPRNG) — a photo's fileId, a chat message's cid
  *  Api.onAuthError = fn      invoked (before the throw) on a session error — AUTH_REQUIRED or
  *                            PASSWORD_CHANGE_REQUIRED — of a request sent with the CURRENT token
  *  Api.onStatus(fn)          connectivity: {type:'success'} the server answered (also with a refusal such as
@@ -22,19 +27,21 @@
  * up at call time so tests can replace it.
  *
  * Every call has one requestId that all its attempts share: the server runs a write once per requestId, so
- * retrying a write whose answer was lost is safe. Google sometimes answers a POST with the GET /exec page
+ * retrying a write whose answer was lost is safe (R3: a caller may pass its own requestId to extend this to a later
+ * call that sends the same write again — opts.requestId). Google sometimes answers a POST with the GET /exec page
  * (the ping envelope) or with an HTML error page; both are recognised and retried, never taken as the answer.
  * ===================================================================== */
 (function (global) {
   'use strict';
 
-  const CLIENT_VERSION = '3.1.2';
+  const CLIENT_VERSION = '3.2.0';
   const MSG_NETWORK = 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ กรุณาตรวจสอบอินเทอร์เน็ต';
   const MSG_BAD_DEPLOYMENT = 'การตั้งค่า Web App ไม่ถูกต้อง (ต้องตั้งค่า Who has access เป็น Anyone)';
   const MSG_BAD_RESPONSE = 'เซิร์ฟเวอร์ตอบกลับผิดพลาดชั่วคราว';
   const MSG_GOOGLE_ERROR = 'เซิร์ฟเวอร์ Google ขัดข้องชั่วคราว';
   const MSG_NOT_CONFIGURED = 'ยังไม่ได้ตั้งค่า URL ของ Web App';
-  const READ_ACTIONS = ['ping', 'listUsers', 'me', 'getData', 'getAudit', 'getMyPassword', 'getAvatars', 'getPlan'];
+  const READ_ACTIONS = ['ping', 'listUsers', 'me', 'getData', 'getAudit', 'getMyPassword', 'getAvatars', 'getPlan',
+    'getProblems', 'getFile', 'getChat'];   // R3 reads (R3-SPEC §4.1)
   const SESSION_ERRORS = ['AUTH_REQUIRED', 'PASSWORD_CHANGE_REQUIRED'];
   const TRANSIENT = ['NETWORK', 'BAD_RESPONSE', 'GOOGLE_ERROR', 'BUSY'];
   const READ_POLICY = { timeoutMs: 40000, waits: [1500] };           // 2 attempts
@@ -43,6 +50,7 @@
   const SIGN_IN_PAGE = /accounts\.google\.com|ServiceLogin|<title>[^<]*(?:Google Accounts|Sign in)/i;
   const ID_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
   const ID_LENGTH = 22;
+  const CALLER_ID = /^[A-Za-z0-9_-]{16,64}$/;   // opts.requestId (the server accepts 8–64; ours are ≥ 16)
 
   class ApiError extends Error {
     constructor(code, message, details) {
@@ -75,6 +83,9 @@
     /** Subscribe to connectivity events (see the header). Returns an unsubscribe function. */
     onStatus(fn) { return subscribe_(statusListeners, fn); },
     isTransient(err) { return !!err && TRANSIENT.indexOf(err.code) >= 0; },
+    /** R3: a new 22-character id of [A-Za-z0-9_-] from the browser's CSPRNG (the requestId generator) — for a photo's
+     *  fileId and a chat message's cid, which the server uses to make a retried write idempotent. */
+    newId() { return newRequestId_(); },
 
     /**
      * Call a server action; transient failures are retried (reads: 2 attempts, 1.5 s apart; writes: 3 attempts,
@@ -86,7 +97,7 @@
       const waits = policy.waits.slice(0, Math.max(0, (opts.attempts || Infinity) - 1));
       const timeoutMs = opts.timeoutMs || policy.timeoutMs;
       const token = Api.token;
-      const requestId = newRequestId_();
+      const requestId = typeof opts.requestId === 'string' && CALLER_ID.test(opts.requestId) ? opts.requestId : newRequestId_();
       bump_(1);
       try {
         for (let attempt = 1; ; attempt++) {
