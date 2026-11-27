@@ -1,8 +1,8 @@
 /* =====================================================================
- * sw.js — service worker for "เวร IPD" (SPEC §7, R2 §3.5, R1a fix A-F1)
+ * sw.js — service worker for "เวร IPD" (SPEC §7, R2 §3.5, R1a fix A-F1; R5 3.4: + training-engine.js, feat-training.js)
  *
  *  - Releases are atomic. The stylesheet and every local script of index.html carry the release in their URL
- *    (css/tailwind.css?v=3.3.0, js/app.js?v=3.3.0 …) and APP_SHELL lists exactly those URLs. As a safety net the
+ *    (css/tailwind.css?v=3.4.0, js/app.js?v=3.4.0 …) and APP_SHELL lists exactly those URLs. As a safety net the
  *    inline boot guard of index.html also recognises a stylesheet left from v2.2 and reloads once the new one answers.
  *    A release reaches a device only through a new sw.js: its install precaches the whole shell in one `addAll` (all
  *    files or nothing), it takes over at once (skipWaiting + clients.claim) and the page shows "มีเวอร์ชันใหม่ — แตะเพื่อ
@@ -25,8 +25,8 @@
  *    origin (all GitHub Pages sites of an account), so only this app's own "ipd-" caches (plus the v1 app's cache,
  *    by exact name) are ever deleted.
  * ===================================================================== */
-const VERSION = 'ipd-shift-v3.3.0';
-const RELEASE = VERSION.slice('ipd-shift-v'.length);   // '3.3.0'
+const VERSION = 'ipd-shift-v3.4.0';
+const RELEASE = VERSION.slice('ipd-shift-v'.length);   // '3.4.0'
 const V = '?v=' + RELEASE;                               // query of every versioned shell URL
 const SHELL = VERSION + '-shell';
 const RUNTIME = 'ipd-runtime-v4';      // v4: html2canvas is cached in CORS mode (v3 held an opaque copy)
@@ -44,6 +44,7 @@ const APP_SHELL = [
   './js/ui-kit.js' + V,
   './js/xlsx-lite.js' + V,         // R3: the .xlsx writer (window.XlsxLite)
   './js/plan-engine.js' + V,       // R2: the scheduling engine (window.PlanEngine, pure functions)
+  './js/training-engine.js' + V,   // R5: the training schedules (window.TrainingEngine, pure functions)
   './js/app.js' + V,
   './js/plan-data.js' + V,         // R2: the plan domain (getPlan, the only owner of plan data)
   './js/feat-profile.js' + V,      // R1b feature files (loaded after app.js, registered through App.register)
@@ -54,6 +55,7 @@ const APP_SHELL = [
   './js/feat-dashboard.js' + V,    // R3 feature files
   './js/feat-problems.js' + V,
   './js/feat-chat.js' + V,
+  './js/feat-training.js' + V,     // R5: ตารางฝึกงาน (trainees / students)
   './manifest.json',
   './icons/icon-192.png',          // the logo the UI shows (login, rail, เมนู, what's new)
   './icons/apple-touch-icon-180.png',

@@ -67,6 +67,16 @@
  *   R4 (3.3): a Duty's LunchSlot is {tech, assistant, base, tech2, place, place2} (strings, '' default; place2 '' without
  *                    tech2). saveDuties passes the caller's six keys through (a 3.2 server ignores the extra ones); the UI
  *                    that edits tech2 / places is gated by core.serverHas('lunch2') in feat-roster.
+ *   R5 (3.4, R5-SPEC §1 / §3.2): the domain also stores `training` — getPlan's [Person] (trainees and students whose
+ *                    [start, end] overlaps the asked range ± 200 days), normalised, frozen, in the server's order; an older
+ *                    offline copy without it reads as []. Everything below answers empty while core.serverHas('training')
+ *                    is false (a 3.3 server, or a rollback). `code` reaches the Supervisor only (others get ''); a role
+ *                    change away from the Supervisor drops the codes held at once.
+ *   training() → [Person] (frozen) · trainingOn(date) → {[place]: [Person]} — TRAINEES only (students never: R5-SPEC §0),
+ *                    TrainingEngine.placeOn (extras override blocks); {} without window.TrainingEngine
+ *   saveTraining(p) {items: [Person without id | with id + baseVersion]} → {people} (each answered person replaces /
+ *                    adds its row; CONFLICT {people}: the server's current rows are applied, an asked id the server no
+ *                    longer has is removed, then it rethrows) · deleteTraining(p) {ids} → {deleted} (rows removed)
  *   lockedStation(name) → stationId | null — R2-SPEC §0.26(a): the station of an active person whose skills list holds
  *                    exactly ONE station id ("ประจำ <Station>"; the proposal never places them elsewhere — engine canWork);
  *                    null for not set, several or no stations, inactive or unknown names
@@ -95,7 +105,10 @@
   const STATS_RANGE_MSG = 'ช่วงวันที่ต้องไม่เกิน 400 วัน';
   const EMPTY = Object.freeze({ range: null, rosters: Object.freeze({}), duties: Object.freeze({}), holidays: Object.freeze({}),
     holidayYears: Object.freeze([]), assistants: Object.freeze([]), profiles: Object.freeze({}), backup: Object.freeze({}),
-    avoidPairs: Object.freeze([]) });
+    avoidPairs: Object.freeze([]), training: Object.freeze([]) });
+  /** R5-SPEC §1: the places of a training block / extra. */
+  const TRAINING_PLACES = Object.freeze(['ipd', 'er', 'portable', 'opd', 'us', 'or', 'cancer', 'other']);
+  const NO_TRAINING_MSG = 'ต้องอัปเดต Code.gs เป็นเวอร์ชัน 3.4 ก่อน';
 
   let dom = null;           // core.domain('plan')
   let want = null;          // {from, to}: the wanted range
@@ -247,6 +260,36 @@
       postedAt: str(b.postedAt)
     };
   }
+  /** R5-SPEC §1: a training range {from, to, place[, label]} or null. */
+  function normRange(b, withLabel) {
+    if (!b || typeof b !== 'object' || !U.isValidYmd(b.from) || !U.isValidYmd(b.to) || b.from > b.to || TRAINING_PLACES.indexOf(b.place) < 0) return null;
+    const out = { from: b.from, to: b.to, place: b.place };
+    if (withLabel) out.label = str(b.label).trim();
+    return out;
+  }
+  function normTraining(p) {
+    if (!p || typeof p !== 'object' || typeof p.id !== 'string' || !p.id || !name(p.name)) return null;
+    if (!U.isValidYmd(p.start) || !U.isValidYmd(p.end)) return null;
+    const ranges = (list, lab) => (Array.isArray(list) ? list : []).map(b => normRange(b, lab)).filter(Boolean)
+      .sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0));
+    return {
+      id: p.id,
+      kind: p.kind === 'student' ? 'student' : 'trainee',
+      name: name(p.name),
+      nickname: name(p.nickname),
+      code: name(p.code),
+      org: name(p.org),
+      cohort: name(p.cohort),
+      start: p.start, end: p.end,
+      blocks: ranges(p.blocks, false),
+      extras: ranges(p.extras, true),
+      note: str(p.note),
+      version: int(p.version),
+      updatedBy: str(p.updatedBy),
+      updatedAt: str(p.updatedAt)
+    };
+  }
+  function trainingList(list) { return (Array.isArray(list) ? list : []).map(normTraining).filter(Boolean); }
   function yearsOf(r) {
     if (!r) return [];
     const out = [];
@@ -258,7 +301,7 @@
   function buildData(res, range, pairsSup) {
     const r = res.range && U.isValidYmd(res.range.from) && U.isValidYmd(res.range.to) ? { from: res.range.from, to: res.range.to } : { from: range.from, to: range.to };
     const out = { range: r, rosters: {}, duties: {}, holidays: {}, holidayYears: yearsOf(r), assistants: [], profiles: {}, backup: {},
-      avoidPairs: normPairs(res.avoidPairs), pairsSup: pairsSup === true };
+      avoidPairs: normPairs(res.avoidPairs), pairsSup: pairsSup === true, training: trainingList(res.training) };
     (Array.isArray(res.rosters) ? res.rosters : []).forEach(x => { const v = normRoster(x); if (v) out.rosters[v.month] = v; });
     (Array.isArray(res.duties) ? res.duties : []).forEach(x => { const v = normDuty(x); if (v) out.duties[v.date] = v; });
     (Array.isArray(res.holidays) ? res.holidays : []).forEach(h => { if (h && U.isValidYmd(h.date)) out.holidays[h.date] = str(h.name); });
@@ -285,7 +328,8 @@
       holidayYears: x.holidayYears.slice(), assistants: x.assistants.slice(), profiles: Object.assign({}, x.profiles),
       backup: Object.assign({}, x.backup),
       avoidPairs: Array.isArray(x.avoidPairs) ? x.avoidPairs.slice() : [],
-      pairsSup: x.pairsSup === true
+      pairsSup: x.pairsSup === true,
+      training: Array.isArray(x.training) ? x.training.slice() : []
     };
   }
   function valid(d) {
@@ -293,7 +337,7 @@
       ['rosters', 'duties', 'holidays', 'profiles', 'backup'].every(k => d[k] && typeof d[k] === 'object' && !Array.isArray(d[k])) &&
       Array.isArray(d.assistants) && Array.isArray(d.holidayYears);
   }
-  function emptyFor(range, pairsSup) { return deepFreeze({ range: range ? { from: range.from, to: range.to } : null, rosters: {}, duties: {}, holidays: {}, holidayYears: yearsOf(range), assistants: [], profiles: {}, backup: {}, avoidPairs: [], pairsSup: pairsSup === true }); }
+  function emptyFor(range, pairsSup) { return deepFreeze({ range: range ? { from: range.from, to: range.to } : null, rosters: {}, duties: {}, holidays: {}, holidayYears: yearsOf(range), assistants: [], profiles: {}, backup: {}, avoidPairs: [], pairsSup: pairsSup === true, training: [] }); }
   /** R2-SPEC §0.27: [[a, b]] → distinct pairs of two different names, names sorted inside a pair, pairs sorted. */
   function normPairs(list) {
     const seen = {}, out = [];
@@ -342,7 +386,7 @@
       return;
     }
     const isEmpty = !Object.keys(d.rosters).length && !Object.keys(d.duties).length && !Object.keys(d.holidays).length &&
-      !d.assistants.length && !Object.keys(d.profiles).length && !Object.keys(d.backup).length;
+      !d.assistants.length && !Object.keys(d.profiles).length && !Object.keys(d.backup).length && !(d.training || []).length;
     confirmed = true;
     needFull = false;   // versions.plan '' (heard this session): no plan rows and no pairs at all — nothing to fetch
     const sup = C.isSup();
@@ -479,6 +523,10 @@
       }
       return;
     }
+    // R5: a server without 'training' (3.3, e.g. rolled back): the trainee / student rows held are not kept either
+    if (!C.serverHas('training') && valid(dom.data) && Array.isArray(dom.data.training) && dom.data.training.length) {
+      dom.commit(dom.begin(), dom.version, d => deepFreeze(sortKeys(Object.assign(editable(d), { training: [] }))));
+    }
     if (!want) want = windowOf(C.selectedDate());
     if (!dom.remote) { commitEmpty(); return; }
     ownWrite = false;   // the server announced a plan version (an own write's included)
@@ -592,6 +640,33 @@
     }
     return res;
   }
+  /* R5-SPEC §3.2: training writes (Supervisor; the server checks) — gated on the server's 'training' feature */
+  function putTraining(d, p) {
+    const v = normTraining(p);
+    if (!v) return;
+    const i = d.training.findIndex(x => x.id === v.id);
+    if (i >= 0) d.training[i] = v; else d.training.push(v);
+  }
+  function saveTraining(p) {
+    if (!C.serverHas('training')) return Promise.reject(apiError('UNKNOWN_ACTION', NO_TRAINING_MSG));
+    return write('saveTraining', p, (d, res) => {
+      (Array.isArray(res.people) ? res.people : []).forEach(x => putTraining(d, x));
+    }, (d, det) => {
+      const current = Array.isArray(det.people) ? det.people : [];
+      current.forEach(x => putTraining(d, x));
+      const asked = (p && Array.isArray(p.items) ? p.items : []).map(x => x && x.id).filter(Boolean);
+      // an asked id the server no longer has was deleted on another device
+      d.training = d.training.filter(x => asked.indexOf(x.id) < 0 || current.some(c => c && c.id === x.id));
+    });
+  }
+  function deleteTraining(p) {
+    if (!C.serverHas('training')) return Promise.reject(apiError('UNKNOWN_ACTION', NO_TRAINING_MSG));
+    return write('deleteTraining', p, (d, res) => {
+      const gone = Array.isArray(res.deleted) ? res.deleted : (p && Array.isArray(p.ids) ? p.ids : []);
+      d.training = d.training.filter(x => gone.indexOf(x.id) < 0);
+    });
+  }
+
   /** saveDay's answer `duty` (core) or a CONFLICT's current duty: stored at once, no version adopted. */
   function adoptDuty(duty) {
     if (!normDuty(duty)) return false;
@@ -635,6 +710,24 @@
   }
   function avoidPartnersOf(n) {
     return avoidPairs().filter(p => p[0] === n || p[1] === n).map(p => (p[0] === n ? p[1] : p[0]));
+  }
+  /** R5: the stored trainees and students (frozen); [] without the server's 'training' feature. */
+  function training() {
+    if (!C.serverHas('training')) return Object.freeze([]);
+    const d = data();
+    return Array.isArray(d.training) ? d.training : Object.freeze([]);
+  }
+  /** R5: {[place]: [trainee]} of a date — trainees only (students never appear on วันนี้). */
+  function trainingOn(date) {
+    const out = {};
+    const TE = window.TrainingEngine;
+    if (!TE || !U.isValidYmd(date)) return out;
+    training().forEach(p => {
+      if (p.kind !== 'trainee') return;
+      const pl = TE.placeOn(p, date);
+      if (pl) (out[pl] || (out[pl] = [])).push(p);
+    });
+    return out;
   }
   function settings() {
     const r = C.state.rules || {};
@@ -764,7 +857,8 @@
     roster, duty, duties, holidays, assistants, profiles, profile, backup, settings,
     saveRoster, saveDuties, setHolidays, saveAssistants, setProfiles, saveBackupMsg, setPlanSettings, adoptDuty,
     engineStaff, rosterFor, assistantsFor, skillsMap, aliasesMap, eligible, leaves, linesFor, proposalInput, lockedStation,
-    avoidPairs, avoidPartnersOf
+    avoidPairs, avoidPartnersOf,
+    training, trainingOn, saveTraining, deleteTraining
   });
 
   App.register({
@@ -785,6 +879,9 @@
         const me = c.myName();
         const others = !(p && p.isSup) && valid(dom.data) &&
           Object.keys(dom.data.profiles).some(n => n !== me && hasPersonal(dom.data.profiles[n]));
+        // R5-SPEC §2.3: the trainee / student codes are the Supervisor's only
+        const codes = !(p && p.isSup) && valid(dom.data) && Array.isArray(dom.data.training) && dom.data.training.some(x => x && x.code);
+        if (codes) dom.touch(d => deepFreeze(sortKeys(Object.assign(editable(d), { training: (d.training || []).map(x => Object.assign({}, x, { code: '' })) }))));
         if (others || (valid(dom.data) && (dom.data.pairsSup === true || (Array.isArray(dom.data.avoidPairs) && dom.data.avoidPairs.length)))) {
           // the pairs held were read under the other role: a former Supervisor drops them, a new one must not trust them;
           // R3: a former Supervisor also drops everyone else's personal fields at once (R3-SPEC §3.1 visibility)

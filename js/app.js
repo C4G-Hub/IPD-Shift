@@ -31,7 +31,7 @@
    *    ipd_boot_retry with the inline guard: after 2 only the "โหลดใหม่" button remains. init() clears the counter.
    * APP_BUILD = sw.js VERSION = the ?v= of index.html's scripts = js/api.js CLIENT_VERSION (tests/sw.test.js).
    */
-  const APP_BUILD = '3.3.0';
+  const APP_BUILD = '3.4.0';
   const BOOT_RETRY_KEY = 'ipd_boot_retry';
   // R1b: also a page of another release (its inline guard names its own build, e.g. a v2.9 index.html served from the HTTP cache
   // whose ?v=2.9.0 URLs now answer with these files): its markup is not this release's — the guard of that page takes over
@@ -2295,6 +2295,7 @@
         act: activeSet(), me: myName(), planned: isPlannedDay(date), pairs: isSup() ? avoidPairsNow() : [], proposal: proposalActive(date),
         problem: problemCardInfo(), date };
       const slots = viewSlots(date);
+      card.training = trainingLinesNow(date, slots);   // R5: a trainee already placed in a station's slots is not repeated there
       setHtml(container, U.STATIONS.map(st => stationCardHtml(st, slots, card)).join(''));
     }
     renderMyDay();
@@ -2342,7 +2343,7 @@
    * or a pending request is shown as a tag but never blocks), act (active names), me}.
    */
   function stationCardHtml(st, slots, card) {
-    const { sup, locked, onLeave, rows, act, me, planned, pairs, proposal, problem, date } = card;
+    const { sup, locked, onLeave, rows, act, me, planned, pairs, proposal, problem, date, training } = card;
     const soft = n => {   // a non-blocking leave of n: {text (option / tag), tone 'partial'|'pending'} or null
       const info = rows && rows[n] ? U.leaveInfo(rows[n]) : null;
       if (!info || info.blocking) return null;
@@ -2433,8 +2434,12 @@
           : `<span class="${k.personEmpty}">ยังไม่ได้จัดสรร</span>`) +
         '</div>';
     }
+    // R5-SPEC §3.4: the trainees training here today (never students): one muted line — not a slot, never counted or saved
+    const trainees = training && Array.isArray(training[st.id]) && training[st.id].length
+      ? `<p class="mt-2 text-xs font-medium leading-5 text-slate-500 break-words" data-training-line="${st.id}">ฝึกงาน: ${training[st.id].map(esc).join(', ')}</p>`
+      : '';
     return `<div class="station-card ${k.stationCard}" data-station-card="${st.id}">` +
-      `<span class="${k.stationEdge}" style="background:${st.border}" aria-hidden="true"></span>${head}${body}${foot}</div>`;
+      `<span class="${k.stationEdge}" style="background:${st.border}" aria-hidden="true"></span>${head}${body}${trainees}${foot}</div>`;
   }
 
   /**
@@ -2578,6 +2583,17 @@
     if (!plan || typeof plan.avoidPairs !== 'function') return [];
     try { const list = plan.avoidPairs(); return Array.isArray(list) ? list : []; } catch (e) { console.error('[core] avoidPairs failed:', e); return []; }
   }
+  /**
+   * R5-SPEC §3.4: {[stationId]: [names]} of the trainees at each station on `date` — use('training.station')(date, slots)
+   * (js/feat-training.js: working days only, trainees only, without a trainee whose own staff account already sits in that
+   * station's slots — the slots as this card shows them) while the server has 'training'; {} otherwise or when it fails.
+   */
+  function trainingLinesNow(date, slots) {
+    if (!serverHas('training')) return {};
+    const fn = use('training.station');
+    if (typeof fn !== 'function') return {};
+    try { const m = fn(date, slots || {}); return m && typeof m === 'object' ? m : {}; } catch (e) { console.error('[core] training.station failed:', e); return {}; }
+  }
   /** A coral warning line per pair that sits in this station (draft, proposal or saved day) — a warning, never a block. */
   function avoidPairLines(names, pairs) {
     if (!pairs || !pairs.length || names.length < 2) return '';
@@ -2704,11 +2720,13 @@
    */
   function myPlanLines(date, name) {
     if (!serverHas('plan')) return [];
-    const fn = use('plan.myDay');
-    if (typeof fn !== 'function') return [];
-    let list;
-    try { list = fn(date, name); } catch (e) { console.error('[core] plan.myDay failed:', e); return []; }
-    if (!Array.isArray(list)) return [];
+    const call = (id, gate) => {
+      const fn = gate ? use(id) : null;
+      if (typeof fn !== 'function') return [];
+      try { const l = fn(date, name); return Array.isArray(l) ? l : []; } catch (e) { console.error('[core] ' + id + ' failed:', e); return []; }
+    };
+    // R5-SPEC §3.4: + use('training.myDay') ("ฝึกงาน <Station>" of a trainee linked to my account) while the server has 'training'
+    const list = call('plan.myDay', true).concat(call('training.myDay', serverHas('training')));
     return list.filter(l => l && typeof l === 'object' && typeof l.main === 'string' && l.main).slice(0, MY_PLAN_MAX).map(l => ({
       icon: typeof l.icon === 'string' && l.icon ? l.icon : 'calendar-check',
       tone: typeof l.tone === 'string' ? l.tone : 'brand',
@@ -5125,9 +5143,10 @@
   /* ------------------------------------------------------------------ */
   /*
    * DEVELOPER NOTE (R1a-B1, apiLevel 1) — the only surface feature files (js/feat-*.js, loaded after this file) use.
-   * Load order (R3-SPEC §4.1): config.js → utils.js → api.js → ui-kit.js → xlsx-lite.js → plan-engine.js → app.js →
-   * plan-data.js → feat-profile.js → feat-approval.js → feat-roster.js → feat-plan-settings.js → feat-backup.js →
-   * feat-dashboard.js → feat-problems.js → feat-chat.js. A feature file registers at load time (before init) or later
+   * Load order (R3-SPEC §4.1, R5): config.js → utils.js → api.js → ui-kit.js → xlsx-lite.js → plan-engine.js →
+   * training-engine.js → app.js → plan-data.js → feat-profile.js → feat-approval.js → feat-roster.js → feat-plan-settings.js →
+   * feat-backup.js → feat-dashboard.js → feat-problems.js → feat-chat.js → feat-training.js. R5: window.TrainingEngine is NOT
+   * required by the boot guard (feat-training.js checks it; without it no training screen / วันนี้ line). A feature file registers at load time (before init) or later
    * ("late registration" works the same way). window.PlanEngine (pure engine) is loaded before this file; the boot guard
    * requires it. R3: window.XlsxLite (js/xlsx-lite.js) is NOT required — a feature checks it and hides its Excel button
    * without it; Api.newId() makes the client ids of R3 writes (a photo's fileId, a chat message's cid).
@@ -5303,6 +5322,11 @@
    *     an optional leading + after removing spaces/dashes, 9–15 digits — drawn as a 44 px tel: link under the line,
    *     anything else ignored) appended to "ของฉันวันนี้" while the server has
    *     'plan'. #menuServerNote tells the Supervisor of a 3.0 / 3.1 server to update Code.gs to 3.2 (see messages above).
+   *   R5 services (Code.gs 3.4, read only while serverHas('training')): 'training.station' fn(date, slots) → {[stationId]: [names]}
+   *     (js/feat-training.js: the trainees at each station on a working day — never students, nor one already in that station's slots) drawn as one muted line
+   *     "ฝึกงาน: <names>" ([data-training-line="<id>"]) under the people of that station card — not a slot, never counted,
+   *     never part of saveDay / the proposal / the day picture; 'training.myDay' fn(date, name) → plan lines like 'plan.myDay'
+   *     ("ฝึกงาน <Station>" of a trainee linked to my account: "<first name>(Trainee)", the full name or the nickname), appended after them in "ของฉันวันนี้".
    *   R3 services: 'problems.report' fn(stationId) (js/feat-problems.js; turns the station-card button on) · 'problems'
    *     {ensure, list, openSummary} (the team dashboard reads it). saveFile(blob, filename) is unchanged; an .xlsx blob
    *     (XlsxLite.build) has the type application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.
@@ -6316,12 +6340,14 @@
    * an update (never on a first-ever login on a device) unless APP_CONFIG.WHATS_NEW === false. An item with `sup: true`
    * is listed only for the Supervisor (R3 FIX-CL L-8: staff cannot open Dashboard ทีม).
    */
-  // R4-SPEC §2.5 (WHATS_NEW 3.3.0)
+  // R5-SPEC §3.5 (WHATS_NEW 3.4.0; the two items of 3.3 stay below for phones that skip 3.3)
   const WHATS_NEW = Object.freeze({
-    version: '3.3.0',
+    version: '3.4.0',
     title: 'มีอะไรใหม่',
-    subtitle: 'เวอร์ชัน 3.3 — ตารางเวรแบบของหน่วยงาน',
+    subtitle: 'เวอร์ชัน 3.4 — ตารางฝึกงาน',
     items: Object.freeze([
+      { icon: 'school', title: 'ตารางวนเทคใหม่', text: 'เมนู → ตารางฝึกงาน: ตารางวน IPD/OPD 6 เดือนของเทคใหม่ (IPD · Portable · ER) และส่งออกเป็นรูปแบบตารางของหน่วยงาน — เทคที่ฝึกอยู่ขึ้นในการ์ด Station ของวันนี้' },
+      { icon: 'users', title: 'ตารางหมุนเวียนนักศึกษาฝึกงาน', text: 'Supervisor จัดนักศึกษาหลายมหาวิทยาลัยพร้อมกัน IPD (IPD, ER, Portable) และ OPD อย่างละครึ่ง นับเฉพาะวันทำการ — ดูได้ว่าวันไหนใครอยู่ที่ไหน' },
       { icon: 'image', title: 'ส่งออกตารางเวรเป็นรูป', text: 'ตารางเวร → ส่งออกเป็นรูป: รูปแบบตารางของหน่วยงาน 5 แบบ — ตารางรายชื่อประจำ Station, Portable, ภารกิจพิเศษ, เวรกลางวัน X-RAY IPD และ ER เป็นไฟล์ PNG' },
       { icon: 'clock', title: 'เวรกลางวันเทค 2 คน', text: 'เวรกลางวันใส่เทคคนที่ 2 และจุดประจำได้ (เช่น ER, ภูมิ 2) — ขึ้นในตาราง กลางวัน และในเวรของฉัน' }
     ])

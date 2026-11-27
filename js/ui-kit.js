@@ -26,7 +26,7 @@
  * UiKit.injectStyle()                  idempotent; inserts <style id="uikit-style"> (already done on load)
  *
  * Icons
- * UiKit.iconNames                      frozen array of the icon names (see ICONS below)
+ * UiKit.iconNames                      frozen array of the icon names (see ICONS below; R5 web 3.4 adds 'school')
  * UiKit.injectSprite()                 idempotent; inserts the hidden <svg id="uikit-sprite"> with one
  *                                      <symbol id="uk-i-NAME"> per icon as the first child of <body>
  * UiKit.icon(name, extraCls)           → '<svg class="uk-icon EXTRA" aria-hidden="true" ...><use href="#uk-i-NAME"/></svg>'
@@ -587,6 +587,7 @@
     'download': '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5M12 15V3"/>',
     'upload': '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5M12 3v12"/>',
     'sliders': '<path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>',
+    'school': '<path d="M22 10 12 5 2 10l10 5 10-5z"/><path d="M6 12v5c3 3 9 3 12 0v-5"/><path d="M22 10v6"/>',   // R5 (3.4): ตารางฝึกงาน (a graduation cap)
     'user': '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
     // actions
     'refresh': '<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>',
