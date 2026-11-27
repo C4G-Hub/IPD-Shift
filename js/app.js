@@ -31,7 +31,7 @@
    *    ipd_boot_retry with the inline guard: after 2 only the "โหลดใหม่" button remains. init() clears the counter.
    * APP_BUILD = sw.js VERSION = the ?v= of index.html's scripts = js/api.js CLIENT_VERSION (tests/sw.test.js).
    */
-  const APP_BUILD = '3.1.1';
+  const APP_BUILD = '3.1.2';
   const BOOT_RETRY_KEY = 'ipd_boot_retry';
   // R1b: also a page of another release (its inline guard names its own build, e.g. a v2.9 index.html served from the HTTP cache
   // whose ?v=2.9.0 URLs now answer with these files): its markup is not this release's — the guard of that page takes over

@@ -1553,14 +1553,47 @@
     for (let k = occ.length - 1; k >= 0; k--) if (hasAfter(occ[k])) return occ[k];
     return -1;
   }
+  /**
+   * A line without "แทน" (owner 2026-11-27: "พี่ ก. IPD" = ก. comes to help IPD): "<names> <unit>" where the line
+   * ENDS with a known unit of the unit map (1–3 words; trailing (notes), punctuation and polite particles ignored; an
+   * optional ":" "=" "→" ">" "-" between names and unit). → {namesText, unitText} or null. parseEntry accepts it only
+   * when at least one name resolves, so free text such as "ห้อง CT" or "ประชุม IPD" stays an unparsed line.
+   */
+  function implicitSplit(body, unitMap) {
+    const flat = maskParens(body).replace(/[:=→>]/g, ' ');   // same length as body: indices stay valid
+    let core = flat;
+    for (let guard = 0; guard < 4; guard++) {
+      const before = core;
+      core = core.replace(/[\s.,!?;…~]+$/, '').replace(PARTICLE_RE, '');
+      if (core === before) break;
+    }
+    const toks = [];
+    const re = /\S+/g;
+    let m;
+    while ((m = re.exec(core))) toks.push(m.index);
+    for (let len = Math.min(3, toks.length - 1); len >= 1; len--) {
+      const at = toks[toks.length - len];
+      if (!unitMap.get(unitKey(core.slice(at)))) continue;
+      const namesText = body.slice(0, at).replace(/[\s:=→>\-–—]+$/, '').trim();
+      if (namesText) return { namesText, unitText: body.slice(at).trim() };
+    }
+    return null;
+  }
   function parseEntry(body, lineNo, idx, unitMap, warnings) {
     const sep = findSeparator(body);
-    if (sep < 0) return null;
-    const namesText = body.slice(0, sep).trim();
-    const unitText = body.slice(sep + 3).trim();
-    const u = parseUnitWith(unitText, unitMap);
+    let namesText, unitText, implicit = false;
+    if (sep >= 0) {
+      namesText = body.slice(0, sep).trim();
+      unitText = body.slice(sep + 3).trim();
+    } else {
+      const im = implicitSplit(body, unitMap);
+      if (!im) return null;
+      namesText = im.namesText; unitText = im.unitText; implicit = true;
+    }
     const resolved = [];
     splitNameChunks(namesText).forEach(ch => resolveChunk(ch, idx).forEach(r => resolved.push(r)));
+    if (implicit && !resolved.some(r => r.name || r.ambiguous)) return null;
+    const u = parseUnitWith(unitText, unitMap);
     const names = [], rawNames = [];
     resolved.forEach(r => {
       rawNames.push(r.raw);

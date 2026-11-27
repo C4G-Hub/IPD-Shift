@@ -25,8 +25,8 @@
  *    origin (all GitHub Pages sites of an account), so only this app's own "ipd-" caches (plus the v1 app's cache,
  *    by exact name) are ever deleted.
  * ===================================================================== */
-const VERSION = 'ipd-shift-v3.1.1';
-const RELEASE = VERSION.slice('ipd-shift-v'.length);   // '3.1.1'
+const VERSION = 'ipd-shift-v3.1.2';
+const RELEASE = VERSION.slice('ipd-shift-v'.length);   // '3.1.2'
 const V = '?v=' + RELEASE;                               // query of every versioned shell URL
 const SHELL = VERSION + '-shell';
 const RUNTIME = 'ipd-runtime-v4';      // v4: html2canvas is cached in CORS mode (v3 held an opaque copy)
