@@ -31,7 +31,7 @@
    *    ipd_boot_retry with the inline guard: after 2 only the "โหลดใหม่" button remains. init() clears the counter.
    * APP_BUILD = sw.js VERSION = the ?v= of index.html's scripts = js/api.js CLIENT_VERSION (tests/sw.test.js).
    */
-  const APP_BUILD = '3.4.0';
+  const APP_BUILD = '3.4.1';
   const BOOT_RETRY_KEY = 'ipd_boot_retry';
   // R1b: also a page of another release (its inline guard names its own build, e.g. a v2.9 index.html served from the HTTP cache
   // whose ?v=2.9.0 URLs now answer with these files): its markup is not this release's — the guard of that page takes over
@@ -6340,12 +6340,14 @@
    * an update (never on a first-ever login on a device) unless APP_CONFIG.WHATS_NEW === false. An item with `sup: true`
    * is listed only for the Supervisor (R3 FIX-CL L-8: staff cannot open Dashboard ทีม).
    */
-  // R5-SPEC §3.5 (WHATS_NEW 3.4.0; the two items of 3.3 stay below for phones that skip 3.3)
+  // R4.1 (WHATS_NEW 3.4.1, owner request 2026-11-27): the new item first; the items of 3.4 and 3.3 stay below for phones
+  // that skip those releases
   const WHATS_NEW = Object.freeze({
-    version: '3.4.0',
+    version: '3.4.1',
     title: 'มีอะไรใหม่',
-    subtitle: 'เวอร์ชัน 3.4 — ตารางฝึกงาน',
+    subtitle: 'เวอร์ชัน 3.4.1 — รูปตารางเวรในทุกหัวข้อ',
     items: Object.freeze([
+      { icon: 'image', title: 'รูปตารางเวรในทุกหัวข้อ', text: 'ตารางเวร: แต่ละหัวข้อแสดงรูปตารางแบบของหน่วยงาน พร้อมปุ่มบันทึกรูป PNG — แตะรูปเพื่อดูขนาดเต็ม · ของฉัน มีรูป ตารางเวรของฉัน (สาย Portable เวรกลางวัน ภารกิจพิเศษ และวันลาของคุณทั้งเดือน) · ตารางแบบรายการอยู่ใต้ปุ่ม ดูแบบรายการ' },
       { icon: 'school', title: 'ตารางวนเทคใหม่', text: 'เมนู → ตารางฝึกงาน: ตารางวน IPD/OPD 6 เดือนของเทคใหม่ (IPD · Portable · ER) และส่งออกเป็นรูปแบบตารางของหน่วยงาน — เทคที่ฝึกอยู่ขึ้นในการ์ด Station ของวันนี้' },
       { icon: 'users', title: 'ตารางหมุนเวียนนักศึกษาฝึกงาน', text: 'Supervisor จัดนักศึกษาหลายมหาวิทยาลัยพร้อมกัน IPD (IPD, ER, Portable) และ OPD อย่างละครึ่ง นับเฉพาะวันทำการ — ดูได้ว่าวันไหนใครอยู่ที่ไหน' },
       { icon: 'image', title: 'ส่งออกตารางเวรเป็นรูป', text: 'ตารางเวร → ส่งออกเป็นรูป: รูปแบบตารางของหน่วยงาน 5 แบบ — ตารางรายชื่อประจำ Station, Portable, ภารกิจพิเศษ, เวรกลางวัน X-RAY IPD และ ER เป็นไฟล์ PNG' },

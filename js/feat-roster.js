@@ -1,6 +1,6 @@
 /* =====================================================================
  * js/feat-roster.js — feature "roster" (ตารางเวร), the daily proposal and the "ของฉันวันนี้" plan lines
- * (R2-SPEC §4.4, §0.11–§0.17, §0.24, §0.26; track RO; R4-SPEC §2.2–§2.3: exports in the unit's format, lunch tech2). Data: core.use('plan') (js/plan-data.js) only — never getPlan or
+ * (R2-SPEC §4.4, §0.11–§0.17, §0.24, §0.26; track RO; R4-SPEC §2.2–§2.3: exports in the unit's format, lunch tech2; R4.1 (web 3.4.1): ตารางเวรของฉัน, pictures in the segments). Data: core.use('plan') (js/plan-data.js) only — never getPlan or
  * the plan sheets directly. Engine: window.PlanEngine (pure).
  *
  *  - Screen 'roster' (bar, order 25, "ตารางเวร", icon table; visible only while core.serverHas('plan')). Header: month
@@ -47,6 +47,16 @@
  *    lunch edit sheet adds, only while core.serverHas('lunch2'), "จุด (ไม่บังคับ)" (≤ 20), "เทคคนที่ 2 (ไม่บังคับ)" (the
  *    tech's candidates, never the chosen tech) and its "จุด"; plan.myDay / ของฉัน list the tech2 person's duty with their
  *    place; the stored-duty repair replaces a tech2 on leave by someone who is not the first tech.
+ *  - R4.1 (web 3.4.1, owner request 2026-11-27): a sixth picture "ตารางเวรของฉัน" (kind 'mine': the viewer's own month —
+ *    title "ตารางเวรของ <ชื่อ> ประจำเดือน…", Mon–Fri (+ เสาร์/อาทิตย์ with a weekend mission of theirs), only the rows with an
+ *    entry: Portable "สาย N" (+ "ผช. …"), เวรกลางวัน "IPD"/"ER" (+ " (place)", tech2 too), ภารกิจพิเศษ "ภารกิจ" + the
+ *    partner, ลา (the type of a blocking or approved partial leave); ตารางเวรของฉัน-YYYY-MM.png), listed only while the viewer
+ *    is a staff member and the default choice of ของฉัน. Every segment shows its stored picture(s) itself (Portable;
+ *    กลางวัน → IPD + ER; ภารกิจ; ประจำ Station; ของฉัน) — the export node scaled to the content width (fitPictures after every
+ *    render, a ResizeObserver of the screen), "บันทึกรูป PNG" under it, a tap opens the full-screen viewer (natural size,
+ *    a pane that scrolls both ways, "ปิด" with chevron-down; UiKit.sheet). The Supervisor keeps the day tables / roster
+ *    editor under the picture; everyone else gets the old list behind "ดูแบบรายการ" (collapsed; ของฉัน for everyone). The
+ *    picture markup is memoised per kind on its inputs (exportKey: stored duties / roster, holidays, eligible, viewer, leaves).
  *  - core.station.setProposer(date → proposeDay(plan.proposalInput(date, 'fresh')) | null): null without a roster for
  *    the month or on a non-working day; memoised on the full engine input.
  *  - Panel 'proposal' (order 20) on วันนี้, Supervisor only, today or later: the active proposal (notes, unfilled,
@@ -74,15 +84,18 @@
   ];
   const LUNCH = ['er', 'ipd'];
   const LUNCH_LABEL = { er: 'ER', ipd: 'IPD' };
-  /** R4 §2.3: the five pictures in the unit's format (choice id, label in the sheet, file name stem). */
+  /** R4 §2.3: the pictures in the unit's format (choice id, label in the sheet, file name stem); R4.1: + ตารางเวรของฉัน. */
   const EXPORT_KINDS = [
     { id: 'roster', label: 'ตารางรายชื่อประจำ Station', file: 'ตารางรายชื่อ' },
     { id: 'portable', label: 'ตาราง Portable', file: 'ตาราง-Portable' },
     { id: 'mission', label: 'ตารางภารกิจพิเศษ', file: 'ตารางภารกิจพิเศษ' },
     { id: 'ipd', label: 'เวรกลางวัน X-RAY IPD', file: 'เวรกลางวัน-IPD' },
-    { id: 'er', label: 'เวรกลางวัน X-RAY ER', file: 'เวรกลางวัน-ER' }
+    { id: 'er', label: 'เวรกลางวัน X-RAY ER', file: 'เวรกลางวัน-ER' },
+    { id: 'mine', label: 'ตารางเวรของฉัน', file: 'ตารางเวรของฉัน' }   // R4.1: the viewer's own month (listed for staff only)
   ];
-  const EXPORT_DEFAULT = { roster: 'roster', portable: 'portable', mine: 'portable', mission: 'mission', lunch: 'ipd' };
+  const EXPORT_DEFAULT = { roster: 'roster', portable: 'portable', mine: 'mine', mission: 'mission', lunch: 'ipd' };
+  /** R4.1: the pictures shown inside each segment (the same nodes as the export). */
+  const SEG_PICS = { portable: ['portable'], lunch: ['ipd', 'er'], mission: ['mission'], roster: ['roster'], mine: ['mine'] };
   /** Rows of picture (1) in the unit's order and spelling. */
   const EXPORT_ROSTER_ROWS = [
     { id: 'ipd', label: 'IPD' }, { id: 'portable', label: 'PORTABLE' }, { id: 'er', label: 'ER' }, { id: 'us', label: 'US' },
@@ -101,6 +114,7 @@
     noDuties: 'ยังไม่ได้สร้างตารางเวรของเดือนนี้',
     mineNone: 'ยังไม่มีตารางเวรของเดือนนี้',
     mineEmpty: 'เดือนนี้คุณไม่มีสาย Portable / เวรกลางวัน / ภารกิจพิเศษ',
+    mineNoEntry: 'เดือนนี้คุณไม่มีเวรหรือวันลา',
     edited: 'แก้ในร่างแล้ว — กดบันทึกด้านล่างเพื่อให้ทุกคนเห็น',
     nextStep: 'ขั้นต่อไป: สร้างตารางเวรของเดือนนี้',
     settingsHint: 'ยังไม่ได้ตั้งผู้ช่วย/ภารกิจพิเศษ? ไปที่ เมนู → ตั้งค่าการจัดเวร',
@@ -115,6 +129,9 @@
   let root = null;
   let sheetEl = null;            // the feature's sheet (generation / cell edit / R4 export), created on first use
   let exportObserver = null;     // R4: ResizeObserver of the export preview box while the export sheet is open
+  let viewerEl = null;           // R4.1: the full-screen picture viewer, created on first use
+  let picObserver = null;        // R4.1: ResizeObserver of the screen (the inline pictures follow its width)
+  const exportMemo = new Map();  // R4.1: kind → {key, html} — a picture is rebuilt only when its inputs change
   const ui = {
     month: '',                   // 'YYYY-MM' shown
     seg: '',                     // current segment id
@@ -123,7 +140,8 @@
     sheet: null,                 // {kind: 'gen'} | {kind: 'edit', date, cell, key}
     suggest: '',                 // the hint under the edit sheet's picker ("หาคนแทน" result)
     scrollToday: false,          // FIX-RO R-7: scroll today's row into view after the next render of a table
-    moved: false                 // FIX-RO R-1: the plan range was widened for another month (restored on hide)
+    moved: false,                // FIX-RO R-1: the plan range was widened for another month (restored on hide)
+    list: Object.create(null)    // R4.1: segment → true while its "ดูแบบรายการ" list is open (staff; ของฉัน for everyone)
   };
   const drafts = { roster: Object.create(null), duties: Object.create(null), loaded: Object.create(null) };
   const memo = new Map();        // proposer: date → {key, res}
@@ -501,6 +519,7 @@
     }
     c.setHtml(el, `<div class="space-y-3 md:max-w-3xl md:mx-auto" data-roster-screen data-seg="${esc(ui.seg)}" data-month="${esc(m)}" data-state="${state}">${html}</div>`);
     syncOffsets();
+    fitPictures();
     if (state === 'ready') scrollToToday(el, c);
   }
   /** FIX-RO R-7: the tables (and the agenda) open at today's row in the current month — once per month / segment entry. */
@@ -656,7 +675,7 @@
 
   /* ---------------------------------------------------------------- segments */
   function segHtml(c) {
-    // R4: the pictures are offered on every segment (ประจำ Station → picture 1, ของฉัน → Portable)
+    // R4: the pictures are offered on every segment (ประจำ Station → picture 1, ของฉัน → ตารางเวรของฉัน, R4.1)
     if (ui.seg === 'roster') return rosterSegHtml(c) + exportsHtml(c);
     if (ui.seg === 'mine') return mineHtml(c) + exportsHtml(c);
     const k = K();
@@ -680,8 +699,14 @@
         (p.roster(m) ? `<button type="button" class="${k.btn} ${k.btnTonal}" data-roster-act="gen-open">${icon('wand', 'w-5 h-5')}${storedCount(m) ? 'สร้างใหม่ตั้งแต่วันที่…' : 'สร้างอัตโนมัติทั้งเดือน'}</button>` : '') +
         `</div>`;
     }
-    html += ui.seg === 'portable' ? portableHtml(c) : ui.seg === 'lunch' ? lunchHtml(c) : missionHtml(c);
-    if (sup && canEdit()) html += `<p class="${k.textMeta} px-1">แตะช่องในตารางเพื่อแก้ไข — การแก้ไขเป็นร่างจนกว่าจะกดบันทึก</p>`;
+    // R4.1: the unit-format picture(s) of the segment first (stored data); the day table below it for the Supervisor (who
+    // edits through it), behind "ดูแบบรายการ" for everyone else
+    html += segPicsHtml(ui.seg);
+    const table = () => (ui.seg === 'portable' ? portableHtml(c) : ui.seg === 'lunch' ? lunchHtml(c) : missionHtml(c));
+    if (sup) {
+      html += table();
+      if (canEdit()) html += `<p class="${k.textMeta} px-1">แตะช่องในตารางเพื่อแก้ไข — การแก้ไขเป็นร่างจนกว่าจะกดบันทึก</p>`;
+    } else html += listToggleHtml(ui.seg, table);
     html += exportsHtml(c);
     return html;
   }
@@ -690,6 +715,18 @@
     const k = K();
     return `<div class="${k.note}" data-roster-settings-hint>${icon('sliders', 'w-5 h-5 shrink-0 mt-0.5')}<div class="min-w-0 flex-1"><p>${esc(MSG.settingsHint)}</p>` +
       `<button type="button" class="${k.btn} ${k.btnGhost} ${k.btnCompact} -ml-3" data-roster-act="settings">เปิดตั้งค่าการจัดเวร${icon('chevron-right', 'w-4 h-4')}</button></div></div>`;
+  }
+  /** R4.1: the stored pictures of a segment (none while their data is missing). */
+  function segPicsHtml(seg) {
+    return (SEG_PICS[seg] || []).filter(kind => exportListed(kind) && exportAvailable(kind, ui.month)).map(picHtml).join('');
+  }
+  /** R4.1: "ดูแบบรายการ" — the old day list, collapsed by default; `inner` is built only while it is open. */
+  function listToggleHtml(seg, inner) {
+    const k = K();
+    const open = !!ui.list[seg];
+    return `<button type="button" class="${k.btn} ${k.btnSecondary} w-full" data-roster-act="list" data-list-seg="${esc(seg)}" aria-expanded="${open}">` +
+      `${icon(open ? 'chevron-up' : 'chevron-down', 'w-5 h-5')}${open ? 'ซ่อนแบบรายการ' : 'ดูแบบรายการ'}</button>` +
+      (open ? `<div class="space-y-3" data-roster-list="${esc(seg)}">${inner()}</div>` : '');
   }
   function emptyCard(kind, ic, title, hint, action) {
     const k = K();
@@ -939,8 +976,10 @@
     if (!ro && !storedCount(m)) return emptyCard('mine-none', 'calendar', MSG.mineNone, MSG.staffNone);
     // re-review 2: a month with a roster but no generated duties has no schedule yet — not "you have no duties"
     if (!storedCount(m)) return head + emptyCard('mine-none', 'calendar', MSG.mineNone, MSG.staffNone);
-    if (!items.length) return head + emptyCard('mine', 'calendar-check', MSG.mineEmpty, '');
-    return head + `<ul class="${k.list}" data-roster-agenda>${items.join('')}</ul>`;
+    // R4.1: the picture "ตารางเวรของฉัน" is the main view; the agenda is behind "ดูแบบรายการ" (for everyone: nobody edits here)
+    const pic = segPicsHtml('mine');
+    if (!items.length && !pic) return head + emptyCard('mine', 'calendar-check', MSG.mineEmpty, '');
+    return head + pic + listToggleHtml('mine', () => (items.length ? `<ul class="${k.list}" data-roster-agenda>${items.join('')}</ul>` : emptyCard('mine', 'calendar-check', MSG.mineEmpty, '')));
   }
 
   /* ---------------------------------------------------------------- คนประจำ */
@@ -973,7 +1012,10 @@
     } else if (!info.stored) {
       return emptyCard('no-roster', 'users', MSG.noRoster, '');
     }
-    html += U().STATIONS.map(st => {
+    // R4.1: the stored roster as the unit's picture first; the editor (Supervisor) or the station list behind
+    // "ดูแบบรายการ" (everyone else) below it
+    const pic = segPicsHtml('roster');
+    const cards = () => U().STATIONS.map(st => {
       const names = model.stations[st.id];
       const rows = names.map((n, i) => {
         const lock = lockedOf(n);
@@ -1029,7 +1071,8 @@
         (st.id === 'portable' || st.id === 'er' || st.id === 'ipd' ? `<p class="${k.textMeta} mt-1">ลำดับนี้ใช้หมุนสาย Portable / เวรกลางวัน</p>` : '') +
         `<div class="mt-1 divide-y divide-brand-50">${rows || `<p class="py-2 ${k.textMeta}">ยังไม่มีคนประจำ</p>`}</div>${avoidHtml}${add}${lunch}</section>`;
     }).join('');
-    return html;
+    html += c.isSup() ? cards() : listToggleHtml('roster', cards);
+    return pic + html;
   }
 
   function onRosterAction(c, act, st, i) {
@@ -1550,11 +1593,76 @@
    * pastel theme), 880 px wide, drawn at scale 2. Names exactly as stored (no "(ลบแล้ว)"). Month = full Thai month, พ.ศ.
    */
   function exportNode(kind, m) {
-    const node = document.createElement('div');
-    node.setAttribute('data-roster-export', kind);
-    node.style.cssText = 'width:' + EXPORT_WIDTH + 'px;box-sizing:border-box;padding:20px 24px 24px;background:#ffffff;color:#000000;font-family:' + EXPORT_FONT + ';';
-    node.innerHTML = kind === 'roster' ? rosterExportHtml(m) : calendarExportHtml(kind, m);
-    return node;
+    const t = document.createElement('div');
+    t.innerHTML = exportNodeHtml(kind, m, '');
+    return t.firstElementChild;
+  }
+  /** The picture's outer element as markup (`extra`: more inline style, e.g. the absolute position of an inline picture). */
+  function exportNodeHtml(kind, m, extra) {
+    // the font stack holds double quotes: the style attribute is escaped
+    const style = 'width:' + EXPORT_WIDTH + 'px;box-sizing:border-box;padding:20px 24px 24px;background:#ffffff;color:#000000;font-family:' + EXPORT_FONT + ';' + (extra || '');
+    return `<div data-roster-export="${kind}" style="${esc(style)}">` +
+      exportInner(kind, m) + '</div>';
+  }
+  /** R4.1: the picture's content, memoised per kind on its inputs (stored data, holidays, viewer, leaves, …). */
+  function exportInner(kind, m) {
+    const key = exportKey(kind, m);
+    const hit = exportMemo.get(kind);
+    if (hit && hit.key === key) return hit.html;
+    const html = kind === 'roster' ? rosterExportHtml(m) : calendarExportHtml(kind, m);
+    exportMemo.set(kind, { key, html });
+    return html;
+  }
+  function exportKey(kind, m) {
+    const p = P();
+    const r = rangeOf(m);
+    const parts = [kind, m];
+    if (kind === 'roster') parts.push(p.roster(m));
+    else {
+      const from = U().addDays(r.from, -6), to = U().addDays(r.to, 6);
+      parts.push(p.duties(m), Array.from(p.holidays().entries()).filter(e => e[0] >= from && e[0] <= to), core.state.stationCounts.portable || 3);
+      if (kind === 'mission') parts.push(p.eligible());
+      if (kind === 'mine') {
+        const me = core.myName();
+        parts.push(me, p.leaves(r.from, r.to).filter(l => l && l.staff === me).map(l => [l.date, l.type, l.status || '', l.detail || '', l.start || '', l.end || '']));
+      }
+    }
+    return JSON.stringify(parts);
+  }
+  /** R4.1: "ตารางเวรของฉัน" is the viewer's own schedule: listed only when the viewer is a staff member. */
+  function viewerIsStaff() { const me = core.myName(); return !!me && core.staff().some(x => x.name === me); }
+  function exportListed(kind) { return kind !== 'mine' || viewerIsStaff(); }
+  function exportKindsListed() { return EXPORT_KINDS.filter(k => exportListed(k.id)); }
+  /**
+   * R4.1: the viewer's own entries of month m, per date: {portable: {line, assistant} | null, lunch: ['IPD (ER)', …],
+   * mission: {partner} | null, leave: type | ''} (stored duties; a blocking or a partial approved leave).
+   */
+  function mineEntries(m) {
+    const p = P();
+    const me = core.myName();
+    const r = rangeOf(m);
+    const out = {};
+    U().eachDate(r.from, r.to).forEach(date => {
+      const duty = p.duty(date);
+      const e = { portable: null, lunch: [], mission: null, leave: '' };
+      if (duty && me) {
+        const l = sortedLines(duty.lines).filter(x => x.tech === me)[0];
+        if (l) e.portable = { line: l.line, assistant: l.assistant || '' };
+        if (duty.lunch) ['ipd', 'er'].forEach(st => {
+          const sl = duty.lunch[st];
+          if (!sl) return;
+          const place = sl.tech === me ? sl.place : sl.tech2 === me ? sl.place2 : null;
+          if (place !== null) e.lunch.push(LUNCH_LABEL[st] + (place ? ' (' + place + ')' : ''));
+        });
+        if ((duty.mission || []).indexOf(me) >= 0) e.mission = { partner: duty.mission.filter(n => n && n !== me)[0] || '' };
+      }
+      if (me) {
+        const av = PE.availabilityOn(p.leaves(date, date), date);
+        e.leave = av.absent.has(me) ? av.absent.get(me) : av.partial.has(me) ? av.partial.get(me).type : '';
+      }
+      if (e.portable || e.lunch.length || e.mission || e.leave) out[date] = e;
+    });
+    return out;
   }
   function monthParts(m) { const t = U().thaiMonthYear(m).split(' '); return { name: t[0] || '', year: t[1] || '' }; }
   /** (1) ตารางรายชื่อ: STATION × RT1…RTn (n = max(6, the longest station list)), white 2 px cell borders. */
@@ -1618,6 +1726,29 @@
           const ls = sortedLines((duty(d) || {}).lines);
           const out = [];
           for (let i = 1; i <= L; i++) { const l = ls.filter(x => x.line === i)[0]; out.push(l ? l.tech : ''); if (asst) out.push(l ? l.assistant : ''); }
+          return out;
+        }) }))
+      };
+    }
+    if (kind === 'mine') {
+      const me = core.myName();
+      const ent = mineEntries(m);
+      const has = key => Object.keys(ent).some(d => key(ent[d]));
+      const pAsst = has(e => e.portable && e.portable.assistant);
+      const rows = [];
+      if (has(e => e.portable)) rows.push({ labels: pAsst ? ['Portable', ''] : ['Portable'], cell: e => (e && e.portable ? ['สาย ' + e.portable.line].concat(pAsst ? [e.portable.assistant ? 'ผช. ' + e.portable.assistant : ''] : []) : []) });
+      if (has(e => e.lunch.length)) rows.push({ labels: ['เวรกลางวัน'], cell: e => [e ? e.lunch.join(', ') : ''] });
+      if (has(e => e.mission)) rows.push({ labels: ['ภารกิจพิเศษ', ''], cell: e => (e && e.mission ? ['ภารกิจ', e.mission.partner] : []) });
+      if (has(e => e.leave)) rows.push({ labels: ['ลา'], cell: e => [e ? e.leave : ''] });
+      const weekend = Object.keys(ent).some(d => { const w = weekday(d); return (w === 0 || w === 6) && ent[d].mission; });
+      const cols = weekend ? [1, 2, 3, 4, 5, 6, 0] : WEEK;
+      const labels = [].concat.apply([], rows.map(x => x.labels));
+      return {
+        title: 'ตารางเวรของ ' + me + ' ' + suffix, cols, showOnHoliday: true,
+        weeks: exportWeeks(m, cols).map(dates => ({ dates, labels, cells: cellsOf(dates, d => {
+          const e = inMonth(d) ? ent[d] || null : null;
+          const out = [];
+          rows.forEach(x => { const v = x.cell(e); x.labels.forEach((_, i) => out.push(v[i] || '')); });
           return out;
         }) }))
       };
@@ -1696,17 +1827,27 @@
     return html;
   }
   function exportFile(kind, m) { const k = EXPORT_KINDS.filter(x => x.id === kind)[0]; return (k ? k.file : 'ตารางเวร') + '-' + m + '.png'; }
-  /** A choice without data is disabled: (1) needs the month's stored roster, (2)–(5) at least one stored duty. */
-  function exportAvailable(kind, m) { const p = P(); return kind === 'roster' ? !!(p && p.roster(m)) : storedCount(m) > 0; }
+  /**
+   * A choice without data is disabled: (1) needs the month's stored roster, (2)–(5) at least one stored duty, R4.1 ของฉัน a
+   * stored duty and at least one entry of the viewer (duty or leave) in the month.
+   */
+  function exportAvailable(kind, m) {
+    const p = P();
+    if (!p) return false;
+    if (kind === 'roster') return !!p.roster(m);
+    if (!storedCount(m)) return false;
+    return kind !== 'mine' || (viewerIsStaff() && Object.keys(mineEntries(m)).length > 0);
+  }
   function exportDefault(m) {
-    const want = EXPORT_DEFAULT[ui.seg] || 'portable';
+    let want = EXPORT_DEFAULT[ui.seg] || 'portable';
+    if (!exportListed(want)) want = 'portable';
     if (exportAvailable(want, m)) return want;
-    const first = EXPORT_KINDS.filter(k => exportAvailable(k.id, m))[0];
+    const first = exportKindsListed().filter(k => exportAvailable(k.id, m))[0];
     return first ? first.id : want;
   }
   function exportPickHtml(kind, on, ok) {
     const k = EXPORT_KINDS.filter(x => x.id === kind)[0];
-    const hint = ok ? '' : kind === 'roster' ? 'ยังไม่ได้บันทึกคนประจำของเดือนนี้' : 'ยังไม่มีตารางเวรที่บันทึกของเดือนนี้';
+    const hint = ok ? '' : kind === 'roster' ? 'ยังไม่ได้บันทึกคนประจำของเดือนนี้' : kind === 'mine' && storedCount(ui.month) ? MSG.mineNoEntry : 'ยังไม่มีตารางเวรที่บันทึกของเดือนนี้';
     return `<button type="button" role="radio" aria-checked="${on}" data-roster-export-pick="${kind}"${ok ? '' : ' disabled aria-disabled="true"'} ` +
       `class="w-full min-h-[44px] flex items-center gap-3 px-3 py-2 rounded-2xl border-2 text-left ${on ? 'border-brand-400 bg-brand-50' : 'border-ink-200 bg-white'} disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400">` +
       `<span class="w-5 h-5 shrink-0 rounded-full border-2 ${on ? 'border-brand-600' : 'border-slate-400'} flex items-center justify-center" aria-hidden="true">${on ? '<span class="w-2.5 h-2.5 rounded-full bg-brand-600"></span>' : ''}</span>` +
@@ -1714,13 +1855,13 @@
       (hint ? `<span class="block text-[0.8125rem] leading-5 text-slate-500" data-roster-export-hint>${esc(hint)}</span>` : '') + '</span></button>';
   }
   function exportPicksHtml(m, choice) {
-    return EXPORT_KINDS.map(k => exportPickHtml(k.id, k.id === choice, exportAvailable(k.id, m))).join('');
+    return exportKindsListed().map(k => exportPickHtml(k.id, k.id === choice, exportAvailable(k.id, m))).join('');
   }
   function openExport(c) {
     const m = ui.month;
     const k = K();
     const choice = exportDefault(m);
-    const any = EXPORT_KINDS.some(x => exportAvailable(x.id, m));
+    const any = exportKindsListed().some(x => exportAvailable(x.id, m));
     ui.sheet = { kind: 'export', month: m, choice };
     const body = `<p class="${k.textMeta}">${esc(U().thaiMonthYear(m))} — ตารางที่บันทึกแล้วเท่านั้น ในรูปแบบตารางของหน่วยงาน</p>` +
       `<div class="space-y-2" role="radiogroup" aria-label="แบบตาราง" data-roster-export-picks>${exportPicksHtml(m, choice)}</div>` +
@@ -1792,7 +1933,7 @@
   }
   function pickExport(kind) {
     const s = ui.sheet;
-    if (!s || s.kind !== 'export' || !EXPORT_KINDS.some(k => k.id === kind) || !exportAvailable(kind, s.month)) return;
+    if (!s || s.kind !== 'export' || !exportKindsListed().some(k => k.id === kind) || !exportAvailable(kind, s.month)) return;
     s.choice = kind;
     sheetEl.querySelectorAll('[data-roster-export-pick]').forEach(b => {
       const on = b.dataset.rosterExportPick === kind;
@@ -1831,6 +1972,68 @@
     });
   }
 
+  /* ---------------------------------------------------------------- R4.1: the pictures inside the segments + viewer */
+  function exportLabel(kind) { const k = EXPORT_KINDS.filter(x => x.id === kind)[0]; return k ? k.label : ''; }
+  /** One picture: the export node scaled to the content width (fitPictures), a transparent button over it opens the viewer. */
+  function picHtml(kind) {
+    const k = K();
+    const busy = ui.busy === 'image';
+    return `<figure class="rounded-3xl border-2 border-brand-100 bg-white p-2 space-y-2" data-roster-pic="${kind}">` +
+      `<div class="relative w-full overflow-hidden rounded-xl border border-ink-200 bg-white" data-roster-pic-box>` +
+      exportNodeHtml(kind, ui.month, 'position:absolute;left:0;top:0;transform-origin:0 0;') +
+      `<button type="button" class="absolute inset-0 w-full h-full rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400" data-roster-pic-open="${kind}" aria-label="${esc('ดูรูป ' + exportLabel(kind) + ' ขนาดเต็ม')}"></button></div>` +
+      `<figcaption class="flex flex-wrap items-center gap-2 px-1"><span class="flex-1 min-w-0 ${k.textMeta}">${esc(exportLabel(kind))} · แตะรูปเพื่อดูขนาดเต็ม</span>` +
+      `<button type="button" class="${k.btn} ${k.btnSecondary} ${k.btnCompact} shrink-0" data-roster-pic-save="${kind}"${busy ? ' disabled aria-busy="true"' : ''}>${icon('image', 'w-5 h-5')}บันทึกรูป PNG</button></figcaption></figure>`;
+  }
+  /** Scales every inline picture to its box (no sideways page scroll); the box takes the scaled height. */
+  function fitPictures() {
+    if (!root) return;
+    root.querySelectorAll('[data-roster-pic-box]').forEach(box => {
+      const node = box.firstElementChild;
+      const w = box.clientWidth;
+      if (!node || !w) return;
+      const sc = Math.min(1, w / EXPORT_WIDTH);
+      const t = 'scale(' + sc + ')';
+      if (node.style.transform !== t) node.style.transform = t;
+      const h = Math.ceil(node.offsetHeight * sc) + 'px';
+      if (box.style.height !== h) box.style.height = h;
+    });
+  }
+  function savePicture(c, kind) {
+    const m = ui.month;
+    if (!exportListed(kind) || !exportAvailable(kind, m)) return;
+    runExport(c, 'image', c2 => c2.shareImage(exportNode(kind, m), exportFile(kind, m), { width: EXPORT_WIDTH, scale: EXPORT_SCALE }));
+  }
+  /** The full-screen viewer: the picture at its natural size in a pane that scrolls both ways; "ปิด" (chevron-down). */
+  function openViewer(c, kind) {
+    const m = ui.month;
+    if (!exportListed(kind) || !exportAvailable(kind, m)) return;
+    const k = K();
+    if (!viewerEl || !viewerEl.isConnected) {
+      viewerEl = document.createElement('div');
+      viewerEl.className = 'fixed inset-0 z-[70] hidden items-stretch bg-white';
+      viewerEl.setAttribute('role', 'dialog');
+      viewerEl.setAttribute('aria-modal', 'true');
+      viewerEl.setAttribute('aria-labelledby', 'rosterViewerTitle');
+      viewerEl.dataset.rosterViewer = '';
+      viewerEl.addEventListener('click', e => {
+        const b = e.target && e.target.closest ? e.target.closest('[data-roster-viewer-save]') : null;
+        if (b && !b.disabled) savePicture(core, b.dataset.rosterViewerSave);
+      });
+      document.body.appendChild(viewerEl);
+    }
+    viewerEl.dataset.rosterViewer = kind;
+    viewerEl.innerHTML = `<div class="flex flex-col w-full h-full bg-white" data-sheet-panel>` +
+      `<div class="flex-none flex items-center gap-2 px-3 py-2 border-b-2 border-brand-100 uk-safe-t">` +
+      `<h2 id="rosterViewerTitle" class="flex-1 min-w-0 outline-none ${k.titleCard} ${k.wrapAnywhere}" tabindex="-1" data-sheet-title>${esc(exportLabel(kind) + ' · ' + U().thaiMonthYear(m))}</h2>` +
+      `<button type="button" class="${k.btn} ${k.btnSecondary} ${k.btnCompact} shrink-0" data-sheet-close aria-label="ปิด">${icon('chevron-down', 'w-5 h-5')}ปิด</button></div>` +
+      `<div class="flex-1 min-h-0 overflow-auto overscroll-contain bg-slate-100" data-roster-viewer-scroll><div class="p-3" style="width:max-content">${exportNodeHtml(kind, m, '')}</div></div>` +
+      `<div class="flex-none flex gap-2 px-3 pt-2 pb-3 border-t border-brand-100 bg-white uk-safe-b">` +
+      `<button type="button" class="${k.btn} ${k.btnPrimary} flex-1" data-roster-viewer-save="${kind}">${icon('image', 'w-5 h-5')}บันทึกรูป PNG</button></div></div>`;
+    core.Kit.sheet.open(viewerEl, { initialFocus: '[data-sheet-title]' });
+  }
+  function closeViewer() { if (viewerEl && core.Kit.sheet.isOpen(viewerEl)) core.Kit.sheet.close(viewerEl, 'api'); }
+
   /* ---------------------------------------------------------------- screen events */
   function onRootClick(e) {
     const c = core;
@@ -1854,9 +2057,14 @@
     if (rr && !rr.disabled) { onRosterAction(c, rr.dataset.rosterR, rr.dataset.st, +rr.dataset.i); return; }
     const la = t.closest('[data-roster-la]');
     if (la && !la.disabled) { onLunchAsstAction(c, la.dataset.rosterLa, la.dataset.st, +la.dataset.i); return; }
+    const po = t.closest('[data-roster-pic-open]');
+    if (po) { openViewer(c, po.dataset.rosterPicOpen); return; }
+    const ps = t.closest('[data-roster-pic-save]');
+    if (ps) { if (!ps.disabled) savePicture(c, ps.dataset.rosterPicSave); return; }
     const a = t.closest('[data-roster-act]');
     if (!a || a.disabled) return;
     const act = a.dataset.rosterAct;
+    if (act === 'list') { const sg = a.dataset.listSeg; ui.list[sg] = !ui.list[sg]; c.render(); return; }
     if (act === 'retry') { ensureMonth(c); return; }
     if (act === 'go-roster') { ui.seg = 'roster'; c.render(); return; }
     if (act === 'gen-open') { openGen(c); return; }
@@ -2062,7 +2270,7 @@
       c.station.addPanel({ id: 'proposal', order: 20, render: renderPanel });
       c.provide('plan.myDay', myDay);
       c.on('role', () => { memo.clear(); });
-      c.on('logout', () => { closeSheet(); });
+      c.on('logout', () => { closeSheet(); closeViewer(); });
     },
     mount(el) {
       root = el;
@@ -2071,8 +2279,20 @@
       const resync = () => {
         syncOffsets();
         fitExportPreview();
-        if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(() => { syncOffsets(); fitExportPreview(); });
+        fitPictures();
+        if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(() => { syncOffsets(); fitExportPreview(); fitPictures(); });
       };
+      // R4.1: the inline pictures follow the screen's width (a scrollbar, the rail, a hidden → shown screen); the fit runs in
+      // the next frame, never inside the observer's delivery
+      if (typeof window.ResizeObserver === 'function') {
+        let lastW = el.clientWidth;
+        picObserver = new window.ResizeObserver(() => {
+          if (el.clientWidth === lastW) return;
+          lastW = el.clientWidth;
+          if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(fitPictures); else setTimeout(fitPictures, 0);
+        });
+        picObserver.observe(el);
+      }
       window.addEventListener('resize', resync);
       window.addEventListener('orientationchange', resync);
       if (window.visualViewport && typeof window.visualViewport.addEventListener === 'function') window.visualViewport.addEventListener('resize', resync);
@@ -2090,13 +2310,18 @@
     },
     hide(c) {
       closeSheet();
+      closeViewer();
       dropAllDrafts();   // canLeave asked first (R2-SPEC §4.4)
       restoreRange(c || core);
     },
     canLeave() { return anyDraft() ? MSG.leave : true; },
     reset() {
       closeSheet();
+      closeViewer();
       if (sheetEl) { sheetEl.remove(); sheetEl = null; }
+      if (viewerEl) { viewerEl.remove(); viewerEl = null; }
+      exportMemo.clear();
+      Object.keys(ui.list).forEach(k => delete ui.list[k]);
       ui.month = ''; ui.seg = ''; ui.busy = ''; ui.showConflicts = false; ui.sheet = null; ui.suggest = ''; ui.scrollToday = false; ui.moved = false;
       Object.keys(drafts.roster).forEach(k => delete drafts.roster[k]);
       Object.keys(drafts.duties).forEach(k => delete drafts.duties[k]);

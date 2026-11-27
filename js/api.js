@@ -21,7 +21,7 @@
  *  Api.inflight / Api.onActivity(fn(count))  in-flight request tracking
  *  Api.serverVersionOk       null before the first answer; false while answers lack the action/requestId echo
  *                            (Code.gs older than 2.1.0)
- *  Api.clientVersion         CLIENT_VERSION = the web release (R5: 3.4.0), sent as clientVersion with every request
+ *  Api.clientVersion         CLIENT_VERSION = the web release (R4.1: 3.4.1), sent as clientVersion with every request
  *
  * Transport: POST with Content-Type text/plain (a "simple" CORS request, so
  * no preflight — Apps Script cannot answer OPTIONS). window.fetch is looked
@@ -35,7 +35,7 @@
 (function (global) {
   'use strict';
 
-  const CLIENT_VERSION = '3.4.0';
+  const CLIENT_VERSION = '3.4.1';
   const MSG_NETWORK = 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ กรุณาตรวจสอบอินเทอร์เน็ต';
   const MSG_BAD_DEPLOYMENT = 'การตั้งค่า Web App ไม่ถูกต้อง (ต้องตั้งค่า Who has access เป็น Anyone)';
   const MSG_BAD_RESPONSE = 'เซิร์ฟเวอร์ตอบกลับผิดพลาดชั่วคราว';
